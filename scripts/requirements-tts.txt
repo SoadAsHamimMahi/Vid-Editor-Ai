@@ -1,0 +1,13 @@
+# Optional Local Neural TTS Dependencies
+# PyTorch (CUDA recommended for GPU acceleration)
+torch>=2.2.0
+torchaudio>=2.2.0
+
+# IndicF5 / F5-TTS
+f5-tts>=0.1.0
+
+# Edge TTS fallback
+edge-tts>=6.1.12
+
+# Resemble AI Chatterbox (if cloning with Chatterbox)
+# resemble-chatterbox
