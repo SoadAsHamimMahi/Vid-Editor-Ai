@@ -2,6 +2,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import ffmpegPath from 'ffmpeg-static';
 import path from 'path';
 import fs from 'fs-extra';
+import { spawn } from 'child_process';
 import { Project, ExportSettings, RenderProgress, AspectRatio, ExportResolution, SceneSegment, AudioMasteringPreset } from '../../src/types';
 
 export class FFmpegService {
@@ -550,7 +551,6 @@ export class FFmpegService {
         }
 
         const resolvedFfmpeg = ffmpegPath ? ffmpegPath.replace('app.asar', 'app.asar.unpacked') : 'ffmpeg';
-        const { spawn } = require('child_process');
         const proc = spawn(resolvedFfmpeg, ['-i', audioPath]);
 
         let output = '';
@@ -587,7 +587,6 @@ export class FFmpegService {
     return new Promise((resolve) => {
       try {
         const resolvedFfmpeg = ffmpegPath ? ffmpegPath.replace('app.asar', 'app.asar.unpacked') : 'ffmpeg';
-        const { spawn } = require('child_process');
         const proc = spawn(resolvedFfmpeg, [
           '-y',
           '-i', inputPath,
@@ -628,7 +627,6 @@ export class FFmpegService {
     return new Promise((resolve) => {
       try {
         const resolvedFfmpeg = ffmpegPath ? ffmpegPath.replace('app.asar', 'app.asar.unpacked') : 'ffmpeg';
-        const { spawn } = require('child_process');
         const proc = spawn(resolvedFfmpeg, [
           '-i', inputPath,
           '-af', `silencedetect=noise=${noiseThresholdDb}dB:d=${minDurationSec}`,
@@ -691,11 +689,25 @@ export class FFmpegService {
         }
 
         const resolvedFfmpeg = ffmpegPath ? ffmpegPath.replace('app.asar', 'app.asar.unpacked') : 'ffmpeg';
-        const { spawn } = require('child_process');
 
         let filterChain = '';
 
-        if (preset === 'podcast_warmth') {
+        if (preset === 'broadcast_studio') {
+          // 8-Stage Broadcast Channel Strip:
+          // 75Hz HPF rumble cut, 150Hz chest warmth (+2dB), 650Hz boxiness scoop (-1.5dB),
+          // 3.2kHz consonant clarity (+2.5dB), 6.8kHz sibilance de-esser (-3.0dB),
+          // 10.5kHz air & silky sheen (+1.8dB), 2.2:1 optical compression, -16 LUFS broadcast standard
+          filterChain = [
+            'highpass=f=75',
+            'equalizer=f=150:width_type=q:width=1.2:g=2.0',
+            'equalizer=f=650:width_type=q:width=1.8:g=-1.5',
+            'equalizer=f=3200:width_type=q:width=1.4:g=2.5',
+            'equalizer=f=6800:width_type=q:width=1.6:g=-3.0',
+            'equalizer=f=10500:width_type=q:width=0.9:g=1.8',
+            'acompressor=threshold=0.15:ratio=2.2:attack=15:release=140:makeup=1.4',
+            'loudnorm=I=-16:TP=-1.0:LRA=7'
+          ].join(',');
+        } else if (preset === 'podcast_warmth') {
           // 60Hz cut, 150Hz chest warmth (+2.5dB), 3.5kHz clarity (+2dB), 7.5kHz de-esser (-2.5dB), smooth compression, -14 LUFS
           filterChain = [
             'highpass=f=60',
@@ -705,7 +717,7 @@ export class FFmpegService {
             'acompressor=threshold=0.125:ratio=3:attack=15:release=200',
             'loudnorm=I=-14:LRA=7:TP=-1.5'
           ].join(',');
-        } else if (preset === 'cinema_trailer') {
+        } else if (preset === 'cinema_trailer' || preset === 'cinematic_bass') {
           // 40Hz cut, 90Hz deep sub baritone (+4dB), 300Hz cut mud (-2dB), 10kHz air (+2dB), aggressive punch compression, -14 LUFS
           filterChain = [
             'highpass=f=40',
@@ -732,6 +744,63 @@ export class FFmpegService {
             'equalizer=f=1200:width_type=h:width=400:g=4.0',
             'acompressor=threshold=0.1:ratio=5:attack=5:release=50',
             'loudnorm=I=-16:LRA=5:TP=-2.0'
+          ].join(',');
+        } else if (preset === 'late_night_warmth') {
+          // 🌙 Late-Night Meditative Biographer DSP Strip:
+          // 1. 70Hz highpass to eliminate sub-audible mic rumble
+          // 2. 160Hz subtle chest warmth boost (+1.8dB) for cozy resonant baritone
+          // 3. 650Hz slight boxiness scoop (-1.8dB) for crystal voice separation
+          // 4. 3.2kHz crystal consonant clarity (+2.4dB) for effortless, intelligible diction
+          // 5. 7.5kHz gentle de-esser (-1.8dB) to tame sharp sibilance without muffling words
+          // 6. Smooth optical leveling compressor (ratio 2.0:1, attack 15ms, release 200ms)
+          // 7. -16 LUFS broadcast/podcast standard loudness normalization
+          filterChain = [
+            'highpass=f=70',
+            'equalizer=f=160:width_type=q:width=1.2:g=1.8',
+            'equalizer=f=650:width_type=q:width=1.8:g=-1.8',
+            'equalizer=f=3200:width_type=q:width=1.4:g=2.4',
+            'equalizer=f=7500:width_type=q:width=2.0:g=-1.8',
+            'acompressor=threshold=0.14:ratio=2.0:attack=15:release=200:makeup=1.2',
+            'loudnorm=I=-16:TP=-1.5:LRA=8'
+          ].join(',');
+        } else if (preset === 'deep_sleep_master') {
+          // 💤 Calm & Headspace True Deep Sleep / Bedtime Hypnosis Mastering Strip:
+          // 1. 70Hz highpass to remove sub-audible mic rumble
+          // 2. 150Hz gentle pillow warmth (+1.6dB) for comforting resonance without boomy mud
+          // 3. 600Hz gentle mid scoop (-1.6dB) to remove boxy clutter
+          // 4. 3.0kHz soft whispered consonant articulation (+2.0dB) so words are crystal clear
+          // 5. 7.0kHz de-esser (-2.0dB) to prevent sharp "s" / "t" earbud fatigue
+          // 6. Ultra-smooth optical leveling compressor (ratio 2.0:1, attack 25ms, release 300ms)
+          // 7. -17 LUFS restful sleep loudness normalization (TP = -1.8 dBFS, LRA = 6)
+          filterChain = [
+            'highpass=f=70',
+            'equalizer=f=150:width_type=q:width=1.2:g=1.6',
+            'equalizer=f=600:width_type=q:width=1.8:g=-1.6',
+            'equalizer=f=3000:width_type=q:width=1.3:g=2.0',
+            'equalizer=f=7000:width_type=q:width=2.2:g=-2.0',
+            'acompressor=threshold=0.12:ratio=2.0:attack=25:release=300:makeup=1.1',
+            'loudnorm=I=-17:TP=-1.8:LRA=6'
+          ].join(',');
+        } else if (preset === 'deep_cinema_warmth') {
+          // 🎬 Marcus Deep Cinema Warmth — Competitor-Grade Cinematic Master Channel Strip:
+          // 1. 50Hz highpass: eliminates sub-audible HVAC & DC rumble while keeping chest body
+          // 2. 110Hz chest warmth (+2.8dB, Q=1.0): Shure SM7B proximity resonance — deep emotional weight
+          // 3. 450Hz boxiness scoop (-2.2dB, Q=1.5): clears telephone/cardboard mid-honk
+          // 4. 3000Hz vocal presence (+3.5dB, Q=1.2): upfront broadcast vocal clarity & intimate proximity
+          // 5. 5500Hz consonant articulation (+1.8dB, Q=1.5): crisp diction without harsh sibilance
+          // 6. 10000Hz air shelf (+2.5dB): studio top-end sheen and clarity
+          // 7. Optical leveling compressor (2.6:1, attack 15ms, release 180ms, makeup 2.8x): rich vocal density
+          // 8. Brickwall broadcast peak limiter (peak ceiling -0.06 dBFS matching competitor broadcast master)
+          filterChain = [
+            'highpass=f=50',
+            'equalizer=f=110:width_type=q:width=1.0:g=2.8',
+            'equalizer=f=450:width_type=q:width=1.5:g=-2.2',
+            'equalizer=f=3000:width_type=q:width=1.2:g=3.5',
+            'equalizer=f=5500:width_type=q:width=1.5:g=1.8',
+            'equalizer=f=10000:width_type=h:width=2500:g=2.5',
+            'acompressor=threshold=0.12:ratio=2.6:attack=15:release=180:makeup=2.8',
+            'alimiter=limit=1.0:attack=3:release=35:asc=1',
+            'volume=0.35dB'
           ].join(',');
         } else {
           filterChain = 'loudnorm=I=-14:LRA=8:TP=-1.5';
@@ -794,7 +863,6 @@ export class FFmpegService {
         }
 
         const resolvedFfmpeg = ffmpegPath ? ffmpegPath.replace('app.asar', 'app.asar.unpacked') : 'ffmpeg';
-        const { spawn } = require('child_process');
 
         // Create a temporary concat list file
         const tempDir = path.dirname(outputPath);

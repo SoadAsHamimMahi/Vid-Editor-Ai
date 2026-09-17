@@ -1,13 +1,20 @@
-# Optional Local Neural TTS Dependencies
+# Local Neural TTS & Speech Naturalizer Dependencies
 # PyTorch (CUDA recommended for GPU acceleration)
 torch>=2.2.0
 torchaudio>=2.2.0
 
-# IndicF5 / F5-TTS
+# IndicF5 / F5-TTS Flow Matching Neural Voice Cloning
 f5-tts>=0.1.0
+
+# Speech Naturalizer & Production DSP Mastering Harness
+numpy>=1.24.0
+scipy>=1.10.0
+soundfile>=0.12.1
+pydub>=0.25.1
+num2words>=0.5.13
 
 # Edge TTS fallback
 edge-tts>=6.1.12
 
-# Resemble AI Chatterbox (if cloning with Chatterbox)
+# Resemble AI Chatterbox (optional)
 # resemble-chatterbox

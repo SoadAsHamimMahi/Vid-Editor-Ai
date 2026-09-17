@@ -8,6 +8,8 @@ import { FFmpegService } from './services/ffmpegService';
 import { ProjectStorage } from './services/projectStorage';
 import { LLMDirectorService } from './services/llmDirectorService';
 import { TTSService } from './services/ttsService';
+import { ColabVideoService, ColabVideoJobRequest } from './services/colabVideoService';
+import { VideoEditorMcpServer } from './services/mcpServer';
 import { Project, ExportSettings } from '../src/types';
 
 const currentFile = fileURLToPath(import.meta.url);
@@ -19,6 +21,16 @@ fs.ensureDirSync(userDataPath);
 app.setPath('userData', userDataPath);
 app.commandLine.appendSwitch('disable-gpu-shader-disk-cache');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+// ─── ONNX Runtime DLL conflict fix (Windows only) ────────────────────────────
+// Problem: C:\Windows\System32\onnxruntime.dll (older system version) gets
+//          cached in the process DLL list before app-bundled v1.21.0 loads,
+//          causing "Failed to initialize ONNX Runtime API" on Kokoro TTS.
+// Fix: onnxruntime.dll + DirectML.dll are copied to the app exe directory
+//      (E:\Software\Video Generation Tool\) at build/deploy time. Windows
+//      always searches the exe directory before System32, regardless of caching.
+//      See: vite.config.ts postBuild hook that keeps these DLLs in sync.
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Register privileged custom scheme for media:// as a standard streaming scheme.
 protocol.registerSchemesAsPrivileged([
@@ -42,10 +54,49 @@ const ffmpegService = new FFmpegService();
 const projectStorage = new ProjectStorage();
 const llmDirectorService = new LLMDirectorService();
 const ttsService = new TTSService();
+const mcpServer = new VideoEditorMcpServer({
+  port: 32123,
+  projectStorage,
+  ttsService,
+  ffmpegService,
+  whisperService,
+  getMainWindow: () => mainWindow,
+});
 
-automatorPool.setProgressCallback((sceneId, status, mediaPath, error, mediaType) => {
+automatorPool.setProgressCallback((sceneId, status, mediaPath, error, mediaType, projectId) => {
+  // Directly persist ready or error states to the project's project.json on disk
+  if (projectId && mediaPath && status === 'ready') {
+    projectStorage.updateSceneMediaDirectly(
+      projectId,
+      sceneId,
+      mediaPath,
+      mediaType || 'image',
+      'ready'
+    ).catch((err) => console.error('[Main] Direct persistence error:', err));
+  } else if (projectId && status === 'error') {
+    projectStorage.updateSceneMediaDirectly(
+      projectId,
+      sceneId,
+      '',
+      mediaType || 'image',
+      'error',
+      error
+    ).catch((err) => console.error('[Main] Direct persistence error:', err));
+  } else if (projectId && status === 'pending') {
+    // Auto-retry: reset scene back to pending so it gets picked up in the next Agent Bulk click
+    projectStorage.updateSceneMediaDirectly(
+      projectId,
+      sceneId,
+      '',
+      mediaType || 'image',
+      'pending',
+      undefined
+    ).catch((err) => console.error('[Main] Direct persistence (pending reset) error:', err));
+  }
+
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('flow:job-progress', {
+      projectId,
       sceneId,
       status,
       imagePath: mediaType === 'video' ? undefined : mediaPath,
@@ -56,8 +107,46 @@ automatorPool.setProgressCallback((sceneId, status, mediaPath, error, mediaType)
   }
 });
 
+const colabVideoService = new ColabVideoService();
+
+colabVideoService.setProgressCallback((progress) => {
+  if (progress.projectId && progress.videoPath && progress.status === 'ready') {
+    projectStorage.updateSceneMediaDirectly(
+      progress.projectId,
+      progress.sceneId,
+      progress.videoPath,
+      'video',
+      'ready'
+    ).catch((err) => console.error('[Main] Colab direct persistence error:', err));
+  } else if (progress.projectId && progress.status === 'error') {
+    projectStorage.updateSceneMediaDirectly(
+      progress.projectId,
+      progress.sceneId,
+      '',
+      'video',
+      'error',
+      progress.error
+    ).catch((err) => console.error('[Main] Colab direct persistence error:', err));
+  }
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('colab:job-progress', progress);
+  }
+});
+
 function createWindow() {
+  // Resolve app icon path (ICO for Windows taskbar/title bar, PNG fallback for other OS)
+  const iconPath = process.env.VITE_DEV_SERVER_URL
+    ? path.join(currentDir, '..', 'public', 'icon.ico')
+    : path.join(currentDir, '..', 'dist', 'icon.ico');
+  const iconPngPath = process.env.VITE_DEV_SERVER_URL
+    ? path.join(currentDir, '..', 'public', 'icon.png')
+    : path.join(currentDir, '..', 'dist', 'icon.png');
+  const resolvedIcon = fs.existsSync(iconPath) ? iconPath : (fs.existsSync(iconPngPath) ? iconPngPath : undefined);
+
   mainWindow = new BrowserWindow({
+    title: 'CineFlow Studio',
+    icon: resolvedIcon,
     width: 1440,
     height: 900,
     minWidth: 1080,
@@ -272,6 +361,11 @@ app.whenReady().then(() => {
 
   createWindow();
 
+  // Start Video Editor MCP Server for ChatGPT / Claude
+  mcpServer.start().catch((err) => {
+    console.warn('[Main] MCP Server start warning:', err.message);
+  });
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -281,9 +375,17 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+app.on('before-quit', () => {
+  mcpServer.stop().catch(() => {});
+});
+
 // ==========================================
 // IPC HANDLERS
 // ==========================================
+
+ipcMain.handle('mcp:get-status', () => {
+  return mcpServer.getStatus();
+});
 
 // Browser CDP Pool Handlers
 ipcMain.handle('cdp:check-status', async () => {
@@ -355,6 +457,7 @@ ipcMain.handle('cdp:enqueue-generation', async (_event, sceneId: string, prompt:
   const isVideo = settings?.mode === 'video';
   const customOutputDir = settings?.customOutputDir;
   const job = {
+    projectId,
     sceneId,
     prompt,
     outputPath: isVideo
@@ -370,6 +473,7 @@ ipcMain.handle('cdp:enqueue-generation', async (_event, sceneId: string, prompt:
 ipcMain.handle('cdp:batch-generate', async (_event, scenes: { id: string; prompt: string }[], projectId?: string, settings?: any) => {
   const customOutputDir = settings?.customOutputDir;
   const jobs = scenes.map((s) => ({
+    projectId,
     sceneId: s.id,
     prompt: s.prompt,
     outputPath: projectStorage.getImagePathForScene(s.id, projectId, customOutputDir),
@@ -383,6 +487,7 @@ ipcMain.handle('cdp:batch-generate', async (_event, scenes: { id: string; prompt
 ipcMain.handle('cdp:batch-generate-videos', async (_event, scenes: { id: string; prompt: string }[], projectId?: string, settings?: any) => {
   const customOutputDir = settings?.customOutputDir;
   const jobs = scenes.map((s) => ({
+    projectId,
     sceneId: s.id,
     prompt: s.prompt,
     outputPath: projectStorage.getVideoPathForScene(s.id, projectId, customOutputDir),
@@ -398,6 +503,7 @@ ipcMain.handle('cdp:batch-generate-agent', async (_event, scenes: { id: string; 
   const isVideo = settings?.mode === 'video';
   const customOutputDir = settings?.customOutputDir;
   const jobs = scenes.map((s) => ({
+    projectId,
     sceneId: s.id,
     prompt: s.prompt,
     outputPath: isVideo
@@ -409,6 +515,37 @@ ipcMain.handle('cdp:batch-generate-agent', async (_event, scenes: { id: string; 
   const res = await automatorPool.generateViaFlowAgent(jobs);
   console.log('[IPC] cdp:batch-generate-agent result:', JSON.stringify(res));
   return res;
+});
+
+ipcMain.handle('cdp:batch-generate-projects', async (_event, projectsData: { projectId: string; sceneIds?: string[]; settings?: any }[]) => {
+  let totalQueued = 0;
+  for (const item of projectsData) {
+    const proj = await projectStorage.getProject(item.projectId);
+    if (!proj || !Array.isArray(proj.scenes)) continue;
+    const isVideo = item.settings?.mode === 'video';
+    const targetScenes = proj.scenes.filter((s) => {
+      if (item.sceneIds && item.sceneIds.length > 0) {
+        return item.sceneIds.includes(s.id);
+      }
+      return isVideo ? !s.localVideoPath : !s.localImagePath;
+    });
+
+    const jobs = targetScenes.map((s) => ({
+      projectId: item.projectId,
+      sceneId: s.id,
+      prompt: s.prompt,
+      outputPath: isVideo
+        ? projectStorage.getVideoPathForScene(s.id, item.projectId, item.settings?.customOutputDir)
+        : projectStorage.getImagePathForScene(s.id, item.projectId, item.settings?.customOutputDir),
+      mediaType: isVideo ? ('video' as const) : ('image' as const),
+      settings: item.settings,
+    }));
+    if (jobs.length > 0) {
+      await automatorPool.enqueueBatch(jobs);
+      totalQueued += jobs.length;
+    }
+  }
+  return { queued: totalQueued };
 });
 
 ipcMain.handle('cdp:apply-settings', async (_event, settings: any) => {
@@ -483,9 +620,15 @@ ipcMain.handle('audio:segment-text', async (_event, scriptText: string, duration
   return { transcription, scenes };
 });
 
-ipcMain.handle('audio:transcribe-file', async (_event, audioPath: string, apiKey?: string, provider?: 'openai' | 'groq' | 'local', fps: number = 30) => {
+ipcMain.handle('audio:transcribe-file', async (_event, audioPath: string, apiKey?: string, provider?: 'gemini' | 'openai' | 'groq' | 'local', fps: number = 30) => {
+  const settings = await projectStorage.getSettings();
+  const resolvedProvider: 'gemini' | 'openai' | 'groq' | 'local' = provider || (settings.geminiApiKey ? 'gemini' : (settings.groqApiKey ? 'groq' : 'gemini'));
+  let resolvedKey = apiKey;
+  if (!resolvedKey) {
+    resolvedKey = resolvedProvider === 'gemini' ? settings.geminiApiKey : (settings.groqApiKey || settings.geminiApiKey);
+  }
   const duration = await ffmpegService.getAudioDuration(audioPath);
-  return await whisperService.transcribeAudioFile(audioPath, apiKey, provider, duration, fps);
+  return await whisperService.transcribeAudioFile(audioPath, resolvedKey, resolvedProvider, duration, fps);
 });
 
 ipcMain.handle('audio:voice-to-scenes', async (_event, audioPath: string, stylePreset: any = 'cinematic', apiKey?: string, provider?: 'gemini' | 'openai' | 'groq' | 'local', fps: number = 30, userProvidedScript?: string, customStyleModifier?: string) => {
@@ -713,6 +856,78 @@ ipcMain.handle('fs:read-folder-images', async (_event, folderPath: string) => {
   }
 });
 
+ipcMain.handle('fs:check-files-exist', async (_event, filePaths: string[]) => {
+  const result: Record<string, boolean> = {};
+  if (!Array.isArray(filePaths)) return result;
+  for (const fp of filePaths) {
+    if (!fp) continue;
+    let clean = fp.replace(/^media:(?:\/\/\/|\/\/|\/)?/i, '').split('?')[0].split('#')[0];
+    clean = decodeURIComponent(clean).replace(/^(?:localhost|media)[\\/]+/gi, '');
+    try {
+      result[fp] = fs.existsSync(clean);
+    } catch {
+      result[fp] = false;
+    }
+  }
+  return result;
+});
+
+ipcMain.handle('fs:relink-media-folder', async (_event, missingPaths: string[], targetFolder: string) => {
+  const relinkMap: Record<string, string> = {};
+  if (!Array.isArray(missingPaths) || !targetFolder || !fs.existsSync(targetFolder)) {
+    return relinkMap;
+  }
+
+  const filesInFolder = new Map<string, string>();
+  function scan(dir: string, depth = 0) {
+    if (depth > 4) return;
+    try {
+      const items = fs.readdirSync(dir, { withFileTypes: true });
+      for (const it of items) {
+        const full = path.join(dir, it.name);
+        if (it.isDirectory()) {
+          scan(full, depth + 1);
+        } else {
+          filesInFolder.set(it.name.toLowerCase(), full.replace(/\\/g, '/'));
+        }
+      }
+    } catch {}
+  }
+  scan(targetFolder);
+
+  for (const orig of missingPaths) {
+    if (!orig) continue;
+    const baseName = path.basename(orig.split('?')[0].split('#')[0]).toLowerCase();
+    if (filesInFolder.has(baseName)) {
+      relinkMap[orig] = filesInFolder.get(baseName)!;
+    }
+  }
+  return relinkMap;
+});
+
+ipcMain.handle('fs:read-audio-buffer', async (_event, targetPath: string) => {
+  try {
+    if (!targetPath) return null;
+    let filePath = parseMediaFilePath(targetPath);
+    if (!fs.existsSync(filePath)) {
+      const fileName = path.basename(filePath);
+      const candidates = [
+        path.join(projectStorage.getProjectsDir(), 'default_project', 'audio', fileName),
+        path.join(projectStorage.getProjectsDir(), 'default_project', 'images', fileName),
+        path.join(process.cwd(), 'projects_data', 'audio', fileName),
+      ];
+      const found = candidates.find((c) => fs.existsSync(c));
+      if (found) filePath = found;
+    }
+    if (!fs.existsSync(filePath)) return null;
+    const buf = await fs.readFile(filePath);
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  } catch (err) {
+    console.warn('[Main] fs:read-audio-buffer failed:', err);
+    return null;
+  }
+});
+
 const resolveDefaultExportPath = async (): Promise<string> => {
   try {
     let baseDir = '';
@@ -775,8 +990,32 @@ ipcMain.handle('tts:get-voices', async () => {
   return await ttsService.getVoiceProfiles();
 });
 
+ipcMain.handle('tts:get-preview', async (_event, voiceId: string) => {
+  return await ttsService.getOrGenerateVoicePreview(voiceId);
+});
+
 ipcMain.handle('tts:save-custom-voice', async (_event, profile: any) => {
   return await ttsService.saveCustomVoice(profile);
+});
+
+ipcMain.handle('tts:generate-designed-preview', async (_event, params: any) => {
+  return await ttsService.generateDesignedVoicePreview(params);
+});
+
+ipcMain.handle('tts:generate-designed-candidates', async (_event, params: any) => {
+  return await ttsService.generateDesignedVoiceCandidates(params);
+});
+
+ipcMain.handle('tts:save-designed-voice', async (_event, profile: any) => {
+  return await ttsService.saveDesignedVoice(profile);
+});
+
+ipcMain.handle('tts:elevenlabs-design-previews', async (_event, params: any) => {
+  return await ttsService.generateElevenLabsVoicePreviews(params);
+});
+
+ipcMain.handle('tts:elevenlabs-create-voice', async (_event, params: any) => {
+  return await ttsService.createElevenLabsDesignedVoice(params);
 });
 
 ipcMain.handle('tts:delete-custom-voice', async (_event, id: string) => {
@@ -862,8 +1101,12 @@ ipcMain.handle('projects:duplicate', async (_event, projectId: string) => {
   return await projectStorage.duplicateProject(projectId);
 });
 
-ipcMain.handle('projects:delete', async (_event, projectId: string) => {
-  return await projectStorage.deleteProject(projectId);
+ipcMain.handle('projects:delete', async (_event, projectId: string, options?: { deleteMedia?: boolean }) => {
+  return await projectStorage.deleteProject(projectId, options);
+});
+
+ipcMain.handle('projects:storage-stats', async (_event, projectId: string) => {
+  return await projectStorage.getProjectStorageStats(projectId);
 });
 
 ipcMain.handle('projects:rename', async (_event, projectId: string, newTitle: string) => {
@@ -1000,3 +1243,37 @@ ipcMain.handle('api:validate-key', async (_event, provider: 'groq' | 'gemini' | 
     latencyMs: results[0]?.latencyMs,
   };
 });
+
+// ==========================================
+// CLOUD AI VIDEO (COLAB COMFYUI) HANDLERS
+// ==========================================
+ipcMain.handle('colab:set-tunnel-url', async (_event, url: string) => {
+  colabVideoService.setTunnelUrl(url);
+  return { success: true, url: colabVideoService.getTunnelUrl() };
+});
+
+ipcMain.handle('colab:get-tunnel-url', async () => {
+  return colabVideoService.getTunnelUrl();
+});
+
+ipcMain.handle('colab:auto-detect-url', async () => {
+  return colabVideoService.autoDetectTunnelUrl();
+});
+
+ipcMain.handle('colab:test-connection', async (_event, customUrl?: string) => {
+  return await colabVideoService.testConnection(customUrl);
+});
+
+ipcMain.handle('colab:generate-video', async (_event, job: ColabVideoJobRequest) => {
+  try {
+    const videoPath = await colabVideoService.generateVideo(job);
+    return { success: true, videoPath, sceneId: job.sceneId };
+  } catch (err: any) {
+    return { success: false, error: err.message, sceneId: job.sceneId };
+  }
+});
+
+ipcMain.handle('colab:cancel-job', async (_event, sceneId: string) => {
+  return await colabVideoService.cancelJob(sceneId);
+});
+

@@ -8,6 +8,7 @@ import { FlowGenerationSettings } from '../../src/types';
 import { projectStorage } from './projectStorage';
 
 export interface AutomationJob {
+  projectId?: string;
   sceneId: string;
   prompt: string;
   outputPath: string;
@@ -48,11 +49,42 @@ export function extractNormalizedTimecode(text: string): { full: string; short: 
  * Generates a unique, non-colliding scene reference tag for Google Flow prompts.
  * Incorporates timecode digits (e.g. 151947) + deterministic hash to guarantee uniqueness.
  */
-export function generateSceneTag(sceneId: string, prompt?: string): string {
+export function generateSceneTag(sceneId: string, prompt?: string, projectId?: string): string {
   const tc = extractNormalizedTimecode(sceneId || prompt || '');
   const tcPart = tc ? tc.full.replace(/[^0-9]/g, '') : '';
-  const hash = crypto.createHash('md5').update(sceneId).digest('hex').slice(0, 4).toUpperCase();
-  return tcPart ? `SCN_${tcPart}_${hash}` : `SCN_${hash}`;
+  const projPart = projectId ? crypto.createHash('md5').update(projectId).digest('hex').slice(0, 3).toUpperCase() : '';
+  const hash = crypto.createHash('md5').update((projectId || '') + ':' + sceneId).digest('hex').slice(0, 4).toUpperCase();
+  const prefix = projPart ? `P${projPart}_` : '';
+  return tcPart ? `${prefix}SCN_${tcPart}_${hash}` : `${prefix}SCN_${hash}`;
+}
+
+/**
+ * Detects whether a URL points to an active Google Flow project canvas.
+ * Handles both legacy labs.google/fx/tools/flow/project/ and new flow.google.com/project/
+ * Excludes auth sessions, API endpoints, and accounts login pages.
+ */
+export function isFlowProjectUrl(url: string): boolean {
+  if (!url) return false;
+  if (url.includes('/api/') || url.includes('accounts.google.com') || url.includes('recaptcha')) return false;
+  if (url.endsWith('/tools') || url.includes('/tools/') || url.endsWith('/edit') || url.includes('/edit/')) return false;
+  return (
+    url.includes('flow.google.com/project/') ||
+    url.includes('flow.google.com/projects/') ||
+    url.includes('labs.google/fx/tools/flow/project/')
+  );
+}
+
+/**
+ * Detects whether a URL belongs to Google Flow (either home, projects list, or canvas).
+ * Excludes auth sessions, API endpoints, and accounts login pages.
+ */
+export function isFlowUrl(url: string): boolean {
+  if (!url) return false;
+  if (url.includes('/api/') || url.includes('accounts.google.com') || url.includes('recaptcha')) return false;
+  return (
+    url.includes('flow.google.com') ||
+    url.includes('labs.google/fx/tools/flow')
+  );
 }
 
 export function scoreCandidateCard(
@@ -80,9 +112,13 @@ export function scoreCandidateCard(
   }
 
   // 3. Significant Semantic Word Overlap
-  const STOPWORDS = new Set(['scene', 'visual', 'shot', 'macro', 'close', 'wide', 'hardcover', 'resting', 'cinematic', 'photo', 'realism', 'octane', 'render', 'style', 'aesthetic', '4k', '8k']);
-  const words = prompt
-    .toLowerCase()
+  const STOPWORDS = new Set([
+    'scene', 'visual', 'shot', 'macro', 'close', 'wide', 'hardcover', 'resting', 
+    'cinematic', 'photo', 'realism', 'octane', 'render', 'style', 'aesthetic', 
+    '4k', '8k', 'image', 'more', 'vert', 'favorite', 'redo', 'download'
+  ]);
+  const promptLower = (prompt || '').toLowerCase();
+  const words = promptLower
     .replace(/[^a-z0-9]/g, ' ')
     .split(/\s+/)
     .filter((w) => w.length > 3 && !STOPWORDS.has(w));
@@ -99,6 +135,27 @@ export function scoreCandidateCard(
     if (matchedWords >= 3) score += 50;
   }
 
+  // 4. Card-to-Prompt Coverage (for concise titles/labels like Google Flow's Angular tiles)
+  const cardWords = textLower
+    .replace(/[^a-z0-9]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 3 && !STOPWORDS.has(w));
+
+  if (cardWords.length > 0) {
+    let cardMatched = 0;
+    for (const cw of cardWords) {
+      if (promptLower.includes(cw)) {
+        cardMatched++;
+      }
+    }
+    const cardCoverage = cardMatched / cardWords.length;
+    if (cardCoverage >= 0.75 && cardMatched >= 3) {
+      score += 350; // High confidence card title match!
+    } else if (cardCoverage >= 0.5 && cardMatched >= 2) {
+      score += 180;
+    }
+  }
+
   return score;
 }
 
@@ -108,15 +165,18 @@ export class FlowAutomatorPool {
   private isProcessing: boolean = false;
   private queue: AutomationJob[] = [];
   private inFlightMap: Map<number, InFlightCard[]> = new Map(); // port -> in flight cards
+  private activeWorkers: Set<number> = new Set(); // ports currently running a worker loop
+  private rateLimitedPorts: Map<number, number> = new Map(); // port -> cooldown expiration timestamp
   private consumedUrls: Set<string> = new Set(); // Global set of harvested image/video URLs to prevent duplicate pulls
   private consumedFailedTiles: Set<string> = new Set(); // Track failed policy violation tiles to avoid duplicate alerts
-  private maxConcurrentPerBrowser: number = 1; // Default to 1x Solo mode for 100% reliable 1-by-1 generation
+  private maxConcurrentPerBrowser: number = 3; // Default to 3x Studio parallel mode
   private onJobProgress?: (
     sceneId: string,
-    status: 'generating' | 'ready' | 'error',
+    status: 'generating' | 'ready' | 'error' | 'pending',
     mediaPath?: string,
     error?: string,
-    mediaType?: 'image' | 'video'
+    mediaType?: 'image' | 'video',
+    projectId?: string
   ) => void;
 
   constructor(ports: number[] = [9222, 9223]) {
@@ -126,10 +186,11 @@ export class FlowAutomatorPool {
   public setProgressCallback(
     cb: (
       sceneId: string,
-      status: 'generating' | 'ready' | 'error',
+      status: 'generating' | 'ready' | 'error' | 'pending',
       mediaPath?: string,
       error?: string,
-      mediaType?: 'image' | 'video'
+      mediaType?: 'image' | 'video',
+      projectId?: string
     ) => void
   ) {
     this.onJobProgress = cb;
@@ -150,7 +211,14 @@ export class FlowAutomatorPool {
 
   public resumeGeneration(): boolean {
     this.isPaused = false;
+    this.rateLimitedPorts.clear(); // Clear rate-limit cooldown on manual user resume
     console.log('[FlowAutomator] ▶️ Generation RESUMED by user. Continuing queue dispatch.');
+    for (const port of this.ports) {
+      const browser = this.browsers.get(port);
+      if (browser && browser.isConnected()) {
+        this.startWorkerForPort(port);
+      }
+    }
     return true;
   }
 
@@ -190,31 +258,63 @@ export class FlowAutomatorPool {
   }
 
   /**
-   * PASSIVE status check — does NOT create or destroy Puppeteer connections.
+   * PASSIVE status check — checks if remote debugging port is alive.
+   * Auto-connects Puppeteer if Chrome is running, and validates Flow project canvas.
    * Called by the background poller every 12s. Safe to call at any time.
    */
-  public async checkStatus(): Promise<{ port: number; connected: boolean; credits?: number | null; creditsText?: string | null; email?: string | null }[]> {
-    const results: { port: number; connected: boolean; credits?: number | null; creditsText?: string | null; email?: string | null }[] = [];
+  public async checkStatus(): Promise<{ port: number; connected: boolean; hasProjectOpen: boolean; browserOpen: boolean; credits?: number | null; creditsText?: string | null; email?: string | null }[]> {
+    const results: { port: number; connected: boolean; hasProjectOpen: boolean; browserOpen: boolean; credits?: number | null; creditsText?: string | null; email?: string | null }[] = [];
     for (const port of this.ports) {
       try {
-        const browser = this.browsers.get(port);
+        let browser = this.browsers.get(port);
         if (!browser || !browser.isConnected()) {
-          // No live connection — report disconnected without trying to reconnect
-          results.push({ port, connected: false });
+          const isAlive = await this.checkPortStatus(port);
+          if (isAlive) {
+            await this.connectPort(port);
+            browser = this.browsers.get(port);
+          }
+        }
+
+        if (!browser || !browser.isConnected()) {
+          results.push({ port, connected: false, hasProjectOpen: false, browserOpen: false });
           continue;
         }
 
-        // We have an active Puppeteer session — check if a Flow project canvas is open
+        // We have an active Puppeteer session — check if a Flow project canvas or Flow tab is open
         const pages = await browser.pages().catch(() => []);
-        const flowProjectPage = pages.find((p) => p.url().includes('labs.google/fx/tools/flow/project/'));
+        const flowProjectPage = pages.find((p) => isFlowProjectUrl(p.url()));
+        const anyFlowPage = flowProjectPage || pages.find((p) => isFlowUrl(p.url()));
+
         if (flowProjectPage && !flowProjectPage.isClosed()) {
+          // Canvas is open and ready
           const creditInfo = await this.scrapeAccountCredits(flowProjectPage).catch(() => ({ credits: null, creditsText: null, email: null }));
-          results.push({ port, connected: true, credits: creditInfo.credits, creditsText: creditInfo.creditsText, email: creditInfo.email });
+          results.push({
+            port,
+            connected: true,
+            hasProjectOpen: true,
+            browserOpen: true,
+            credits: creditInfo.credits,
+            creditsText: creditInfo.creditsText,
+            email: creditInfo.email,
+          });
+        } else if (anyFlowPage && !anyFlowPage.isClosed()) {
+          // Chrome is on Google Flow, but user has not opened any project canvas yet
+          const creditInfo = await this.scrapeAccountCredits(anyFlowPage).catch(() => ({ credits: null, creditsText: null, email: null }));
+          results.push({
+            port,
+            connected: false,
+            hasProjectOpen: false,
+            browserOpen: true,
+            credits: creditInfo.credits,
+            creditsText: creditInfo.creditsText,
+            email: creditInfo.email,
+          });
         } else {
-          results.push({ port, connected: false });
+          // Chrome is open, but Flow is not loaded
+          results.push({ port, connected: false, hasProjectOpen: false, browserOpen: true });
         }
       } catch {
-        results.push({ port, connected: false });
+        results.push({ port, connected: false, hasProjectOpen: false, browserOpen: false });
       }
     }
     return results;
@@ -224,14 +324,14 @@ export class FlowAutomatorPool {
    * ACTIVE connect — creates a Puppeteer connection if not already connected.
    * Called only when the user explicitly clicks "Connect Flow" or "Reconnect".
    */
-  public async connectAll(): Promise<{ port: number; connected: boolean; credits?: number | null; creditsText?: string | null; email?: string | null }[]> {
-    const results: { port: number; connected: boolean; credits?: number | null; creditsText?: string | null; email?: string | null }[] = [];
+  public async connectAll(): Promise<{ port: number; connected: boolean; hasProjectOpen: boolean; browserOpen: boolean; credits?: number | null; creditsText?: string | null; email?: string | null }[]> {
+    const results: { port: number; connected: boolean; hasProjectOpen: boolean; browserOpen: boolean; credits?: number | null; creditsText?: string | null; email?: string | null }[] = [];
     for (const port of this.ports) {
       try {
         const isAlive = await this.checkPortStatus(port);
         if (!isAlive) {
           this.browsers.delete(port);
-          results.push({ port, connected: false });
+          results.push({ port, connected: false, hasProjectOpen: false, browserOpen: false });
           continue;
         }
 
@@ -250,10 +350,13 @@ export class FlowAutomatorPool {
           const browser = this.browsers.get(port);
           if (browser && browser.isConnected()) {
             const pages = await browser.pages().catch(() => []);
-            const flowProjectPage = pages.find((p) => p.url().includes('labs.google/fx/tools/flow/project/'));
+            const flowProjectPage = pages.find((p) => isFlowProjectUrl(p.url()));
+            const anyFlowPage = flowProjectPage || pages.find((p) => isFlowUrl(p.url()));
             if (flowProjectPage && !flowProjectPage.isClosed()) {
               isFlowProjectReady = true;
               creditInfo = await this.scrapeAccountCredits(flowProjectPage).catch(() => ({ credits: null, creditsText: null, email: null }));
+            } else if (anyFlowPage && !anyFlowPage.isClosed()) {
+              creditInfo = await this.scrapeAccountCredits(anyFlowPage).catch(() => ({ credits: null, creditsText: null, email: null }));
             }
           }
         }
@@ -261,12 +364,14 @@ export class FlowAutomatorPool {
         results.push({
           port,
           connected: isFlowProjectReady,
+          hasProjectOpen: isFlowProjectReady,
+          browserOpen: true,
           credits: creditInfo.credits,
           creditsText: creditInfo.creditsText,
           email: creditInfo.email,
         });
       } catch {
-        results.push({ port, connected: false });
+        results.push({ port, connected: false, hasProjectOpen: false, browserOpen: false });
       }
     }
     return results;
@@ -308,26 +413,67 @@ export class FlowAutomatorPool {
    */
   public async generateViaFlowAgent(jobs: AutomationJob[]): Promise<{ success: boolean; dispatched: number; error?: string }> {
     if (jobs.length === 0) return { success: true, dispatched: 0 };
-    
-    // Enforce maximum 40 prompts per batch for Flow Agent
-    const targetJobs = jobs.slice(0, 40);
-    console.log(`[FlowAutomator] Disagreeing up to 40 scenes (sending ${targetJobs.length} scenes) via Google Flow Agent...`);
+
+    // MULTI-PORT PARALLEL AGENT MODE:
+    // Each connected port (Google account) gets its own 20-scene batch simultaneously.
+    // 1 port = 20 scenes/click, 2 ports = 40 scenes/click, 3 ports = 60 scenes/click.
+    const AGENT_BATCH_LIMIT = 20;
 
     const pages = await this.getActiveFlowPages();
     if (pages.length === 0) {
       return { success: false, dispatched: 0, error: 'No active Google Flow browser tab connected. Please open Flow in Chrome first.' };
     }
 
-    const { page, port } = pages[0];
-
-    // Verify that the page is on a project canvas
-    if (!page.url().includes('/project/')) {
-      return {
-        success: false,
-        dispatched: 0,
-        error: 'Please open or select a project in Google Flow first so the canvas is visible.',
-      };
+    // Filter to only canvas pages (on a /project/ URL)
+    const canvasPages = pages.filter((p) => p.page.url().includes('/project/'));
+    if (canvasPages.length === 0) {
+      return { success: false, dispatched: 0, error: 'Please open or select a project in Google Flow first so the canvas is visible.' };
     }
+
+    // Assign one 20-scene batch to each available port
+    const portBatches: { page: any; port: number; batch: AutomationJob[] }[] = [];
+    let offset = 0;
+    for (const { page, port } of canvasPages) {
+      if (offset >= jobs.length) break;
+      const batch = jobs.slice(offset, offset + AGENT_BATCH_LIMIT);
+      if (batch.length > 0) {
+        portBatches.push({ page, port, batch });
+        offset += batch.length;
+      }
+    }
+
+    const totalDispatched = portBatches.reduce((sum, pb) => sum + pb.batch.length, 0);
+    console.log(`[FlowAutomator] 🚀 Parallel Agent Mode: ${portBatches.length} port(s) × ${AGENT_BATCH_LIMIT} scenes = dispatching ${totalDispatched} of ${jobs.length} scene(s) simultaneously...`);
+
+    // Dispatch all port batches in parallel
+    const results = await Promise.allSettled(
+      portBatches.map(({ page, port, batch }) => this._dispatchAgentBatchToPort(page, port, batch))
+    );
+
+    let totalSuccess = 0;
+    const errors: string[] = [];
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        if (result.value.success) totalSuccess += result.value.dispatched;
+        else if (result.value.error) errors.push(result.value.error);
+      } else {
+        errors.push(String(result.reason));
+      }
+    }
+
+    if (totalSuccess === 0) {
+      return { success: false, dispatched: 0, error: errors.join('; ') || 'All ports failed to dispatch.' };
+    }
+
+    return { success: true, dispatched: totalSuccess };
+  }
+
+  /**
+   * Dispatches a single batch of ≤20 jobs to one specific Google Flow port via Agent mode.
+   */
+  private async _dispatchAgentBatchToPort(page: any, port: number, targetJobs: AutomationJob[]): Promise<{ success: boolean; dispatched: number; error?: string }> {
+    if (targetJobs.length === 0) return { success: true, dispatched: 0 };
+    console.log(`[FlowAutomator :${port}] Sending ${targetJobs.length} scene(s) via Google Flow Agent...`);
 
     // 1. If inside a card /edit/ view, navigate back to the canvas
     if (page.url().includes('/edit/')) {
@@ -344,31 +490,55 @@ export class FlowAutomatorPool {
     await page.keyboard.press('Escape').catch(() => {});
     await new Promise((r) => setTimeout(r, 300));
 
-    // 2. Ensure Agent mode button is active (check aria-pressed="true")
+    // 2. Ensure Agent mode button is active (check aria-pressed="true" or agent-mode-chip-checked class)
     try {
-      const activatedAgent = await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button, div[role="button"], span')) as HTMLElement[];
+      const agentState = await page.evaluate(() => {
+        // Specifically find the button element (not the inner span)
+        const chip = (
+          document.querySelector('button.agent-mode-chip, [class*="agent-mode-chip"], button:has(.agent-mode-chip-label)') ||
+          document.querySelector('button[aria-label*="agent" i]')
+        ) as HTMLElement | null;
+
+        if (chip) {
+          const isPressed = chip.getAttribute('aria-pressed') === 'true' || chip.classList.contains('agent-mode-chip-checked');
+          if (!isPressed) {
+            chip.click();
+            return { toggled: true, wasPressed: false };
+          }
+          return { toggled: false, wasPressed: true };
+        }
+
+        // Fallback for custom or changed markup
+        const buttons = Array.from(document.querySelectorAll('button, div[role="button"]')) as HTMLElement[];
         const agentBtn = buttons.find((b) => {
-          const text = (b.innerText || '').trim();
+          const text = (b.innerText || '').trim().toLowerCase();
           const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-          return text === 'Agent' || text === '+ Agent' || aria === 'agent' || aria.includes('agent mode');
+          return text === 'agent' || text === '+ agent' || aria.includes('agent mode') || aria === 'agent';
         });
 
         if (agentBtn) {
-          const isPressed = agentBtn.getAttribute('aria-pressed') === 'true';
+          const isPressed = agentBtn.getAttribute('aria-pressed') === 'true' || agentBtn.classList.contains('agent-mode-chip-checked');
           if (!isPressed) {
             agentBtn.click();
-            return true;
+            return { toggled: true, wasPressed: false };
           }
+          return { toggled: false, wasPressed: true };
         }
-        return false;
+
+        return { toggled: false, wasPressed: false, notFound: true };
       });
 
-      if (activatedAgent) {
+      if (agentState?.toggled) {
         console.log('[FlowAutomator] ✓ Activated Agent mode on Google Flow bottom toolbar.');
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 600));
+      } else if (agentState?.wasPressed) {
+        console.log('[FlowAutomator] ✓ Agent mode was already enabled on Google Flow bottom toolbar.');
+      } else if (agentState?.notFound) {
+        console.warn('[FlowAutomator] ⚠️ Could not locate Agent mode button in Google Flow toolbar.');
       }
-    } catch {}
+    } catch (err: any) {
+      console.warn('[FlowAutomator] Error checking Agent mode button:', err.message);
+    }
 
     // 3. Format all scenes into a structured master instruction list for Flow Agent
     const isVideo = targetJobs[0]?.mediaType === 'video';
@@ -377,7 +547,7 @@ export class FlowAutomatorPool {
     ];
 
     targetJobs.forEach((job, idx) => {
-      const sceneTag = generateSceneTag(job.sceneId, job.prompt);
+      const sceneTag = generateSceneTag(job.sceneId, job.prompt, job.projectId);
       const singleLinePrompt = job.prompt.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
       agentLines.push(`\n${idx + 1}. [REF:${sceneTag}] ${singleLinePrompt}`);
     });
@@ -403,13 +573,13 @@ export class FlowAutomatorPool {
 
     // 5. Mark scenes as generating
     targetJobs.forEach((job) => {
-      this.onJobProgress?.(job.sceneId, 'generating', undefined, undefined, job.mediaType === 'video' ? 'video' : 'image');
+      this.onJobProgress?.(job.sceneId, 'generating', undefined, undefined, job.mediaType === 'video' ? 'video' : 'image', job.projectId);
     });
     console.log(`[FlowAutomator] ✓ Sent ${targetJobs.length} prompts to Google Flow Agent! Harvesting ready cards...`);
 
     // 6. Background polling worker to harvest ready cards as Flow Agent completes them
     const inFlightCards: InFlightCard[] = targetJobs.map((job) => {
-      const sceneTag = generateSceneTag(job.sceneId, job.prompt);
+      const sceneTag = generateSceneTag(job.sceneId, job.prompt, job.projectId);
       return {
         job,
         sceneTag,
@@ -426,10 +596,87 @@ export class FlowAutomatorPool {
       const maxPollCycles = 180; // up to 7+ minutes
       const timeoutMs = isVideo ? 360000 : 240000;
       const startTime = Date.now();
+      let agentRepliedCount = 0; // track how many times we auto-replied to agent questions
 
       for (let cycle = 0; cycle < maxPollCycles && remaining.length > 0; cycle++) {
         await new Promise((r) => setTimeout(r, 2500));
         if (page.isClosed() || !page.browser() || !page.browser().isConnected()) break;
+
+        // Auto-reply if Flow Agent is waiting for user confirmation
+        // (Flow Agent can ask "Should we start with the first 20 scenes?" etc.)
+        if (agentRepliedCount < 5) {
+          try {
+            const agentQuestion = await page.evaluate(() => {
+              // Look for the agent's response area - typically last message bubble in the chat
+              const msgs = Array.from(document.querySelectorAll(
+                '[class*="agent-message"], [class*="response-bubble"], [class*="chat-message"], [class*="message-content"]'
+              ));
+
+              // Also look inside the flow agent side panel or assistant chat
+              const allText = Array.from(document.querySelectorAll('div, p, span')).map(el => {
+                const t = (el as HTMLElement).innerText?.trim() || '';
+                return t;
+              }).filter(t => t.length > 20 && (
+                t.includes('Should we start') ||
+                t.includes('proceed that way') ||
+                t.includes("Let me know if") ||
+                t.includes("proceed with the first") ||
+                t.includes("more than 24") ||
+                t.includes("Can't process more") ||
+                t.includes("handle the remaining") ||
+                t.includes("follow-up batch") ||
+                t.includes("want me to proceed") ||
+                t.includes("ready to proceed") ||
+                t.includes("shall I proceed") ||
+                t.includes("shall we proceed")
+              ));
+
+              if (allText.length === 0) return null;
+
+              // Check if the prompt input is currently empty (agent waiting for reply)
+              const editor = document.querySelector('.ProseMirror[contenteditable="true"]') as HTMLElement;
+              const editorText = editor?.innerText?.trim() || '';
+              const isEditorEmpty = editorText === '' || editorText === 'What do you want to create?';
+
+              return isEditorEmpty ? allText[0] : null;
+            });
+
+            if (agentQuestion) {
+              console.log(`[FlowAutomator Agent] 🤖 Flow Agent asked a question: "${agentQuestion.slice(0, 100)}..."`);
+              console.log('[FlowAutomator Agent] Auto-replying: "Yes, please proceed with all scenes."');
+
+              // Type the reply into the editor
+              const replied = await page.evaluate(() => {
+                const editor = document.querySelector('.ProseMirror[contenteditable="true"]') as HTMLElement;
+                if (!editor) return false;
+                editor.focus();
+                document.execCommand('selectAll', false);
+                document.execCommand('insertText', false, 'Yes, please proceed with all the scenes.');
+                return true;
+              });
+
+              if (replied) {
+                await new Promise((r) => setTimeout(r, 500));
+                // Click submit button
+                await page.evaluate(() => {
+                  const submitBtn = (
+                    document.querySelector('button[aria-label="Start generation"]') ||
+                    document.querySelector('button[aria-label="Send"]') ||
+                    Array.from(document.querySelectorAll('button')).find(b =>
+                      b.innerText?.includes('arrow_forward') || b.getAttribute('aria-label')?.includes('Send')
+                    )
+                  ) as HTMLElement;
+                  if (submitBtn) submitBtn.click();
+                });
+                agentRepliedCount++;
+                console.log(`[FlowAutomator Agent] ✓ Auto-reply sent. (Reply #${agentRepliedCount})`);
+                await new Promise((r) => setTimeout(r, 2000));
+              }
+            }
+          } catch (qErr: any) {
+            console.warn('[FlowAutomator Agent] Auto-reply check error:', qErr.message);
+          }
+        }
 
         try {
           const completedSceneIds = await this.pollAndHarvestReadyCards(page, remaining);
@@ -443,9 +690,19 @@ export class FlowAutomatorPool {
 
         // Check overall timeout
         if (Date.now() - startTime > timeoutMs) {
-          console.warn(`[FlowAutomator Agent] Timeout reached for ${remaining.length} remaining scene(s).`);
+          console.warn(`[FlowAutomator Agent] ⏱️ Timeout: ${remaining.length} scene(s) didn't complete in time. Auto-resetting to 'pending' for next batch retry...`);
           for (const dead of remaining) {
-            this.onJobProgress?.(dead.job.sceneId, 'error', undefined, 'Google Flow Agent generation timed out.');
+            // Reset to 'pending' instead of 'error' — this way the next Agent Bulk click
+            // automatically picks them up and retries without any manual intervention.
+            this.onJobProgress?.(
+              dead.job.sceneId,
+              'pending',
+              undefined,
+              undefined,
+              dead.job.mediaType === 'video' ? 'video' : 'image',
+              dead.job.projectId
+            );
+            console.log(`[FlowAutomator Agent] ♻️ Reset scene ${dead.job.sceneId} → pending (will retry in next batch)`);
           }
           break;
         }
@@ -524,7 +781,7 @@ export class FlowAutomatorPool {
         for (const job of filteredJobs) {
           if (details.some((d) => d.sceneId === job.sceneId && d.success)) continue;
 
-          const sceneTag = generateSceneTag(job.sceneId, job.prompt);
+          const sceneTag = generateSceneTag(job.sceneId, job.prompt, job.projectId);
           const sceneTc = extractNormalizedTimecode(job.prompt || job.sceneId || '');
 
           let bestIdx = -1;
@@ -546,7 +803,7 @@ export class FlowAutomatorPool {
               if (saved) {
                 matchedCount++;
                 this.consumedUrls.add(matchedCand.src);
-                this.onJobProgress?.(job.sceneId, 'ready', job.outputPath);
+                this.onJobProgress?.(job.sceneId, 'ready', job.outputPath, undefined, 'image', job.projectId);
                 details.push({ sceneId: job.sceneId, success: true, imagePath: job.outputPath });
                 console.log(`[FlowAutomator] ✓ RECOVERED image from canvas for scene ${job.sceneId} [${sceneTag}] -> ${job.outputPath}`);
               }
@@ -561,7 +818,7 @@ export class FlowAutomatorPool {
         const remainingJobs = filteredJobs.filter((j) => !details.some((d) => d.sceneId === j.sceneId && d.success));
         for (const job of remainingJobs) {
           console.warn(`[FlowAutomator] Scene ${job.sceneId} has no verified matching card on canvas. Leaving empty/failed.`);
-          this.onJobProgress?.(job.sceneId, 'error', undefined, 'Image not found on canvas or was blocked by Google Flow safety filters.');
+          this.onJobProgress?.(job.sceneId, 'error', undefined, 'Image not found on canvas or was blocked by Google Flow safety filters.', 'image', job.projectId);
           details.push({
             sceneId: job.sceneId,
             success: false,
@@ -636,7 +893,7 @@ export class FlowAutomatorPool {
         for (const job of filteredJobs) {
           if (details.some((d) => d.sceneId === job.sceneId && d.success)) continue;
 
-          const sceneTag = generateSceneTag(job.sceneId, job.prompt);
+          const sceneTag = generateSceneTag(job.sceneId, job.prompt, job.projectId);
           const sceneTc = extractNormalizedTimecode(job.prompt || job.sceneId || '');
 
           let bestIdx = -1;
@@ -658,7 +915,7 @@ export class FlowAutomatorPool {
               if (saved) {
                 matchedCount++;
                 this.consumedUrls.add(matchedCand.src);
-                this.onJobProgress?.(job.sceneId, 'ready', job.outputPath, undefined, 'video');
+                this.onJobProgress?.(job.sceneId, 'ready', job.outputPath, undefined, 'video', job.projectId);
                 details.push({ sceneId: job.sceneId, success: true, videoPath: job.outputPath });
                 console.log(`[FlowAutomator] ✓ RECOVERED video from canvas for scene ${job.sceneId} [${sceneTag}] -> ${job.outputPath}`);
               }
@@ -672,7 +929,7 @@ export class FlowAutomatorPool {
         const remainingJobs = filteredJobs.filter((j) => !details.some((d) => d.sceneId === j.sceneId && d.success));
         for (const job of remainingJobs) {
           console.warn(`[FlowAutomator] Video scene ${job.sceneId} has no verified matching card on canvas. Leaving empty/failed.`);
-          this.onJobProgress?.(job.sceneId, 'error', undefined, 'Video not found on canvas or was blocked by Google Flow safety filters.', 'video');
+          this.onJobProgress?.(job.sceneId, 'error', undefined, 'Video not found on canvas or was blocked by Google Flow safety filters.', 'video', job.projectId);
           details.push({
             sceneId: job.sceneId,
             success: false,
@@ -725,7 +982,7 @@ export class FlowAutomatorPool {
     }
 
     for (const scene of scenes) {
-      const sceneTag = generateSceneTag(scene.id, scene.prompt);
+      const sceneTag = generateSceneTag(scene.id, scene.prompt, (scene as any).projectId);
       const tagLower = sceneTag.toLowerCase();
 
       // Check 1: If marked ready with localImagePath, verify file actually exists and is readable
@@ -834,7 +1091,7 @@ export class FlowAutomatorPool {
 
     // 3. For each scene, find its exact matching image candidate from disk or canvas
     for (const scene of scenes) {
-      const sceneTag = generateSceneTag(scene.id, scene.prompt).toLowerCase();
+      const sceneTag = generateSceneTag(scene.id, scene.prompt, projectId).toLowerCase();
       const sceneTc = extractNormalizedTimecode(scene.prompt || scene.id || '');
 
       let matchedImagePath: string | null = null;
@@ -932,8 +1189,11 @@ export class FlowAutomatorPool {
         if (!src || src.trim() === '' || src === 'about:blank') return false;
         const rect = img.getBoundingClientRect();
         const isMedia =
+          src.includes('flow-content.google') ||
+          src.includes('flow.google.com/asb') ||
           src.includes('media.getMediaUrlRedirect') ||
           src.includes('googleusercontent') ||
+          (img.alt && img.alt.includes('Tile displaying')) ||
           src.startsWith('blob:') ||
           src.startsWith('data:image');
         const notIcon =
@@ -947,13 +1207,26 @@ export class FlowAutomatorPool {
         return isMedia && notIcon && hasSize && isNotHeaderOrNav;
       });
 
-      // Filter out generating cards
+      // Filter out generating cards (strictly bounded to the card tile container)
       const completedOnly = validMedia.filter((img) => {
         let parent = img.parentElement;
-        for (let lvl = 0; lvl < 10 && parent; lvl++) {
+        for (let lvl = 0; lvl < 8 && parent; lvl++) {
+          if (
+            parent.tagName === 'BODY' ||
+            parent.tagName === 'MAIN' ||
+            parent.classList?.contains('tile-row') ||
+            parent.classList?.contains('virtual-scroll-container') ||
+            parent.classList?.contains('virtual-item-container') ||
+            parent.classList?.contains('cdk-virtual-scroll-viewport')
+          ) {
+            break;
+          }
           const text = parent.innerText || '';
           if (/\b\d{1,2}%\b/.test(text) || text.includes('Generating') || text.includes('Creating') || text.includes('Rendering')) {
             return false;
+          }
+          if (parent.tagName === 'FLOW-GRID-TILE-CONTAINER' || parent.hasAttribute('data-tile-id')) {
+            break;
           }
           parent = parent.parentElement;
         }
@@ -968,18 +1241,28 @@ export class FlowAutomatorPool {
         let posX: number | null = null;
         let posY: number | null = null;
 
-        for (let lvl = 0; lvl < 14 && parent; lvl++) {
+        for (let lvl = 0; lvl < 8 && parent; lvl++) {
+          if (
+            parent.tagName === 'BODY' ||
+            parent.tagName === 'MAIN' ||
+            parent.id === 'main-content' ||
+            parent.classList?.contains('tile-row') ||
+            parent.classList?.contains('virtual-scroll-container') ||
+            parent.classList?.contains('virtual-item-container') ||
+            parent.classList?.contains('cdk-virtual-scroll-viewport') ||
+            (parent.className && typeof parent.className === 'string' && parent.className.includes('page-layout'))
+          ) {
+            break;
+          }
           if (!tileId) {
             tileId = parent.getAttribute('data-tile-id') || '';
           }
-          cardText += ' ' + (
-            parent.innerText ||
-            parent.getAttribute('aria-label') ||
-            parent.getAttribute('title') ||
-            parent.getAttribute('data-prompt') ||
-            parent.getAttribute('data-ref') ||
-            ''
-          );
+          const pText = parent.innerText || '';
+          const pAria = parent.getAttribute('aria-label') || '';
+          const pTitle = parent.getAttribute('title') || '';
+          const pPrompt = parent.getAttribute('data-prompt') || '';
+          const pRef = parent.getAttribute('data-ref') || '';
+          cardText += ` ${pText} ${pAria} ${pTitle} ${pPrompt} ${pRef}`;
 
           if (!createdTime || posX === null) {
             try {
@@ -1006,7 +1289,9 @@ export class FlowAutomatorPool {
             } catch {}
           }
 
+          const isBoundary = parent.tagName === 'FLOW-GRID-TILE-CONTAINER' || parent.hasAttribute('data-tile-id');
           parent = parent.parentElement;
+          if (isBoundary) break;
         }
 
         // getBoundingClientRect only works for visible elements; offsetTop/offsetLeft works for all
@@ -1102,6 +1387,8 @@ export class FlowAutomatorPool {
 
         const rect = v.getBoundingClientRect();
         const isMedia =
+          src.includes('flow-content.google') ||
+          src.includes('flow.google.com/asb') ||
           src.includes('media.getMediaUrlRedirect') ||
           src.includes('googleusercontent') ||
           src.startsWith('blob:') ||
@@ -1112,13 +1399,26 @@ export class FlowAutomatorPool {
         return (isMedia || src.length > 5) && (hasSize || v.readyState >= 1);
       });
 
-      // Filter out generating cards
+      // Filter out generating cards (strictly bounded to the card tile container)
       const completedOnly = validMedia.filter((v) => {
         let parent = v.parentElement;
-        for (let lvl = 0; lvl < 10 && parent; lvl++) {
+        for (let lvl = 0; lvl < 8 && parent; lvl++) {
+          if (
+            parent.tagName === 'BODY' ||
+            parent.tagName === 'MAIN' ||
+            parent.classList?.contains('tile-row') ||
+            parent.classList?.contains('virtual-scroll-container') ||
+            parent.classList?.contains('virtual-item-container') ||
+            parent.classList?.contains('cdk-virtual-scroll-viewport')
+          ) {
+            break;
+          }
           const text = parent.innerText || '';
           if (/\b\d{1,2}%\b/.test(text) || text.includes('Generating') || text.includes('Creating') || text.includes('Rendering') || text.includes('Processing')) {
             return false;
+          }
+          if (parent.tagName === 'FLOW-GRID-TILE-CONTAINER' || parent.hasAttribute('data-tile-id')) {
+            break;
           }
           parent = parent.parentElement;
         }
@@ -1131,18 +1431,28 @@ export class FlowAutomatorPool {
         let tileId = '';
         let createdTime: string | null = null;
 
-        for (let lvl = 0; lvl < 12 && parent; lvl++) {
+        for (let lvl = 0; lvl < 8 && parent; lvl++) {
+          if (
+            parent.tagName === 'BODY' ||
+            parent.tagName === 'MAIN' ||
+            parent.id === 'main-content' ||
+            parent.classList?.contains('tile-row') ||
+            parent.classList?.contains('virtual-scroll-container') ||
+            parent.classList?.contains('virtual-item-container') ||
+            parent.classList?.contains('cdk-virtual-scroll-viewport') ||
+            (parent.className && typeof parent.className === 'string' && parent.className.includes('page-layout'))
+          ) {
+            break;
+          }
           if (!tileId) {
             tileId = parent.getAttribute('data-tile-id') || '';
           }
-          cardText += ' ' + (
-            parent.innerText ||
-            parent.getAttribute('aria-label') ||
-            parent.getAttribute('title') ||
-            parent.getAttribute('data-prompt') ||
-            parent.getAttribute('data-ref') ||
-            ''
-          );
+          const pText = parent.innerText || '';
+          const pAria = parent.getAttribute('aria-label') || '';
+          const pTitle = parent.getAttribute('title') || '';
+          const pPrompt = parent.getAttribute('data-prompt') || '';
+          const pRef = parent.getAttribute('data-ref') || '';
+          cardText += ` ${pText} ${pAria} ${pTitle} ${pPrompt} ${pRef}`;
 
           if (!createdTime) {
             try {
@@ -1159,7 +1469,9 @@ export class FlowAutomatorPool {
             } catch {}
           }
 
+          const isBoundary = parent.tagName === 'FLOW-GRID-TILE-CONTAINER' || parent.hasAttribute('data-tile-id');
           parent = parent.parentElement;
+          if (isBoundary) break;
         }
 
         const rect = v.getBoundingClientRect();
@@ -1248,7 +1560,13 @@ export class FlowAutomatorPool {
    */
   private async ensureMode(page: Page, mode: 'image' | 'video'): Promise<boolean> {
     return await page.evaluate((targetMode: string) => {
-      const allElements = Array.from(document.querySelectorAll('button, div[role="tab"], div[role="button"], span')) as HTMLElement[];
+      // Exclude sidebar navigation elements and canvas card nodes
+      const allElements = (Array.from(document.querySelectorAll('button, div[role="tab"], div[role="button"], span')) as HTMLElement[]).filter((el) => {
+        const rect = el.getBoundingClientRect();
+        const inSidebarOrHeader = el.closest('nav, aside, header') || rect.left < 200;
+        const inCanvasCard = el.closest('[data-tile-id], .react-flow__node, [data-testid*="node"], [data-testid*="tile"], [role="menu"]');
+        return !inSidebarOrHeader && !inCanvasCard && rect.top > window.innerHeight * 0.35;
+      });
 
       if (targetMode === 'video') {
         const videoBtn = allElements.find((el) => {
@@ -1347,43 +1665,64 @@ export class FlowAutomatorPool {
 
       // 1. Ensure the bottom settings popover is open
       let isPopoverOpen = await page.evaluate(() => {
+        const popover = document.querySelector('[role="dialog"], [data-radix-popper-content-wrapper], div[class*="popover"]');
+        if (popover) {
+          const t = (popover as HTMLElement).innerText || '';
+          if (t.includes('Aspect Ratio') || t.includes('Model') || t.includes('Duration') || t.includes('Batch') || t.includes('Generating will use') || t.includes('credits')) {
+            return true;
+          }
+        }
         const textElements = Array.from(document.querySelectorAll('div, button, span')) as HTMLElement[];
         return textElements.some((el) => {
+          if (el.closest('[data-tile-id], .react-flow__node')) return false;
           const text = el.innerText || '';
           return (
-            (text.includes('Omni Flash') || text.includes('Veo 3.1') || text.includes('Veo 2')) &&
+            (text.includes('Omni Flash') || text.includes('Veo 3.1') || text.includes('Veo 2') || text.includes('Nano Banana') || text.includes('Banana')) &&
             (text.includes('4s') || text.includes('6s') || text.includes('8s') || text.includes('10s') || text.includes('Generating will use'))
           );
         });
       });
 
       if (!isPopoverOpen) {
-        // Multi-strategy click for the bottom settings pill
+        // Find the settings pill strictly inside the bottom prompt bar (NEVER touch canvas card buttons)
         const clickedPill = await page.evaluate(() => {
-          const buttons = Array.from(document.querySelectorAll('button, div[role="button"], [role="tab"]')) as HTMLElement[];
-          const bottomButtons = buttons.filter((b) => b.getBoundingClientRect().top > window.innerHeight * 0.35);
+          const buttons = Array.from(document.querySelectorAll('button, div[role="button"]')) as HTMLElement[];
+          const bottomButtons = buttons.filter((b) => {
+            const rect = b.getBoundingClientRect();
+            const inSidebarOrHeader = b.closest('nav, aside, header') || rect.left < 200;
+            // STRICT: Must NEVER be inside a canvas tile, node, menu, or modal
+            const inCanvasCard = b.closest('[data-tile-id], .react-flow__node, [data-testid*="node"], [data-testid*="tile"], [role="menu"], [role="dialog"]');
+            // The prompt toolbar is pinned to the bottom of the viewport
+            const atBottomBar = rect.bottom > window.innerHeight - 90;
+            return !inSidebarOrHeader && !inCanvasCard && atBottomBar;
+          });
           
           const settingsPill = bottomButtons.find((b) => {
             const text = (b.innerText || '').trim();
             const aria = (b.getAttribute('aria-label') || b.getAttribute('title') || '').toLowerCase();
+            
+            // Strictly exclude generate/submit or media picker buttons
+            if (aria.includes('generate') || aria.includes('submit') || aria.includes('send') || aria.includes('create') || aria.includes('add media') || text.includes('Create')) {
+              return false;
+            }
+
             return (
-              text.includes('Video ·') ||
-              text.includes('Image ·') ||
-              text.includes('720p') ||
-              text.includes('1080p') ||
+              text.includes('·') ||
+              text.includes('Nano Banana') ||
+              text.includes('Banana') ||
               text.includes('Omni Flash') ||
               text.includes('Veo') ||
+              text.includes('Imagen') ||
+              text.includes('Image ·') ||
+              text.includes('Video ·') ||
+              text.includes('16:9') ||
+              text.includes('9:16') ||
+              text.includes('720p') ||
+              text.includes('1080p') ||
               text.includes('4s') ||
               text.includes('6s') ||
               text.includes('8s') ||
-              text.includes('10s') ||
-              text.includes('16:9') ||
-              text.includes('9:16') ||
-              aria.includes('setting') ||
-              aria.includes('option') ||
-              aria.includes('parameter') ||
-              aria.includes('model') ||
-              b.querySelector('svg, i')?.getAttribute('aria-label')?.includes('setting')
+              text.includes('10s')
             );
           });
 
@@ -1400,16 +1739,18 @@ export class FlowAutomatorPool {
             await new Promise((r) => setTimeout(r, 200));
             isPopoverOpen = await page.evaluate(() => {
               const text = document.body?.innerText || '';
-              return text.includes('Omni Flash') || text.includes('Veo 3.1') || text.includes('Generating will use');
+              return text.includes('Omni Flash') || text.includes('Veo 3.1') || text.includes('Banana') || text.includes('Generating will use');
             });
             if (isPopoverOpen) break;
           }
         }
       }
 
-      // 2. Select Image vs Video mode
+      // 2. Select Image vs Video mode (strictly excluding sidebar and canvas card nodes)
       await page.evaluate((targetMode: string) => {
-        const buttons = Array.from(document.querySelectorAll('button, div[role="tab"], div[role="button"]')) as HTMLElement[];
+        const buttons = (Array.from(document.querySelectorAll('button, div[role="tab"], div[role="button"]')) as HTMLElement[]).filter(
+          (b) => !b.closest('nav, aside, header, [data-tile-id], .react-flow__node, [data-testid*="node"], [data-testid*="tile"]') && b.getBoundingClientRect().left >= 200
+        );
         if (targetMode === 'video') {
           const videoBtn = buttons.find((b) => {
             const text = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase().trim();
@@ -1433,7 +1774,9 @@ export class FlowAutomatorPool {
       // 3. Select Aspect Ratio (9:16 vs 16:9)
       if (settings.aspectRatio) {
         await page.evaluate((targetRatio: string) => {
-          const buttons = Array.from(document.querySelectorAll('button, div[role="button"], div[role="tab"]')) as HTMLElement[];
+          const buttons = (Array.from(document.querySelectorAll('button, div[role="button"], div[role="tab"]')) as HTMLElement[]).filter(
+            (b) => !b.closest('nav, aside, header, [data-tile-id], .react-flow__node, [data-testid*="node"], [data-testid*="tile"]') && b.getBoundingClientRect().left >= 200
+          );
           const ratioBtn = buttons.find((b) => {
             const text = (b.innerText || b.getAttribute('aria-label') || '').trim();
             return text.includes(targetRatio) || text === targetRatio;
@@ -1448,7 +1791,9 @@ export class FlowAutomatorPool {
       // 4. Select Video Model if in video mode
       if (settings.mode === 'video' && settings.videoModel) {
         const openedDropdown = await page.evaluate(async (targetModel: string) => {
-          const allElements = Array.from(document.querySelectorAll('button, div[role="button"], div[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"]')) as HTMLElement[];
+          const allElements = (Array.from(document.querySelectorAll('button, div[role="button"], div[role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"]')) as HTMLElement[]).filter(
+            (b) => !b.closest('nav, aside, header, [data-tile-id], .react-flow__node, [data-testid*="node"], [data-testid*="tile"]') && b.getBoundingClientRect().left >= 200
+          );
           
           const dropdownTrigger = allElements.find((el) => {
             const text = el.innerText || '';
@@ -1470,7 +1815,9 @@ export class FlowAutomatorPool {
           // Wait for menu items to appear
           await new Promise((r) => setTimeout(r, 350));
           await page.evaluate((targetModel: string) => {
-            const menuItems = Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], div[role="button"], button, span')) as HTMLElement[];
+            const menuItems = (Array.from(document.querySelectorAll('[role="option"], [role="menuitem"], div[role="button"], button, span')) as HTMLElement[]).filter(
+              (b) => !b.closest('nav, aside, header, [data-tile-id], .react-flow__node, [data-testid*="node"], [data-testid*="tile"]') && b.getBoundingClientRect().left >= 200
+            );
             const targetItem = menuItems.find((el) => {
               const text = (el.innerText || '').toLowerCase().trim();
               return text === targetModel.toLowerCase() || text.includes(targetModel.toLowerCase());
@@ -1486,7 +1833,9 @@ export class FlowAutomatorPool {
       // 5. Select Duration (4s, 6s, 8s, 10s)
       if (settings.mode === 'video' && settings.videoDuration) {
         await page.evaluate((targetDur: string) => {
-          const buttons = Array.from(document.querySelectorAll('button, div[role="button"], div[role="tab"]')) as HTMLElement[];
+          const buttons = (Array.from(document.querySelectorAll('button, div[role="button"], div[role="tab"]')) as HTMLElement[]).filter(
+            (b) => !b.closest('nav, aside, header, [data-tile-id], .react-flow__node, [data-testid*="node"], [data-testid*="tile"]') && b.getBoundingClientRect().left >= 200
+          );
           const durBtn = buttons.find((b) => {
             const text = (b.innerText || '').trim().toLowerCase();
             return text === targetDur.toLowerCase();
@@ -1501,7 +1850,9 @@ export class FlowAutomatorPool {
       // 6. Select Batch Count (x1, x2, x3, x4)
       if (settings.batchCount) {
         await page.evaluate((targetBatch: string) => {
-          const buttons = Array.from(document.querySelectorAll('button, div[role="button"], div[role="tab"]')) as HTMLElement[];
+          const buttons = (Array.from(document.querySelectorAll('button, div[role="button"], div[role="tab"]')) as HTMLElement[]).filter(
+            (b) => !b.closest('nav, aside, header, [data-tile-id], .react-flow__node, [data-testid*="node"], [data-testid*="tile"]') && b.getBoundingClientRect().left >= 200
+          );
           const batchBtn = buttons.find((b) => {
             const text = (b.innerText || '').trim().toLowerCase();
             return text === targetBatch.toLowerCase() || text === targetBatch.replace('x', '');
@@ -1599,6 +1950,14 @@ export class FlowAutomatorPool {
     const profileDir = path.join(process.cwd(), 'projects_data', 'chrome_profiles', `profile_${port}`);
     await fs.ensureDir(profileDir);
 
+    // Clean up dead zombie Chrome lock files from previous crashes to prevent "profile in use" hangs
+    for (const lock of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+      const lockPath = path.join(profileDir, lock);
+      if (await fs.pathExists(lockPath)) {
+        await fs.remove(lockPath).catch(() => {});
+      }
+    }
+
     // If port is already responding, check if we can simply bring the Flow tab to the front
     const isAlreadyAlive = await this.checkPortStatus(port);
     if (isAlreadyAlive) {
@@ -1608,14 +1967,14 @@ export class FlowAutomatorPool {
           const browser = this.browsers.get(port);
           if (browser) {
             const pages = await browser.pages().catch(() => []);
-            let flowPage = pages.find((p) => p.url().includes('labs.google'));
+            let flowPage = pages.find((p) => isFlowProjectUrl(p.url())) || pages.find((p) => isFlowUrl(p.url()));
             if (flowPage) {
               await flowPage.bringToFront().catch(() => {});
               return true;
             } else {
               flowPage = await browser.newPage().catch(() => null);
               if (flowPage) {
-                await flowPage.goto('https://labs.google/fx/tools/flow').catch(() => {});
+                await flowPage.goto('https://flow.google.com/').catch(() => {});
                 return true;
               }
             }
@@ -1636,7 +1995,12 @@ export class FlowAutomatorPool {
       `--user-data-dir=${profileDir}`,
       '--no-first-run',
       '--no-default-browser-check',
-      'https://labs.google/fx/tools/flow',
+      '--disable-background-mode',
+      '--disable-sync',
+      '--disable-features=WebAccountManager,AccountConsistency',
+      '--window-size=1440,900',
+      '--start-maximized',
+      'https://flow.google.com/',
     ];
 
     const proc = spawn(chromePath, args, {
@@ -1685,17 +2049,26 @@ export class FlowAutomatorPool {
       });
 
       this.browsers.set(port, browser);
+      this.rateLimitedPorts.delete(port); // Fresh connect clears any stale rate limit cooldown
       console.log(`[FlowAutomator] ✓ Connected successfully to Chrome on :${port}`);
 
       browser.on('disconnected', () => {
         console.warn(`[FlowAutomator] Chrome disconnected on port :${port}`);
         this.browsers.delete(port);
+        this.activeWorkers.delete(port);
       });
+
+      // If queue has jobs waiting and this port isn't working, start worker immediately!
+      if (this.queue.length > 0 && !this.activeWorkers.has(port)) {
+        this.isPaused = false;
+        this.startWorkerForPort(port);
+      }
 
       return true;
     } catch (err: any) {
       console.error(`[FlowAutomator] Failed to connect to port ${port}:`, err.message);
       this.browsers.delete(port);
+      this.activeWorkers.delete(port);
       return false;
     }
   }
@@ -1706,19 +2079,38 @@ export class FlowAutomatorPool {
   private async acquirePage(browser: Browser, port: number): Promise<Page | null> {
     try {
       const pages = await browser.pages();
-      let page = pages.find((p) => p.url().includes('labs.google'));
+      // Prioritize active project canvas first, then any Flow tab (excluding auth/API endpoints)
+      let page = pages.find((p) => isFlowProjectUrl(p.url())) || pages.find((p) => isFlowUrl(p.url()));
 
       if (!page) {
         if (pages.length > 0 && pages[0].url() === 'about:blank') {
           page = pages[0];
-          await page.goto('https://labs.google/fx/tools/flow', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.goto('https://flow.google.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
         } else {
           page = await browser.newPage();
-          await page.goto('https://labs.google/fx/tools/flow', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await page.goto('https://flow.google.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
         }
       }
 
-      await page.bringToFront();
+      await page.bringToFront().catch(() => {});
+      const outerDims = await page.evaluate(() => ({
+        w: window.outerWidth || 1920,
+        h: window.outerHeight || 1080,
+      })).catch(() => ({ w: 1920, h: 1080 }));
+
+      await page.setViewport({
+        width: Math.max(1280, outerDims.w),
+        height: Math.max(720, outerDims.h - 100),
+        deviceScaleFactor: 1,
+      }).catch(() => {});
+
+      // Ensure content container is never hidden by stray menu selectors
+      await page.evaluate(() => {
+        const el = document.querySelector('.content-container') as HTMLElement | null;
+        if (el && el.style.display === 'none') {
+          el.style.display = '';
+        }
+      }).catch(() => {});
 
       // Check if page crashed with React "Application error"
       const isCrashed = await page.evaluate(() => {
@@ -1734,12 +2126,26 @@ export class FlowAutomatorPool {
 
       // If on the projects list page, enter the active or new project
       const curUrl = page.url();
-      if (curUrl === 'https://labs.google/fx/tools/flow' || curUrl === 'https://labs.google/fx/tools/flow/') {
+      if (
+        curUrl === 'https://flow.google.com' ||
+        curUrl === 'https://flow.google.com/' ||
+        curUrl.startsWith('https://flow.google.com/projects') ||
+        curUrl === 'https://labs.google/fx/tools/flow' ||
+        curUrl === 'https://labs.google/fx/tools/flow/'
+      ) {
         await page.evaluate(() => {
           const projLink = (document.querySelector('a[href*="/project/"]') ||
                            Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('New project'))) as HTMLElement;
           if (projLink) projLink.click();
         }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+
+      // If currently on the /tools page, navigate back to the main project canvas
+      if (page.url().includes('/project/') && page.url().includes('/tools')) {
+        const cleanCanvasUrl = page.url().replace(/\/tools(?:\/.*)?$/, '');
+        console.log(`[FlowAutomator :${port}] Google Flow tab is on /tools. Navigating to project canvas: ${cleanCanvasUrl}`);
+        await page.goto(cleanCanvasUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
         await new Promise((r) => setTimeout(r, 2000));
       }
 
@@ -1751,67 +2157,78 @@ export class FlowAutomatorPool {
   }
 
   /**
+   * Starts an independent background worker loop for the given port if one isn't already active.
+   */
+  public startWorkerForPort(port: number): void {
+    if (this.activeWorkers.has(port)) return;
+    const browser = this.browsers.get(port);
+    if (!browser || !browser.isConnected()) return;
+
+    // Check if port is in rate-limit cooldown
+    const rateLimitExpiry = this.rateLimitedPorts.get(port);
+    if (rateLimitExpiry && Date.now() < rateLimitExpiry) {
+      console.log(`[FlowAutomator :${port}] Port ${port} is in usage limit cooldown (${Math.round((rateLimitExpiry - Date.now()) / 1000)}s remaining).`);
+      return;
+    }
+
+    this.activeWorkers.add(port);
+    this.isProcessing = true;
+    console.log(`[FlowAutomator :${port}] ▶️ Started browser worker for port ${port}. Active workers: ${this.activeWorkers.size}`);
+
+    this.runBrowserWorker(port)
+      .catch((err) => console.error(`[FlowAutomator :${port}] Worker error:`, err.message))
+      .finally(() => {
+        this.activeWorkers.delete(port);
+        console.log(`[FlowAutomator :${port}] ⏹️ Worker finished for port ${port}. Remaining workers: ${this.activeWorkers.size}`);
+        if (this.activeWorkers.size === 0 && this.queue.length === 0) {
+          this.isProcessing = false;
+          console.log('[FlowAutomator] Automation processing cycle completed.');
+        }
+      });
+  }
+
+  /**
    * Submits a list of generation jobs into the central queue and initiates workers.
    */
   public async submitJobs(jobs: AutomationJob[]): Promise<void> {
-    const existingIds = new Set(this.queue.map((q) => q.sceneId));
-    const newJobs = jobs.filter((j) => !existingIds.has(j.sceneId));
-    if (newJobs.length === 0) {
-      console.log(`[FlowAutomator] All ${jobs.length} requested jobs are already pending in queue. Skipping duplicate enqueue.`);
-      return;
+    // Clear pause and cooldowns on explicit user submission / retry
+    this.isPaused = false;
+    this.rateLimitedPorts.clear();
+
+    const incomingCompoundKeys = new Set(jobs.map((j) => `${j.projectId || 'default'}::${j.sceneId}`));
+    // Remove any stale queue entries for these exact project scenes
+    this.queue = this.queue.filter((q) => !incomingCompoundKeys.has(`${q.projectId || 'default'}::${q.sceneId}`));
+
+    // Reset retry counts and push fresh jobs
+    for (const job of jobs) {
+      (job as any).retryCount = 0;
+      this.queue.push(job);
     }
-    this.queue.push(...newJobs);
-    console.log(`[FlowAutomator] Enqueued ${newJobs.length} new jobs (${jobs.length - newJobs.length} duplicates ignored). Total queue: ${this.queue.length}`);
+    console.log(`[FlowAutomator] Enqueued ${jobs.length} jobs (fresh retry states). Total queue: ${this.queue.length}`);
 
-    if (this.isProcessing) return;
-    this.isProcessing = true;
-
-    try {
-      const activePorts: number[] = [];
-      for (const port of this.ports) {
-        if (!this.browsers.has(port)) {
-          const ok = await this.connectPort(port);
-          if (ok) activePorts.push(port);
-        } else {
-          activePorts.push(port);
-        }
+    // Connect any configured ports that are responding
+    for (const port of this.ports) {
+      if (!this.browsers.has(port)) {
+        await this.connectPort(port).catch(() => false);
       }
+    }
 
-      if (activePorts.length === 0) {
-        console.warn('[FlowAutomator] No active Chrome ports available. Attempting launch on 9222...');
-        const launched = await this.launchChromeInstance(9222);
-        if (launched) {
-          const ok = await this.connectPort(9222);
-          if (ok) activePorts.push(9222);
-        }
+    // Check if at least one browser is connected
+    const anyConnected = Array.from(this.browsers.values()).some((b) => b.isConnected());
+    if (!anyConnected) {
+      console.warn('[FlowAutomator] No active Chrome ports available. Attempting launch on 9222...');
+      const launched = await this.launchChromeInstance(9222);
+      if (launched) {
+        await this.connectPort(9222);
       }
+    }
 
-      if (activePorts.length === 0) {
-        throw new Error('No Chrome browser instances could be connected.');
+    // Launch worker for every connected port that isn't already working
+    for (const port of this.ports) {
+      const browser = this.browsers.get(port);
+      if (browser && browser.isConnected()) {
+        this.startWorkerForPort(port);
       }
-
-      // Pre-populate consumedUrls with images already existing on the canvas before new batch starts
-      for (const port of activePorts) {
-        const browser = this.browsers.get(port);
-        if (browser && browser.isConnected()) {
-          const page = await this.acquirePage(browser, port);
-          if (page && !page.isClosed()) {
-            const currentCanvasImgs = await page.evaluate(() => {
-              const imgs = Array.from(document.querySelectorAll('img')) as HTMLImageElement[];
-              return imgs.map((i) => i.src);
-            }).catch(() => []);
-            for (const src of currentCanvasImgs) {
-              this.consumedUrls.add(src);
-            }
-          }
-        }
-      }
-
-      const workers = activePorts.map((port) => this.runBrowserWorker(port));
-      await Promise.all(workers);
-    } finally {
-      this.isProcessing = false;
-      console.log('[FlowAutomator] Automation processing cycle completed.');
     }
   }
 
@@ -1834,6 +2251,13 @@ export class FlowAutomatorPool {
     this.inFlightMap.set(port, inFlight);
 
     while (this.queue.length > 0 || inFlight.length > 0) {
+      // If this port hit an account usage limit, break worker loop so another browser can work
+      const expiry = this.rateLimitedPorts.get(port);
+      if (expiry && Date.now() < expiry) {
+        console.log(`[FlowAutomator :${port}] Port ${port} is in usage limit cooldown. Pausing this browser worker.`);
+        break;
+      }
+
       // 0. Pause Handler: While paused, do NOT inject new prompts into the editor!
       // In-flight cards already on the canvas can still be cleanly polled and harvested.
       while (this.isPaused) {
@@ -1912,7 +2336,7 @@ export class FlowAutomatorPool {
         if (timedOut.length > 0) {
           for (const dead of timedOut) {
             console.warn(`[FlowAutomator :${port}] Generation timed out for scene ${dead.job.sceneId}`);
-            this.onJobProgress?.(dead.job.sceneId, 'error', undefined, 'Google Flow generation timed out.');
+            this.onJobProgress?.(dead.job.sceneId, 'error', undefined, 'Google Flow generation timed out.', dead.job.mediaType === 'video' ? 'video' : 'image', dead.job.projectId);
           }
           const remaining = inFlight.filter((c) => now - c.submittedAt <= timeoutLimit);
           inFlight.length = 0;
@@ -1927,13 +2351,39 @@ export class FlowAutomatorPool {
 
       // 2. If room is available in window and queue has items, send ONE tagged prompt cleanly
       if (this.queue.length > 0 && inFlight.length < this.maxConcurrentPerBrowser) {
-        const job = this.queue.shift();
-        if (job) {
-          this.onJobProgress?.(job.sceneId, 'generating', undefined, undefined, job.mediaType === 'video' ? 'video' : 'image');
+        // Project-Affinity Dispatch: Prefer jobs belonging to the project this worker/port is already generating
+        let jobIdx = -1;
+        const currentActiveProjectId = inFlight[0]?.job.projectId;
+        if (currentActiveProjectId) {
+          jobIdx = this.queue.findIndex((j) => j.projectId === currentActiveProjectId);
+        }
+        if (jobIdx === -1) {
+          const otherPortActiveProjectIds = new Set(
+            Array.from(this.inFlightMap.entries())
+              .filter(([p]) => p !== port)
+              .flatMap(([_, cards]) => cards.map((c) => c.job.projectId).filter(Boolean))
+          );
+          jobIdx = this.queue.findIndex((j) => !otherPortActiveProjectIds.has(j.projectId));
+          if (jobIdx === -1) jobIdx = 0;
+        }
 
-          // Check page liveness
+        const job = this.queue.splice(jobIdx, 1)[0];
+        if (job) {
+          this.onJobProgress?.(job.sceneId, 'generating', undefined, undefined, job.mediaType === 'video' ? 'video' : 'image', job.projectId);
+
+          // Check page liveness and bring Google Flow canvas to front
           if (!page || page.isClosed() || !browser?.isConnected()) {
             page = browser ? await this.acquirePage(browser, port) : null;
+          }
+          if (page && !page.isClosed()) {
+            await page.bringToFront().catch(() => {});
+            // If the tab navigated to /tools or a subpage, navigate back to the project canvas
+            if (page.url().includes('/project/') && page.url().includes('/tools')) {
+              const cleanCanvasUrl = page.url().replace(/\/tools(?:\/.*)?$/, '');
+              console.log(`[FlowAutomator :${port}] Google Flow tab is on /tools before job submission. Restoring canvas: ${cleanCanvasUrl}`);
+              await page.goto(cleanCanvasUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+              await new Promise((r) => setTimeout(r, 2000));
+            }
           }
           if (!page || page.isClosed()) {
             console.warn(`[FlowAutomator :${port}] Page unavailable, re-queuing scene ${job.sceneId}`);
@@ -1942,8 +2392,8 @@ export class FlowAutomatorPool {
             continue;
           }
 
-          // Generate unique non-colliding scene reference tag incorporating timecode + hash
-          const sceneTag = generateSceneTag(job.sceneId, job.prompt);
+          // Generate unique non-colliding scene reference tag incorporating timecode + project hash
+          const sceneTag = generateSceneTag(job.sceneId, job.prompt, job.projectId);
           const taggedPrompt = job.prompt.includes('[REF:')
             ? job.prompt
             : `[REF:${sceneTag}] ${job.prompt.trim()}`;
@@ -1960,15 +2410,10 @@ export class FlowAutomatorPool {
               .filter(Boolean);
           }).catch(() => []);
 
-          // If parallel items are in flight, shift canvas so the new card is created in clean open space (no card overlap!)
-          if (inFlight.length > 0 && page && !page.isClosed()) {
-            await page.evaluate(() => {
-              const canvas = document.querySelector('canvas') || document.body;
-              if (canvas) {
-                canvas.dispatchEvent(new WheelEvent('wheel', { deltaX: 350, deltaY: 0, bubbles: true }));
-              }
-            }).catch(() => {});
-            await new Promise((r) => setTimeout(r, 400));
+          // Wake up canvas and keep camera centered so newly spawned card is visible in real-time
+          if (page && !page.isClosed()) {
+            await this.wakeAndCenterCanvas(page);
+            await new Promise((r) => setTimeout(r, 300));
           }
 
           console.log(`[FlowAutomator :${port}] Submitting ${job.mediaType === 'video' ? 'VIDEO (Veo)' : 'IMAGE'} prompt for scene ${job.sceneId} [Tag: ${sceneTag}] (${inFlight.length + 1}/${this.maxConcurrentPerBrowser} in flight)...`);
@@ -1984,7 +2429,7 @@ export class FlowAutomatorPool {
             const retries = (job as any).retryCount || 0;
             if (retries >= 2) {
               console.error(`[FlowAutomator :${port}] Max submit retries (2) reached for scene ${job.sceneId}. Aborting scene to prevent infinite loop.`);
-              this.onJobProgress?.(job.sceneId, 'error', undefined, 'Failed to submit prompt to Google Flow after 2 attempts.');
+              this.onJobProgress?.(job.sceneId, 'error', undefined, 'Failed to submit prompt to Google Flow after 2 attempts.', job.mediaType === 'video' ? 'video' : 'image', job.projectId);
             } else {
               (job as any).retryCount = retries + 1;
               console.warn(`[FlowAutomator :${port}] Prompt submit unconfirmed for ${job.sceneId} (attempt ${retries + 1}/2), re-queuing...`);
@@ -1994,8 +2439,9 @@ export class FlowAutomatorPool {
             continue;
           }
 
-          // Wait 4.5 seconds for Google Flow to initialize the card on canvas and complete spawn animation
-          await new Promise((r) => setTimeout(r, 4500));
+          // Wait 3.5 seconds for Google Flow to initialize the card on canvas and complete spawn animation
+          await new Promise((r) => setTimeout(r, 3500));
+          await this.wakeAndCenterCanvas(page);
 
           // Detect newly spawned tile ID on canvas
           let tileId: string | undefined = undefined;
@@ -2037,6 +2483,9 @@ export class FlowAutomatorPool {
 
       if (page && !page.isClosed()) {
         try {
+          // Keep canvas awake and centered so WebGL repaints in real-time
+          await this.wakeAndCenterCanvas(page);
+
           const completedScenes = await this.pollAndHarvestReadyCards(page, inFlight);
           if (completedScenes.length > 0) {
             const remaining = inFlight.filter((c) => !completedScenes.includes(c.job.sceneId));
@@ -2052,12 +2501,40 @@ export class FlowAutomatorPool {
   }
 
   /**
+   * Wakes up Google Flow's WebGL / React Canvas by dispatching gentle pointer interaction
+   * and fitting all cards into view (Shift+1) so newly spawned cards are always visible in real-time.
+   */
+  private async wakeAndCenterCanvas(page: Page): Promise<void> {
+    try {
+      if (!page || page.isClosed()) return;
+      
+      const vp = page.viewport() || { width: 1280, height: 800 };
+      const midX = Math.round(vp.width / 2);
+      const midY = Math.round(vp.height * 0.45);
+      
+      // 1. Move mouse gently over canvas area to trigger requestAnimationFrame repaint
+      await page.mouse.move(midX, midY).catch(() => {});
+      await page.mouse.move(midX + 4, midY + 4).catch(() => {});
+
+      // 2. Dispatch resize and pointermove on canvas so WebGL repaints
+      await page.evaluate(() => {
+        window.dispatchEvent(new Event('resize'));
+        const canvas = document.querySelector('canvas');
+        if (canvas) {
+          canvas.dispatchEvent(new PointerEvent('pointermove', { clientX: window.innerWidth / 2, clientY: window.innerHeight / 2, bubbles: true }));
+        }
+      }).catch(() => {});
+    } catch {}
+  }
+
+  /**
    * Scans Google Flow canvas specifically for Failed / Policy Violation cards (which lack <img> tags).
    */
   private async detectFailedCanvasCards(page: Page): Promise<Array<{
     tileId?: string;
     cardText: string;
     reason: string;
+    isUsageLimit?: boolean;
     coordX?: number;
     coordY?: number;
     createdTime?: string | null;
@@ -2069,66 +2546,103 @@ export class FlowAutomatorPool {
         tileId?: string;
         cardText: string;
         reason: string;
+        isUsageLimit?: boolean;
         coordX?: number;
         coordY?: number;
         createdTime?: string | null;
       }> = [];
 
-      // Find all elements that indicate a generation failure / policy block
-      const allDivs = Array.from(document.querySelectorAll('div, section, article, [data-tile-id]')) as HTMLElement[];
-      const errorElements = allDivs.filter((el) => {
+      // Find all elements that indicate a generation failure / policy block.
+      // IMPORTANT: Scope to canvas tile containers ONLY — never the chat sidebar or agent responses!
+      // The Flow canvas tiles live inside flow-grid-tile-container, .react-flow__node, or [data-tile-id].
+      // We exclude the chat/agent panel to prevent Flow Agent messages like
+      // "I can't process more than 24 items" from being mis-detected as policy violations.
+      const canvasRoot = (
+        document.querySelector('flow-canvas, .flow-canvas, [class*="canvas-container"], .react-flow, [class*="ReactFlow"]') ||
+        document.querySelector('main') ||
+        document.body
+      ) as HTMLElement;
+
+      // Only search within tile wrappers inside the canvas, never chat/sidebar panels
+      const tileScopeSelectors = [
+        '[data-tile-id]',
+        'flow-error-tile',
+        'flow-image-tile',
+        'flow-video-tile',
+        '.error-tile',
+        '.error-message',
+        'flow-grid-tile-container',
+        'flow-tile-container',
+        '.react-flow__node',
+      ];
+      const scopedTiles = Array.from(canvasRoot.querySelectorAll(tileScopeSelectors.join(','))) as HTMLElement[];
+
+      // Also look for any div that is visually in the canvas area (not in a known chat/sidebar panel)
+      const chatPanels = Array.from(document.querySelectorAll(
+        '[class*="chat"], [class*="Chat"], [class*="agent"], [class*="sidebar"], [class*="Sidebar"], [class*="panel"], [class*="Panel"], [class*="conversation"], [role="log"]'
+      )) as HTMLElement[];
+
+      const isChatDescendant = (el: HTMLElement) => chatPanels.some((panel) => panel.contains(el));
+
+      const errorElements = scopedTiles.filter((el) => {
+        if (isChatDescendant(el)) return false; // never flag chat messages
         const text = (el.innerText || '').toLowerCase();
         const hasPolicyPhrase =
           text.includes('violate our policies') ||
           text.includes('violates our policies') ||
-          (text.includes('failed') && (text.includes('policies') || text.includes('charged') || text.includes('send feedback'))) ||
+          text.includes('generation might violate') ||
+          text.includes('violates safety') ||
+          text.includes('blocked by safety') ||
+          text.includes('prohibited content') ||
           text.includes("can't generate image") ||
-          text.includes('cannot generate image') ||
-          text.includes('generation might violate');
-        return hasPolicyPhrase && el.childElementCount < 25;
+          text.includes('cannot generate image');
+        const hasUsageLimitPhrase =
+          text.includes('usage limit') ||
+          text.includes('rate limit') ||
+          text.includes('unusual activity') ||
+          // NOTE: 'you have not been charged' is intentionally excluded — it appears in
+          // the software's own error messages and can cause false positives
+          (text.includes('try again later') && text.includes('reached'));
+        return (hasPolicyPhrase || hasUsageLimitPhrase) && el.childElementCount < 25;
       });
 
       for (const el of errorElements) {
-        let tileEl: HTMLElement | null = el;
-        let tileId = '';
-        let cardText = '';
+        // Enclose strictly within the tile container so cardText NEVER escapes to body / prompt editor!
+        const tileContainer = (el.closest('flow-grid-tile-container, flow-tile-container, flow-image-tile, flow-video-tile, [data-tile-id], .react-flow__node') || el) as HTMLElement;
+        let tileId = tileContainer.getAttribute('data-tile-id') || '';
+        let cardText = (tileContainer.innerText || el.innerText || '') + ' ' + (tileContainer.getAttribute('aria-label') || '');
         let createdTime: string | null = null;
 
-        for (let lvl = 0; lvl < 12 && tileEl; lvl++) {
-          if (!tileId && tileEl.getAttribute('data-tile-id')) {
-            tileId = tileEl.getAttribute('data-tile-id') || '';
+        try {
+          const rTarget = tileContainer || el;
+          const rKey = Object.keys(rTarget).find((k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+          if (rKey) {
+            const fiber = (rTarget as any)[rKey];
+            const p = fiber?.memoizedProps;
+            if (p?.tile?.createdTime) createdTime = p.tile.createdTime;
+            else if (p?.children?.props?.tile?.createdTime) createdTime = p.children.props.tile.createdTime;
+            if (!tileId && p?.tile?.id) tileId = p.tile.id;
           }
-          if (!createdTime) {
-            try {
-              const rKey = Object.keys(tileEl).find((k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
-              if (rKey) {
-                const fiber = (tileEl as any)[rKey];
-                const p = fiber?.memoizedProps;
-                if (p?.tile?.createdTime) createdTime = p.tile.createdTime;
-                else if (p?.children?.props?.tile?.createdTime) createdTime = p.children.props.tile.createdTime;
-                if (!tileId && p?.tile?.id) tileId = p.tile.id;
-              }
-            } catch {}
-          }
-          cardText += ' ' + (
-            tileEl.innerText ||
-            tileEl.getAttribute('aria-label') ||
-            tileEl.getAttribute('title') ||
-            tileEl.getAttribute('data-prompt') ||
-            tileEl.getAttribute('data-ref') ||
-            ''
-          );
-          if (tileEl.getAttribute('data-tile-id')) break;
-          tileEl = tileEl.parentElement;
-        }
+        } catch {}
 
-        if (tileId && consumedSet.has(tileId)) continue;
+        const textLower = (el.innerText || '').toLowerCase() + ' ' + cardText.toLowerCase();
+        const isUnusualActivity = textLower.includes('unusual activity');
+        const isUsageLimit = isUnusualActivity || textLower.includes('usage limit') || textLower.includes('rate limit') || (textLower.includes('try again later') && textLower.includes('reached'));
 
         const rect = el.getBoundingClientRect();
+        const coordKey = `tile_fail_${Math.round(rect.x / 20)}_${Math.round(rect.y / 20)}`;
+        if (tileId && consumedSet.has(tileId)) continue;
+        if (!tileId && consumedSet.has(coordKey)) continue;
+
         results.push({
-          tileId: tileId || undefined,
+          tileId: tileId || coordKey,
           cardText: cardText.toLowerCase(),
-          reason: 'Google Flow content policy violation: This generation might violate our policies.',
+          reason: isUnusualActivity
+            ? 'Google Flow cooldown: "We noticed some unusual activity". Google requires a brief verification or cooldown period on this account. Please check the browser window or wait a few minutes.'
+            : isUsageLimit
+            ? 'Google Flow usage limit reached: You have reached your generation limit on this Google account. Please wait before trying again.'
+            : 'Google Flow content policy violation: This prompt was flagged by Google Flow safety filters.',
+          isUsageLimit,
           coordX: rect.x,
           coordY: rect.y,
           createdTime,
@@ -2159,30 +2673,75 @@ export class FlowAutomatorPool {
     try {
       const failedCards = await this.detectFailedCanvasCards(page);
       if (failedCards.length > 0) {
-        for (const card of inFlightCards) {
-          const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
-          const matchedFailed = failedCards.find((f) => {
-            if (f.tileId && card.tileId && f.tileId === card.tileId) return true;
-            const score = scoreCandidateCard(f.cardText, card.sceneTag, card.job.prompt, sceneTc);
-            if (score >= 60) return true;
-            // In 1x Solo mode, if there's only 1 in-flight card and at least 3 seconds elapsed since submission
-            if (this.maxConcurrentPerBrowser === 1 && inFlightCards.length === 1 && (Date.now() - card.submittedAt) >= 3000) {
-              return true;
-            }
-            return false;
-          });
+        // If an account-wide usage limit is on canvas, handle gracefully
+        const usageLimitCard = failedCards.find((f) => f.isUsageLimit);
+        if (usageLimitCard) {
+          const isUnusual = (usageLimitCard.cardText || '').includes('unusual activity');
+          const currentPort = inFlightCards[0]?.assignedPort;
+          console.warn(`[FlowAutomator :${currentPort}] ⚠️ ${isUnusual ? 'Google Flow unusual activity security cooldown' : 'Google Flow account usage limit reached'} on port ${currentPort}.`);
+          if (currentPort) {
+            this.rateLimitedPorts.set(currentPort, Date.now() + 15 * 60 * 1000); // 15-minute cooldown for this port
+          }
+          if (usageLimitCard.tileId) this.consumedFailedTiles.add(usageLimitCard.tileId);
 
-          if (matchedFailed) {
-            console.warn(`[FlowAutomator] ❌ STRICT MATCH: Detected Google Flow Policy Violation for scene ${card.job.sceneId} [${card.sceneTag}]. Marking failed & ejecting from in-flight queue.`);
+          // Return in-flight jobs back to the head of the queue so other browsers (e.g. port 9222) can take them!
+          for (const card of inFlightCards) {
+            console.log(`[FlowAutomator :${currentPort}] Re-queuing scene ${card.job.sceneId} for another available browser instance...`);
+            this.queue.unshift(card.job);
+            harvestedSceneIds.push(card.job.sceneId);
+          }
+
+          // Check if any other connected browser is available and not in cooldown
+          const otherAvailablePort = this.ports.find(
+            (p) => p !== currentPort && this.browsers.has(p) && (!this.rateLimitedPorts.get(p) || Date.now() >= this.rateLimitedPorts.get(p)!)
+          );
+
+          if (otherAvailablePort) {
+            console.log(`[FlowAutomator] Port ${otherAvailablePort} is available with a different account! Shifting queue to port ${otherAvailablePort}.`);
+            this.startWorkerForPort(otherAvailablePort);
+          } else {
+            console.warn('[FlowAutomator] All available browser instances reached usage limit or cooldown. Pausing automator.');
+            this.isPaused = true;
             this.onJobProgress?.(
-              card.job.sceneId,
+              inFlightCards[0]?.job.sceneId || '',
               'error',
               undefined,
-              'Policy Violation: Google Flow rejected this prompt (violates safety policies). You have not been charged for this generation.',
-              card.job.mediaType === 'video' ? 'video' : 'image'
+              isUnusual
+                ? 'Google Flow Security Cooldown: Google noticed unusual activity on this account. Please wait 15–30 minutes or check Chrome to verify.'
+                : 'Google Flow Usage Limit Reached: All connected Google accounts reached their limit. Please wait or connect another Chrome account.',
+              'image',
+              inFlightCards[0]?.job.projectId
             );
-            if (matchedFailed.tileId) this.consumedFailedTiles.add(matchedFailed.tileId);
-            harvestedSceneIds.push(card.job.sceneId);
+          }
+        } else {
+          for (const card of inFlightCards) {
+            const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
+            const matchedFailed = failedCards.find((f) => {
+              // GUARD: Only trust tileId-based matches — text-only matches are too unreliable
+              // for policy violations since a single false match silently fails a good scene.
+              if (f.tileId && card.tileId && f.tileId === card.tileId) return true;
+
+              // For text-based matches, require VERY high confidence:
+              // - The failed card text must contain the scene tag (not just generic prompt words)
+              // - Score threshold raised to 600 (requires at least timecode or scene tag hit)
+              const score = scoreCandidateCard(f.cardText, card.sceneTag, card.job.prompt, sceneTc);
+              if (score >= 600 && f.tileId) return true; // only trust high-score hits with a real tileId
+              return false;
+            });
+
+            if (matchedFailed) {
+              console.warn(`[FlowAutomator] ❌ STRICT MATCH: Detected Google Flow Policy Violation for scene ${card.job.sceneId} [${card.sceneTag}]. Marking failed & ejecting from in-flight queue.`);
+              this.onJobProgress?.(
+                card.job.sceneId,
+                'error',
+                undefined,
+                'Policy Violation: Google Flow rejected this prompt (violates safety policies).',
+                card.job.mediaType === 'video' ? 'video' : 'image',
+                card.job.projectId
+              );
+              if (matchedFailed.tileId) this.consumedFailedTiles.add(matchedFailed.tileId);
+              harvestedSceneIds.push(card.job.sceneId);
+            }
           }
         }
       }
@@ -2230,7 +2789,21 @@ export class FlowAutomatorPool {
 
       // CRITICAL: A newly submitted job MUST NEVER match media that already existed before submission!
       const initialSet = new Set(card.initialUrls || []);
-      const newPool = availablePool.filter((cand) => cand.src && cand.src.length > 5 && !initialSet.has(cand.src));
+      let newPool = availablePool.filter((cand) => cand.src && cand.src.length > 5 && !initialSet.has(cand.src));
+
+      // If no new candidates are found outside initialUrls, allow high-confidence semantic matches
+      // (score >= 180 or exact tileId) to match even if captured in initialUrls snapshot
+      if (newPool.length === 0) {
+        const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
+        const confidentMatch = availablePool.find((cand) => {
+          if (card.tileId && cand.tileId === card.tileId) return true;
+          const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
+          return score >= 180;
+        });
+        if (confidentMatch) {
+          newPool = [confidentMatch];
+        }
+      }
       if (newPool.length === 0) continue;
 
       let bestIdx = -1;
@@ -2311,7 +2884,7 @@ export class FlowAutomatorPool {
         if (saved) {
           console.log(`[FlowAutomator] ✓ MATCHED & SAVED VIDEO for scene ${card.job.sceneId} [${card.sceneTag}] -> ${card.job.outputPath}`);
           this.consumedUrls.add(matchedCand.src);
-          this.onJobProgress?.(card.job.sceneId, 'ready', card.job.outputPath, undefined, 'video');
+          this.onJobProgress?.(card.job.sceneId, 'ready', card.job.outputPath, undefined, 'video', card.job.projectId);
           harvestedSceneIds.push(card.job.sceneId);
         }
       } catch (err: any) {
@@ -2341,8 +2914,11 @@ export class FlowAutomatorPool {
         if (!src || src.trim() === '' || src === 'about:blank') return false;
         const rect = img.getBoundingClientRect();
         const isMedia =
+          src.includes('flow-content.google') ||
+          src.includes('flow.google.com/asb') ||
           src.includes('media.getMediaUrlRedirect') ||
           src.includes('googleusercontent') ||
+          (img.alt && img.alt.includes('Tile displaying')) ||
           src.startsWith('blob:') ||
           src.startsWith('data:image');
         const notIcon =
@@ -2356,14 +2932,27 @@ export class FlowAutomatorPool {
         return isMedia && notIcon && hasSize && isNotHeaderOrNav;
       });
 
-      // Filter out images whose card is still generating (showing % like 83%, 99%)
+      // Filter out images whose card is still generating (strictly bounded to card tile container)
       const completedOnly = validMedia.filter((img) => {
         if (consumedSet.has(img.src)) return false;
         let parent = img.parentElement;
-        for (let lvl = 0; lvl < 10 && parent; lvl++) {
+        for (let lvl = 0; lvl < 8 && parent; lvl++) {
+          if (
+            parent.tagName === 'BODY' ||
+            parent.tagName === 'MAIN' ||
+            parent.classList?.contains('tile-row') ||
+            parent.classList?.contains('virtual-scroll-container') ||
+            parent.classList?.contains('virtual-item-container') ||
+            parent.classList?.contains('cdk-virtual-scroll-viewport')
+          ) {
+            break;
+          }
           const text = parent.innerText || '';
           if (/\b\d{1,2}%\b/.test(text) || text.includes('Generating') || text.includes('Creating') || text.includes('Rendering')) {
             return false;
+          }
+          if (parent.tagName === 'FLOW-GRID-TILE-CONTAINER' || parent.hasAttribute('data-tile-id')) {
+            break;
           }
           parent = parent.parentElement;
         }
@@ -2377,18 +2966,31 @@ export class FlowAutomatorPool {
         let createdTime: string | null = null;
         const siblingUrls: string[] = [];
 
-        for (let lvl = 0; lvl < 12 && parent; lvl++) {
-          if (!tileId) {
-            tileId = parent.getAttribute('data-tile-id') || '';
+        for (let lvl = 0; lvl < 8 && parent; lvl++) {
+          if (
+            parent.tagName === 'BODY' ||
+            parent.tagName === 'MAIN' ||
+            parent.classList?.contains('tile-row') ||
+            parent.classList?.contains('virtual-scroll-container') ||
+            parent.classList?.contains('virtual-item-container') ||
+            parent.classList?.contains('cdk-virtual-scroll-viewport')
+          ) {
+            break;
           }
-          cardText += ' ' + (
-            parent.innerText ||
-            parent.getAttribute('aria-label') ||
-            parent.getAttribute('title') ||
-            parent.getAttribute('data-prompt') ||
-            parent.getAttribute('data-ref') ||
-            ''
-          );
+          const tileContainer = img.closest('flow-grid-tile-container, flow-tile-container, [class*="tile-container"]');
+          if (tileContainer) {
+            const tcAria = tileContainer.getAttribute('aria-label') || '';
+            const tcTitle = tileContainer.getAttribute('title') || '';
+            const tcText = (tileContainer as HTMLElement).innerText || '';
+            cardText += ` ${tcAria} ${tcTitle} ${tcText}`;
+          }
+
+          const pText = parent.innerText || '';
+          const pAria = parent.getAttribute('aria-label') || '';
+          const pTitle = parent.getAttribute('title') || '';
+          const pDataPrompt = parent.getAttribute('data-prompt') || '';
+          const pDataRef = parent.getAttribute('data-ref') || '';
+          cardText += ` ${pText} ${pAria} ${pTitle} ${pDataPrompt} ${pDataRef}`;
 
           if (!createdTime) {
             try {
@@ -2422,7 +3024,10 @@ export class FlowAutomatorPool {
               siblingUrls.push(s);
             }
           }
+
+          const isBoundary = parent.tagName === 'FLOW-GRID-TILE-CONTAINER' || parent.hasAttribute('data-tile-id');
           parent = parent.parentElement;
+          if (isBoundary) break;
         }
 
         const rect = img.getBoundingClientRect();
@@ -2452,7 +3057,21 @@ export class FlowAutomatorPool {
 
       // CRITICAL: A newly submitted job MUST NEVER match media that already existed before submission!
       const initialSet = new Set(card.initialUrls || []);
-      const newPool = availablePool.filter((cand) => cand.src && cand.src.length > 5 && !initialSet.has(cand.src));
+      let newPool = availablePool.filter((cand) => cand.src && cand.src.length > 5 && !initialSet.has(cand.src));
+
+      // If no new candidates are found outside initialUrls, allow high-confidence semantic matches
+      // (score >= 180 or exact tileId) to match even if captured in initialUrls snapshot
+      if (newPool.length === 0) {
+        const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
+        const confidentMatch = availablePool.find((cand) => {
+          if (card.tileId && cand.tileId === card.tileId) return true;
+          const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
+          return score >= 180;
+        });
+        if (confidentMatch) {
+          newPool = [confidentMatch];
+        }
+      }
       if (newPool.length === 0) continue;
 
       let bestIdx = -1;
@@ -2565,7 +3184,7 @@ export class FlowAutomatorPool {
               this.consumedUrls.add(sUrl);
             }
           }
-          this.onJobProgress?.(card.job.sceneId, 'ready', card.job.outputPath, undefined, 'image');
+          this.onJobProgress?.(card.job.sceneId, 'ready', card.job.outputPath, undefined, 'image', card.job.projectId);
           harvestedSceneIds.push(card.job.sceneId);
         } else if (harvestResult?.status === 'needs_canvas_shot' && harvestResult.src) {
           const imgHandle = await page.evaluateHandle((srcToMatch: string) => {
@@ -2584,7 +3203,7 @@ export class FlowAutomatorPool {
                 this.consumedUrls.add(sUrl);
               }
             }
-            this.onJobProgress?.(card.job.sceneId, 'ready', card.job.outputPath, undefined, 'image');
+            this.onJobProgress?.(card.job.sceneId, 'ready', card.job.outputPath, undefined, 'image', card.job.projectId);
             harvestedSceneIds.push(card.job.sceneId);
           }
         }
@@ -2626,7 +3245,14 @@ export class FlowAutomatorPool {
       await new Promise((r) => setTimeout(r, 3000));
     }
 
-    // 1. If currently inside a card /edit/ view, exit back to the main project canvas
+    // 1. If currently inside a subpage like /tools or /edit/, exit back to the main project canvas
+    if (page.url().includes('/project/') && page.url().includes('/tools')) {
+      const cleanCanvasUrl = page.url().replace(/\/tools(?:\/.*)?$/, '');
+      console.log(`[FlowAutomator] Page is on /tools. Navigating back to project canvas: ${cleanCanvasUrl}`);
+      await page.goto(cleanCanvasUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+
     if (page.url().includes('/edit/')) {
       await page.evaluate(() => {
         const backBtn = Array.from(document.querySelectorAll('button')).find((b) =>
@@ -2637,16 +3263,24 @@ export class FlowAutomatorPool {
       await new Promise((r) => setTimeout(r, 1000));
     }
 
-    // Deselect any active cards on canvas and close open menus/overlays
+    // Deselect any active cards on canvas and force-close open context menus/popovers
     try {
-      // Click neutral empty canvas space to unselect any previously generated card
-      await page.mouse.click(80, 300).catch(() => {});
-      await new Promise((r) => setTimeout(r, 150));
-      await page.keyboard.press('Escape');
+      await page.keyboard.press('Escape').catch(() => {});
       await new Promise((r) => setTimeout(r, 100));
-      await page.keyboard.press('Escape');
+      await page.keyboard.press('Escape').catch(() => {});
+      // Ensure content container is explicitly visible and any actual overlay menus are dismissed
+      await page.evaluate(() => {
+        const contentEl = document.querySelector('.content-container') as HTMLElement | null;
+        if (contentEl && contentEl.style.display === 'none') {
+          contentEl.style.display = '';
+        }
+        const overlays = Array.from(document.querySelectorAll('.cdk-overlay-backdrop, .mat-mdc-menu-panel')) as HTMLElement[];
+        for (const o of overlays) {
+          o.remove();
+        }
+      }).catch(() => {});
     } catch {}
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 150));
 
     // Ensure desired generation settings / mode ONLY if not in Agent mode (to prevent turning Agent mode off!)
     if (!isAgentMode) {
@@ -2666,75 +3300,134 @@ export class FlowAutomatorPool {
 
     // 2. Ensure editor is visible on the canvas
     try {
-      await page.waitForSelector('[data-slate-editor="true"], div[role="textbox"][contenteditable="true"], [contenteditable="true"]', { timeout: 8000 });
+      await page.waitForSelector('.ProseMirror, [data-slate-editor="true"], div[role="textbox"][contenteditable="true"], [contenteditable="true"]', { timeout: 8000 });
     } catch {}
 
-    // 3. Focus Slate prompt editor using native mouse click
-    const slatePos = await page.evaluate(() => {
-      const allElements = Array.from(
-        document.querySelectorAll('[data-slate-editor="true"], div[role="textbox"], [contenteditable="true"]')
-      ) as HTMLElement[];
+    // 3. Focus editor and clear previous placeholder / text
+    const editorFound = await page.evaluate(() => {
+      const allElements = (Array.from(
+        document.querySelectorAll('.ProseMirror, [data-slate-editor="true"], div[role="textbox"], [contenteditable="true"]')
+      ) as HTMLElement[]).filter((el) => !el.closest('nav, aside, header'));
 
       const validEditors = allElements.filter((el) => {
         const rect = el.getBoundingClientRect();
-        return rect.width > 40 && rect.height > 15 && !el.closest('header');
+        return rect.width > 40 && rect.height > 15;
       });
 
       const editor = validEditors.sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom)[0];
-      if (!editor) return null;
+      if (!editor) return false;
 
       editor.scrollIntoView({ block: 'nearest', inline: 'nearest' });
       editor.focus();
-      const r = editor.getBoundingClientRect();
-      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
-    }).catch(() => null);
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      return true;
+    }).catch(() => false);
 
-    if (slatePos) {
-      await page.mouse.click(slatePos.x, slatePos.y).catch(() => {});
-      await new Promise((r) => setTimeout(r, 200));
+    if (!editorFound) {
+      console.warn('[FlowAutomator] Prompt editor not found on canvas. Checking page URL...');
+      if (page.url().includes('/tools')) {
+        const cleanCanvasUrl = page.url().replace(/\/tools(?:\/.*)?$/, '');
+        console.log(`[FlowAutomator] Page was on /tools. Restoring canvas: ${cleanCanvasUrl}`);
+        await page.goto(cleanCanvasUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 2500));
+      }
+      return false;
     }
 
-    // Clear previous placeholder / text using native keyboard
-    await page.keyboard.down('Control').catch(() => {});
-    await page.keyboard.press('KeyA').catch(() => {});
-    await page.keyboard.up('Control').catch(() => {});
-    await page.keyboard.press('Backspace').catch(() => {});
-    await new Promise((r) => setTimeout(r, 200));
+    // Clear previous text thoroughly from ProseMirror editor
+    await page.evaluate(() => {
+      const allElements = (Array.from(
+        document.querySelectorAll('.ProseMirror, [data-slate-editor="true"], div[role="textbox"], [contenteditable="true"]')
+      ) as HTMLElement[]).filter((el) => !el.closest('nav, aside, header'));
+      const editor = allElements.sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom)[0];
+      if (editor) {
+        editor.focus();
+        editor.innerText = '';
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+        document.execCommand('delete');
+      }
+    }).catch(() => {});
+    // 4. Natural human-like prompt insertion:
+    // (a) 1 second pause after focusing / clearing the editor
+    console.log('[FlowAutomator] Pausing 1 second before pasting prompt...');
+    await new Promise((r) => setTimeout(r, 1000));
 
-    // Type prompt directly into Slate
-    console.log(`[FlowAutomator] Typing prompt into Slate editor (${cleanPrompt.length} chars)...`);
-    await page.keyboard.type(cleanPrompt, { delay: 1 }).catch(() => {});
-    await new Promise((r) => setTimeout(r, 600));
+    // (b) Paste prompt progressively over ~3 seconds
+    console.log(`[FlowAutomator] Inserting prompt into editor over 3s (${cleanPrompt.length} chars)...`);
+    const chunkCount = Math.min(20, Math.max(10, Math.ceil(cleanPrompt.length / 30)));
+    const chunkSize = Math.ceil(cleanPrompt.length / chunkCount);
+    const delayPerChunk = Math.round(3000 / chunkCount);
 
-    // 4. Target and click the submit button via semantic selectors and Ctrl+Enter
+    let inserted = true;
+    for (let i = 0; i < cleanPrompt.length; i += chunkSize) {
+      const chunk = cleanPrompt.slice(i, i + chunkSize);
+      const ok = await page.evaluate((c: string) => {
+        const allElements = (Array.from(
+          document.querySelectorAll('.ProseMirror, [data-slate-editor="true"], div[role="textbox"], [contenteditable="true"]')
+        ) as HTMLElement[]).filter((el) => !el.closest('nav, aside, header'));
+        const editor = allElements.sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom)[0];
+        if (!editor) return false;
+        editor.focus();
+        return document.execCommand('insertText', false, c);
+      }, chunk).catch(() => false);
+
+      if (!ok) {
+        inserted = false;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, delayPerChunk));
+    }
+
+    if (!inserted) {
+      await page.keyboard.type(cleanPrompt, { delay: Math.max(2, Math.round(3000 / cleanPrompt.length)) }).catch(() => {});
+    }
+
+    // (c) 1 second pause after pasting the full prompt before submitting
+    console.log('[FlowAutomator] Prompt fully entered. Pausing 1 second before submission...');
+    await new Promise((r) => setTimeout(r, 1000));
+
+    // 5. Target and click the submit button via direct semantic selectors and keyboard
     let submitted = false;
 
-    // Send native Ctrl+Enter keyboard submission first
-    await page.keyboard.down('Control').catch(() => {});
-    await page.keyboard.press('Enter').catch(() => {});
-    await page.keyboard.up('Control').catch(() => {});
-    await new Promise((r) => setTimeout(r, 300));
-
-    for (let btnCheck = 0; btnCheck < 10; btnCheck++) {
+    for (let btnCheck = 0; btnCheck < 15; btnCheck++) {
       const submitBtn = await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button, div[role="button"]')) as HTMLElement[];
+        // Direct match for Google Flow's Angular submit button
+        const directBtn = document.querySelector('button[aria-label="Start generation"], button[type="submit"]') as HTMLElement | null;
+        if (directBtn) {
+          const r = directBtn.getBoundingClientRect();
+          const isDisabled = directBtn.hasAttribute('disabled') || directBtn.getAttribute('aria-disabled') === 'true';
+          return {
+            x: Math.round(r.x + r.width / 2),
+            y: Math.round(r.y + r.height / 2),
+            disabled: isDisabled,
+          };
+        }
+
+        const buttons = (Array.from(document.querySelectorAll('button, div[role="button"]')) as HTMLElement[]).filter(
+          (b) => !b.closest('nav, aside, header')
+        );
         const bottomButtons = buttons.filter((b) => b.getBoundingClientRect().top > window.innerHeight * 0.35);
 
         const arrowBtn = bottomButtons.find((b) => {
           const text = (b.innerText || '').trim();
           const aria = (b.getAttribute('aria-label') || b.getAttribute('title') || '').toLowerCase();
-          const iconEl = b.querySelector('i, span, svg');
+          const iconEl = b.querySelector('i, span, svg, mat-icon');
           const iconText = iconEl ? (iconEl.textContent || '').trim() : '';
           const hasSvg = Boolean(b.querySelector('svg'));
 
-          // Explicitly exclude "Add media to prompt" dialog button (e.g. "add_2 Create")
-          const isMediaPicker = b.getAttribute('aria-haspopup') === 'dialog' || iconText === 'add_2' || text.startsWith('add_2');
+          const isMediaPicker = b.getAttribute('aria-haspopup') === 'dialog' || iconText === 'add_2' || text.startsWith('add_2') || aria.includes('add media') || aria.includes('ingredient');
           if (isMediaPicker) return false;
 
           const hasArrowIcon = iconText.includes('arrow_forward') || iconText.includes('send') || text.includes('arrow_forward') || text.includes('Create') || text.includes('send');
-          const isSubmitRole = aria.includes('generate') || aria.includes('submit') || aria.includes('send') || aria.includes('create') || aria.includes('run');
-          
-          // Check for circular action button on bottom right of the prompt box
+          const isSubmitRole = aria.includes('generation') || aria.includes('generate') || aria.includes('submit') || aria.includes('send') || aria.includes('create') || aria.includes('run');
           const rect = b.getBoundingClientRect();
           const isCircularRightBtn = hasSvg && rect.width < 55 && rect.height < 55;
 
@@ -2752,50 +3445,75 @@ export class FlowAutomatorPool {
       }).catch(() => null);
 
       if (submitBtn && !submitBtn.disabled) {
-        await page.mouse.click(submitBtn.x, submitBtn.y).catch(() => {});
+        // Trigger clean DOM .click() first
+        const clickedViaDom = await page.evaluate(() => {
+          const btn = (document.querySelector('button[aria-label="Start generation"], button[type="submit"]') ||
+            Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('arrow_forward'))) as HTMLElement;
+          if (btn && !btn.hasAttribute('disabled') && btn.getAttribute('aria-disabled') !== 'true') {
+            btn.click();
+            return true;
+          }
+          return false;
+        }).catch(() => false);
+
+        // If DOM click was blocked or didn't fire, fallback to precise mouse click at button coordinates
+        if (!clickedViaDom && submitBtn.x > 0 && submitBtn.y > 0) {
+          await page.mouse.click(submitBtn.x, submitBtn.y).catch(() => {});
+        }
         submitted = true;
-        console.log('[FlowAutomator] ✓ Clicked Create / Submit button successfully!');
+        console.log('[FlowAutomator] ✓ Clicked Create / Submit button cleanly!');
         break;
       }
 
-      await new Promise((r) => setTimeout(r, 250));
+      await new Promise((r) => setTimeout(r, 200));
     }
 
-    // 7. Verification loop: Confirm that prompt was submitted and cleared from bottom editor
+    // 6. Verification loop: Confirm that prompt was submitted and cleared from bottom editor
     for (let attempt = 0; attempt < 8; attempt++) {
-      await new Promise((r) => setTimeout(r, 700));
+      await new Promise((r) => setTimeout(r, 500));
       const status = await page.evaluate(() => {
-        const allElements = Array.from(
-          document.querySelectorAll('[data-slate-editor="true"], div[role="textbox"], [contenteditable="true"], textarea')
-        ) as HTMLElement[];
+        const allElements = (Array.from(
+          document.querySelectorAll('.ProseMirror, [data-slate-editor="true"], div[role="textbox"], [contenteditable="true"]')
+        ) as HTMLElement[]).filter((el) => !el.closest('nav, aside, header'));
 
-        const validEditors = allElements.filter((el) => {
-          const rect = el.getBoundingClientRect();
-          return rect.width > 40 && rect.height > 15 && !el.closest('header');
-        });
-
-        const editor = validEditors.sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom)[0];
+        const editor = allElements.sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom)[0];
         if (!editor) return { cleared: true, textLen: 0 };
 
-        const text = (editor.innerText || '').trim();
-        const isPlaceholder = text.includes('What do you want to create') || text === '';
+        const text = (editor.innerText || editor.textContent || '').trim();
+        const isPlaceholder =
+          text.includes('What do you want to create') ||
+          text.includes('Describe') ||
+          text.includes('Type a prompt') ||
+          text.includes('Start typing') ||
+          text === '' ||
+          text === '\n';
         return {
           cleared: isPlaceholder,
-          textLen: text.length,
+          textLen: isPlaceholder ? 0 : text.length,
         };
       }).catch(() => ({ cleared: true, textLen: 0 }));
 
       if (status.cleared) {
+        // Blur editor so no background keys or wake-up pointers ever type into the input
+        await page.evaluate(() => {
+          const editor = document.querySelector('.ProseMirror, [data-slate-editor="true"], div[role="textbox"], [contenteditable="true"]') as HTMLElement | null;
+          if (editor) editor.blur();
+          (document.activeElement as HTMLElement)?.blur?.();
+        }).catch(() => {});
         console.log('[FlowAutomator] ✓ Prompt submitted and verified successfully!');
-        await new Promise((r) => setTimeout(r, 500));
+        await new Promise((r) => setTimeout(r, 400));
         return true;
       }
 
-      // Retry Ctrl+Enter midway if still not cleared
-      if (attempt === 3) {
-        await page.keyboard.down('Control').catch(() => {});
-        await page.keyboard.press('Enter').catch(() => {});
-        await page.keyboard.up('Control').catch(() => {});
+      // Retry clicking midway if still not cleared
+      if (attempt === 2 || attempt === 4) {
+        await page.evaluate(() => {
+          const btn = (document.querySelector('button[aria-label="Start generation"], button[type="submit"]') ||
+            Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('arrow_forward'))) as HTMLElement;
+          if (btn && !btn.hasAttribute('disabled') && btn.getAttribute('aria-disabled') !== 'true') {
+            btn.click();
+          }
+        }).catch(() => {});
       }
     }
 

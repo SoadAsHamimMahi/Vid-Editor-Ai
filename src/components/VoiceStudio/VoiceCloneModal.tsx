@@ -18,12 +18,14 @@ import {
 interface VoiceCloneModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onOpenDesigner?: () => void;
   defaultEngine?: TTSEngine;
 }
 
 export const VoiceCloneModal: React.FC<VoiceCloneModalProps> = ({
   isOpen,
   onClose,
+  onOpenDesigner,
   defaultEngine = 'indic_f5',
 }) => {
   const { saveCustomVoice } = useProjectStore();
@@ -162,6 +164,22 @@ export const VoiceCloneModal: React.FC<VoiceCloneModalProps> = ({
 
         {/* Modal Body */}
         <div className="p-6 space-y-4 overflow-y-auto flex-1">
+          {onOpenDesigner && (
+            <div className="p-3 rounded-xl bg-gradient-to-r from-amber-500/10 via-pink-500/10 to-indigo-500/10 border border-amber-500/30 flex items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 text-amber-200">
+                <Sparkles className="w-4 h-4 text-amber-400 flex-shrink-0 animate-pulse" />
+                <span>Want to build a <strong>Baby, Monster, Cyborg, or Wizard</strong> voice from a text description?</span>
+              </div>
+              <button
+                type="button"
+                onClick={onOpenDesigner}
+                className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] whitespace-nowrap transition-colors cursor-pointer"
+              >
+                🪄 Open Voice Designer
+              </button>
+            </div>
+          )}
+
           {errorMsg && (
             <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/40 text-rose-300 text-xs flex items-center gap-2">
               <AlertCircle className="w-4 h-4 flex-shrink-0 text-rose-400" />
@@ -190,9 +208,9 @@ export const VoiceCloneModal: React.FC<VoiceCloneModalProps> = ({
                 onChange={(e) => setEngine(e.target.value as TTSEngine)}
                 className="w-full px-3 py-2.5 bg-[#0e0e14] border border-[#2a2a3e] rounded-xl text-slate-200 text-xs focus:outline-none focus:border-pink-500 cursor-pointer"
               >
-                <option value="indic_f5">F5-TTS Neural Cloner (Local NVIDIA GPU)</option>
+                <option value="indic_f5">F5-TTS Neural Cloner (Local NVIDIA GPU — Recommended)</option>
                 <option value="elevenlabs">ElevenLabs Instant Clone (Cloud 99% Exact)</option>
-                <option value="chatterbox">Chatterbox Multilingual (Resemble AI)</option>
+                <option value="chatterbox">Chatterbox Multilingual (Zero-Shot Fallback)</option>
               </select>
             </div>
 

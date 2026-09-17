@@ -1,4 +1,4 @@
-# 🎬 AI Video Generation & Automated Documentary Suite
+# 🎬 CineFlow Studio — AI Video Director & Documentary NLE Suite
 
 An advanced, desktop-class Non-Linear Video Editor (NLE) and AI Director purpose-built for creating cinematic documentary videos, faceless YouTube channels, and automated visual storytelling. 
 

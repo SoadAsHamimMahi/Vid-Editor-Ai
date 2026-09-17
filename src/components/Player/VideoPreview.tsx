@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { Player, PlayerRef } from '@remotion/player';
 import { useProjectStore } from '../../store/useProjectStore';
 import { MainComposition } from '../../remotion/Composition';
+import { InteractiveCanvasOverlay } from './InteractiveCanvasOverlay';
 import { ensureAudioContextRunning, startAudioWatchdog, stopAudioWatchdog } from '../../utils/audioContextManager';
 import { shallow } from 'zustand/shallow';
 import { 
@@ -45,14 +46,17 @@ const TimecodeDisplay: React.FC<{ totalDuration: number; fps: number }> = ({ tot
  * so we exclude them to avoid killing running <Audio> elements.
  */
 function compositionSceneFingerprint(scenes: any[]): string {
-  // Only include fields that Composition.tsx actually reads
+  // Include visual and media fields that Composition.tsx and SceneMotion.tsx read
   return JSON.stringify(
     scenes.map((s) => ({
       id: s.id,
       startInSeconds: s.startInSeconds,
       durationInSeconds: s.durationInSeconds,
+      mediaType: s.mediaType,
       localImagePath: s.localImagePath,
       imageUrl: s.imageUrl,
+      localVideoPath: s.localVideoPath,
+      videoUrl: s.videoUrl,
       motionType: s.motionType,
       motionIntensity: s.motionIntensity,
       transitionType: s.transitionType,
@@ -112,9 +116,13 @@ export const VideoPreview: React.FC = () => {
   const overlayClipsJson = useProjectStore(
     (s) => JSON.stringify(s.project.metadata.overlayClips || [])
   );
+  const captionPositionJson = useProjectStore(
+    (s) => JSON.stringify(s.project.metadata.captionPosition || { x: 0, y: 0 })
+  );
 
   const playerRef = useRef<PlayerRef>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const playerWrapperRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const scenes = useProjectStore((s) => s.project.scenes);
@@ -126,7 +134,7 @@ export const VideoPreview: React.FC = () => {
   const memoizedInputProps = React.useMemo(
     () => ({ project: projectRef.current }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sceneFingerprint, audioPath, bgMusicPath, bgMusicVolume, audioDucking, trackMutesJson, overlayClipsJson, audioClipsJson, fps, width, height, captionStyle, audioEngineEpoch]
+    [sceneFingerprint, audioPath, bgMusicPath, bgMusicVolume, audioDucking, trackMutesJson, overlayClipsJson, audioClipsJson, fps, width, height, captionStyle, captionPositionJson, audioEngineEpoch]
   );
 
   // Sync external isPlaying state with Remotion Player
@@ -422,7 +430,10 @@ export const VideoPreview: React.FC = () => {
         ref={containerRef}
         className="flex-1 relative flex items-center justify-center p-3 bg-[#0d0d10] overflow-hidden group"
       >
-        <div className={`${getContainerStyle()} rounded-lg overflow-hidden shadow-2xl border border-[#24242c] bg-black relative flex items-center justify-center`}>
+        <div 
+          ref={playerWrapperRef}
+          className={`${getContainerStyle()} rounded-lg overflow-hidden shadow-2xl border border-[#24242c] bg-black relative flex items-center justify-center`}
+        >
           <Player
             ref={playerRef}
             component={MainComposition}
@@ -438,6 +449,12 @@ export const VideoPreview: React.FC = () => {
             controls={false}
             autoPlay={false}
             loop={false}
+          />
+          <InteractiveCanvasOverlay
+            containerRef={playerWrapperRef}
+            aspectRatio={aspectRatio}
+            width={width}
+            height={height}
           />
         </div>
       </div>

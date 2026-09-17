@@ -5,6 +5,9 @@ import {
   ProjectSummary,
   SceneSegment, 
   MotionType, 
+  MotionRhythmPreset,
+  MOTION_RHYTHM_CYCLES,
+  getMotionForIndex,
   TransitionType, 
   ColorLUT, 
   ColorGrading, 
@@ -47,10 +50,27 @@ import {
   parseTimecodeToSeconds
 } from '../utils/promptManifestManager';
 import { DEFAULT_BUILTIN_VOICES } from '../utils/builtinVoices';
+import { detectEmotionFromText, cleanSpeechText, cleanSubtitleText } from '../utils/textSanitizer';
+import { validateVoiceText } from '../utils/voiceLimits';
+import { auditProjectMedia, applyRelinkedMediaToProject } from '../utils/mediaAuditor';
+
+export interface GenerationProgressTracker {
+  isActive: boolean;
+  isPaused: boolean;
+  startTime: number | null;
+  lastFinishTime: number | null;
+  totalInBatch: number;
+  completedInBatch: number;
+  failedInBatch: number;
+  mediaType: 'image' | 'video';
+  recentDurations: number[];
+  sessionAvgSpeed: number | null;
+}
 
 interface ProjectState {
   project: Project;
   selectedSceneId: string | null;
+  selectedSceneIds: string[];
   currentTime: number; // in seconds
   isPlaying: boolean;
   viewMode: 'home' | 'editor' | 'voice_studio';
@@ -64,12 +84,16 @@ interface ProjectState {
   voiceToVideoModalOpen: boolean;
   sfxLibraryModalOpen: boolean;
   audioStudioModalOpen: boolean;
+  isMcpModalOpen: boolean;
+  isVoiceDesignerModalOpen: boolean;
   isProcessingAudio: boolean;
   activeRibbonTab: 'media' | 'audio' | 'text' | 'stickers' | 'effects' | 'transitions' | 'filters' | 'director';
   inspectorTab: 'details' | 'visual' | 'luts' | 'audio' | 'captions';
   setVoiceToVideoModalOpen: (open: boolean) => void;
   setSfxLibraryModalOpen: (open: boolean) => void;
   setAudioStudioModalOpen: (open: boolean) => void;
+  setIsMcpModalOpen: (open: boolean) => void;
+  setIsVoiceDesignerModalOpen: (open: boolean) => void;
   setIsProcessingAudio: (processing: boolean) => void;
   setActiveRibbonTab: (tab: 'media' | 'audio' | 'text' | 'stickers' | 'effects' | 'transitions' | 'filters' | 'director') => void;
   setInspectorTab: (tab: 'details' | 'visual' | 'luts' | 'audio' | 'captions') => void;
@@ -80,7 +104,8 @@ interface ProjectState {
   openProject: (projectId: string) => Promise<void>;
   createNewProject: (title?: string, aspectRatio?: AspectRatio) => Promise<void>;
   duplicateProject: (projectId: string) => Promise<void>;
-  deleteProject: (projectId: string) => Promise<void>;
+  deleteProject: (projectId: string, options?: { deleteMedia?: boolean }) => Promise<any>;
+  getProjectStorageStats: (projectId: string) => Promise<any>;
   renameProject: (projectId: string, newTitle: string) => Promise<void>;
   saveCurrentProject: () => Promise<void>;
 
@@ -100,6 +125,7 @@ interface ProjectState {
   clearVoiceHistoryList: () => Promise<void>;
   setActiveVoiceAudio: (record: GeneratedVoiceRecord | null) => void;
   saveCustomVoice: (profile: any) => Promise<VoiceProfile | null>;
+  saveDesignedVoice: (profile: any) => Promise<VoiceProfile | null>;
   deleteCustomVoice: (id: string) => Promise<boolean>;
   generateTTSVoiceover: (req: TTSGenerationRequest) => Promise<TTSGenerationResult>;
   generateMultiSpeakerVoiceover: (req: MultiSpeakerRequest) => Promise<TTSGenerationResult>;
@@ -108,12 +134,32 @@ interface ProjectState {
   setVoiceMasteringPreset: (preset: AudioMasteringPreset) => void;
   pronunciationRules: PronunciationRule[];
   setPronunciationRules: (rules: PronunciationRule[]) => void;
-  sendVoiceoverToTimeline: (audioPath: string, scriptText: string, duration?: number) => Promise<void>;
+  sendVoiceoverToTimeline: (audioPath: string, scriptText: string, duration?: number, mode?: 'replace_main' | 'insert_at_playhead') => Promise<void>;
+
+  // Undo / Redo History Stack
+  pastHistory: { scenes: SceneSegment[]; metadata: ProjectMetadata; description?: string }[];
+  futureHistory: { scenes: SceneSegment[]; metadata: ProjectMetadata; description?: string }[];
+  canUndo: boolean;
+  canRedo: boolean;
+  pushUndoSnapshot: (description?: string) => void;
+  undo: () => void;
+  redo: () => void;
+
+  // Missing Media Relinker
+  missingMediaModalOpen: boolean;
+  setMissingMediaModalOpen: (open: boolean) => void;
+  missingMediaFiles: string[];
+  checkAndAuditMedia: () => Promise<string[]>;
+  relinkMediaFolder: (newFolder: string) => Promise<{ relinkedCount: number }>;
   
   // Actions
   setProject: (project: Project) => void;
   updateMetadata: (updates: Partial<Project['metadata']>) => void;
   setSelectedSceneId: (id: string | null) => void;
+  setSelectedSceneIds: (ids: string[]) => void;
+  toggleSelectScene: (id: string, isMulti?: boolean, isRange?: boolean) => void;
+  selectAllScenes: () => void;
+  clearSceneSelection: () => void;
   setCurrentTime: (time: number) => void;
   setIsPlaying: (playing: boolean) => void;
   setTimelineZoom: (zoom: number) => void;
@@ -135,6 +181,8 @@ interface ProjectState {
   setCustomPromptImportModalOpen: (open: boolean) => void;
   gapCheckerModalOpen: boolean;
   setGapCheckerModalOpen: (open: boolean) => void;
+  batchSceneDeleteModalOpen: boolean;
+  setBatchSceneDeleteModalOpen: (open: boolean) => void;
 
   // Prompt Manifest Actions (Paste-based accumulated workflow)
   importPromptBatch: (
@@ -150,6 +198,7 @@ interface ProjectState {
   // Aspect Ratio & Global Styles
   setAspectRatio: (aspectRatio: AspectRatio) => void;
   setCaptionStyle: (style: CaptionStyle) => void;
+  setCaptionPosition: (position: { x: number; y: number }) => void;
   setBgMusic: (bgMusicPath?: string, volume?: number, audioDucking?: boolean, duration?: number) => void;
   toggleTrackMute: (track: 'v1' | 'v2' | 'v3' | 'a1' | 'a2' | 'a3' | 't1') => void;
   setTrackMute: (track: 'v1' | 'v2' | 'v3' | 'a1' | 'a2' | 'a3' | 't1', muted: boolean) => void;
@@ -195,6 +244,24 @@ interface ProjectState {
   animateSceneToVideo: (sceneId: string) => Promise<boolean>;
   autoGenerateSoundEffects: () => void;
 
+  // Cloud AI Video (Colab Wan 2.1 / LTX-Video)
+  colabTunnelUrl: string;
+  isColabConnected: boolean;
+  colabGpuName?: string;
+  colabVramInfo?: string;
+  colabConnectionError?: string;
+  colabVideoEngine: 'wan2.1' | 'ltx-video';
+  colabMotionIntensity: number;
+  colabRenderProgress: Record<string, { percent: number; message: string; status: string }>;
+  isCloudVideoModalOpen: boolean;
+  setIsCloudVideoModalOpen: (open: boolean) => void;
+  setColabTunnelUrl: (url: string) => void;
+  testColabConnection: (customUrl?: string) => Promise<boolean>;
+  setColabVideoEngine: (engine: 'wan2.1' | 'ltx-video') => void;
+  setColabMotionIntensity: (intensity: number) => void;
+  setColabRenderProgress: (sceneId: string, progress: { percent: number; message: string; status: string }) => void;
+  revertSceneToImage: (sceneId: string) => void;
+
   // Scene mutations
   updateScene: (id: string, updates: Partial<SceneSegment>) => void;
   updateSceneDuration: (id: string, newDuration: number) => void;
@@ -202,6 +269,8 @@ interface ProjectState {
   splitSceneAtTime: (timeInSeconds: number) => void;
   duplicateScene: (id: string) => void;
   deleteScene: (id: string) => void;
+  deleteScenes: (ids: string[]) => void;
+  deleteSceneRange: (fromOrder: number, toOrder: number) => void;
   reorderScenes: (startIndex: number, endIndex: number) => void;
   moveSceneBySteps: (sceneId: string, steps: number) => void;
   insertSceneAtIndex: (index: number, filePath?: string, customDuration?: number) => Promise<string | null>;
@@ -209,6 +278,8 @@ interface ProjectState {
   replaceSceneImage: (sceneId: string, filePath?: string) => Promise<boolean>;
   updateSceneMotion: (id: string, motion: MotionType) => void;
   applyDynamicMotionToAllScenes: (forceAll?: boolean) => void;
+  applyMotionRhythmToAllScenes: (rhythm?: MotionRhythmPreset, forceAll?: boolean) => void;
+  setMotionRhythmPreset: (rhythm: MotionRhythmPreset) => void;
   updateSceneTransition: (id: string, transition: TransitionType, duration?: number) => void;
   updateSceneColorLUT: (id: string, lut: ColorLUT) => void;
   updateSceneColorGrading: (id: string, grading: Partial<ColorGrading>) => void;
@@ -240,6 +311,12 @@ interface ProjectState {
   pauseBatchGeneration: () => Promise<void>;
   resumeBatchGeneration: () => Promise<void>;
   stopBatchGeneration: () => Promise<void>;
+  generationProgress: GenerationProgressTracker;
+  startGenerationBatchTracking: (totalCount: number, mediaType?: 'image' | 'video') => void;
+  recordJobProgressEvent: (sceneId: string, status: 'ready' | 'error' | 'generating') => void;
+  pauseGenerationTracking: () => void;
+  resumeGenerationTracking: () => void;
+  stopBatchGenerationTracking: () => void;
   autoArrangeImagesByTimestamp: (
     files: { name: string; path: string }[],
     options?: { replaceExisting?: boolean }
@@ -252,6 +329,10 @@ interface ProjectState {
     apiKey?: string;
     userScript?: string;
   }) => Promise<{ success: boolean; count: number; method: string; message: string }>;
+  isTranscribingSubtitles: boolean;
+  setIsTranscribingSubtitles: (transcribing: boolean) => void;
+  autoGenerateSubtitlesFromVoiceover: (audioPath?: string) => Promise<{ success: boolean; wordsCount?: number; error?: string }>;
+  clearAllSubtitles: () => void;
   resetAudioEngine: () => Promise<void>;
 }
 
@@ -274,6 +355,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     scenes: [],
   },
   selectedSceneId: null,
+  selectedSceneIds: [],
   currentTime: 0,
   isPlaying: false,
   viewMode: 'home',
@@ -293,12 +375,201 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   setSfxLibraryModalOpen: (open) => set({ sfxLibraryModalOpen: open }),
   audioStudioModalOpen: false,
   setAudioStudioModalOpen: (open) => set({ audioStudioModalOpen: open }),
+  isMcpModalOpen: false,
+  setIsMcpModalOpen: (open) => set({ isMcpModalOpen: open }),
+  isVoiceDesignerModalOpen: false,
+  setIsVoiceDesignerModalOpen: (open) => set({ isVoiceDesignerModalOpen: open }),
   isProcessingAudio: false,
   setIsProcessingAudio: (processing) => set({ isProcessingAudio: processing }),
+  isTranscribingSubtitles: false,
+  setIsTranscribingSubtitles: (transcribing) => set({ isTranscribingSubtitles: transcribing }),
   activeRibbonTab: 'media',
   setActiveRibbonTab: (tab) => set({ activeRibbonTab: tab }),
   inspectorTab: 'details',
   setInspectorTab: (tab) => set({ inspectorTab: tab }),
+
+  // Undo / Redo History Stack
+  pastHistory: [],
+  futureHistory: [],
+  canUndo: false,
+  canRedo: false,
+
+  pushUndoSnapshot: (description?: string) => {
+    const { project, pastHistory } = get();
+    if (!project || !project.scenes) return;
+    const snapshot = {
+      scenes: JSON.parse(JSON.stringify(project.scenes)),
+      metadata: JSON.parse(JSON.stringify(project.metadata || {})),
+      description,
+      timestamp: Date.now(),
+    };
+    const nextPast = [...pastHistory, snapshot].slice(-30);
+    set({
+      pastHistory: nextPast,
+      futureHistory: [],
+      canUndo: true,
+      canRedo: false,
+    });
+  },
+
+  undo: () => {
+    const { project, pastHistory, futureHistory } = get();
+    if (pastHistory.length === 0) return;
+
+    const currentSnapshot = {
+      scenes: JSON.parse(JSON.stringify(project.scenes)),
+      metadata: JSON.parse(JSON.stringify(project.metadata || {})),
+      timestamp: Date.now(),
+    };
+
+    const targetSnapshot = pastHistory[pastHistory.length - 1];
+    const nextPast = pastHistory.slice(0, -1);
+    const nextFuture = [currentSnapshot, ...futureHistory].slice(0, 30);
+
+    set({
+      project: {
+        ...project,
+        scenes: targetSnapshot.scenes,
+        metadata: targetSnapshot.metadata,
+      },
+      pastHistory: nextPast,
+      futureHistory: nextFuture,
+      canUndo: nextPast.length > 0,
+      canRedo: true,
+    });
+    get().saveCurrentProject();
+  },
+
+  redo: () => {
+    const { project, pastHistory, futureHistory } = get();
+    if (futureHistory.length === 0) return;
+
+    const currentSnapshot = {
+      scenes: JSON.parse(JSON.stringify(project.scenes)),
+      metadata: JSON.parse(JSON.stringify(project.metadata || {})),
+      timestamp: Date.now(),
+    };
+
+    const targetSnapshot = futureHistory[0];
+    const nextFuture = futureHistory.slice(1);
+    const nextPast = [...pastHistory, currentSnapshot].slice(-30);
+
+    set({
+      project: {
+        ...project,
+        scenes: targetSnapshot.scenes,
+        metadata: targetSnapshot.metadata,
+      },
+      pastHistory: nextPast,
+      futureHistory: nextFuture,
+      canUndo: true,
+      canRedo: nextFuture.length > 0,
+    });
+    get().saveCurrentProject();
+  },
+
+  // Missing Media Relinker
+  missingMediaModalOpen: false,
+  setMissingMediaModalOpen: (open: boolean) => set({ missingMediaModalOpen: open }),
+  missingMediaFiles: [],
+  checkAndAuditMedia: async () => {
+    const { project } = get();
+    const missing = await auditProjectMedia(project);
+    set({
+      missingMediaFiles: missing,
+      missingMediaModalOpen: missing.length > 0,
+    });
+    return missing;
+  },
+  relinkMediaFolder: async (newFolder: string) => {
+    const { project, missingMediaFiles } = get();
+    if (!window.electronAPI?.relinkMediaFolder || missingMediaFiles.length === 0) {
+      return { relinkedCount: 0 };
+    }
+    const relinkMap = await window.electronAPI.relinkMediaFolder(missingMediaFiles, newFolder);
+    const relinkedCount = Object.keys(relinkMap).length;
+    if (relinkedCount > 0) {
+      const updatedProject = applyRelinkedMediaToProject(project, relinkMap);
+      set({ project: updatedProject });
+      get().saveCurrentProject();
+    }
+    return { relinkedCount };
+  },
+
+  // Cloud AI Video State
+  colabTunnelUrl: localStorage.getItem('colab_tunnel_url') || '',
+  isColabConnected: false,
+  colabGpuName: undefined,
+  colabVramInfo: undefined,
+  colabConnectionError: undefined,
+  colabVideoEngine: (localStorage.getItem('colab_video_engine') as 'wan2.1' | 'ltx-video') || 'wan2.1',
+  colabMotionIntensity: 5,
+  colabRenderProgress: {},
+  isCloudVideoModalOpen: false,
+  setIsCloudVideoModalOpen: (open) => set({ isCloudVideoModalOpen: open }),
+  setColabTunnelUrl: (url) => {
+    localStorage.setItem('colab_tunnel_url', url);
+    set({ colabTunnelUrl: url });
+    if (window.electronAPI?.colabSetTunnelUrl) {
+      window.electronAPI.colabSetTunnelUrl(url);
+    }
+  },
+  testColabConnection: async (customUrl?: string) => {
+    const url = customUrl || get().colabTunnelUrl;
+    if (!window.electronAPI?.colabTestConnection) return false;
+    try {
+      const res = await window.electronAPI.colabTestConnection(url);
+      if (res.connected) {
+        set({
+          isColabConnected: true,
+          colabTunnelUrl: res.url,
+          colabGpuName: res.gpuName,
+          colabVramInfo: res.vramTotalGb ? `${res.vramTotalGb} GB (${res.vramFreeGb || 0} GB Free)` : undefined,
+          colabConnectionError: undefined,
+        });
+        localStorage.setItem('colab_tunnel_url', res.url);
+        return true;
+      } else {
+        set({
+          isColabConnected: false,
+          colabGpuName: undefined,
+          colabVramInfo: undefined,
+          colabConnectionError: res.error || 'Could not reach Colab server. Make sure notebook cell 4 is running.',
+        });
+        return false;
+      }
+    } catch (err: any) {
+      set({
+        isColabConnected: false,
+        colabConnectionError: err?.message || 'Connection error',
+      });
+      return false;
+    }
+  },
+  setColabVideoEngine: (engine) => {
+    localStorage.setItem('colab_video_engine', engine);
+    set({ colabVideoEngine: engine });
+  },
+  setColabMotionIntensity: (intensity) => set({ colabMotionIntensity: intensity }),
+  setColabRenderProgress: (sceneId, progress) => {
+    set((state) => ({
+      colabRenderProgress: {
+        ...state.colabRenderProgress,
+        [sceneId]: progress,
+      },
+    }));
+  },
+  revertSceneToImage: (sceneId) => {
+    const scene = get().project.scenes.find((s) => s.id === sceneId);
+    if (scene && (scene.localImagePath || scene.imageUrl)) {
+      get().updateScene(sceneId, {
+        mediaType: 'image',
+        localVideoPath: undefined,
+        videoUrl: undefined,
+        status: 'ready',
+      });
+    }
+  },
 
   // TTS State
   voiceProfiles: DEFAULT_BUILTIN_VOICES,
@@ -524,13 +795,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (window.electronAPI?.getProject) {
         const proj = await window.electronAPI.getProject(projectId);
         if (proj) {
-          const motionCycle: MotionType[] = ['zoom_in', 'pan_right', 'zoom_out', 'pan_left'];
+          const activeRhythm = proj.metadata?.motionRhythm || 'dynamic_alternating';
           const upgradedScenes = (proj.scenes || []).map((s, idx) => {
             if ((s.durationInSeconds || 0) < 1.5) {
               return { ...s, motionType: 'static' as MotionType };
             }
             if (!s.motionType || s.motionType === 'static' || s.motionType === 'dolly_zoom' || s.motionType === 'handheld_drift') {
-              return { ...s, motionType: motionCycle[idx % motionCycle.length] };
+              return { ...s, motionType: getMotionForIndex(idx, activeRhythm) };
             }
             return s;
           });
@@ -556,6 +827,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           });
           get().syncMediaToScenes();
           get().saveCurrentProject();
+          get().checkAndAuditMedia().catch(() => {});
           return;
         }
       }
@@ -606,15 +878,28 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
-  deleteProject: async (projectId: string) => {
+  deleteProject: async (projectId: string, options?: { deleteMedia?: boolean }) => {
     try {
       if (window.electronAPI?.deleteProject) {
-        await window.electronAPI.deleteProject(projectId);
+        const result = await window.electronAPI.deleteProject(projectId, options);
         await get().loadProjectSummaries();
+        return result;
       }
     } catch (err) {
       console.error('Error deleting project:', err);
     }
+    return null;
+  },
+
+  getProjectStorageStats: async (projectId: string) => {
+    try {
+      if (window.electronAPI?.getProjectStorageStats) {
+        return await window.electronAPI.getProjectStorageStats(projectId);
+      }
+    } catch (err) {
+      console.error('Error getting project storage stats:', err);
+    }
+    return null;
   },
 
   renameProject: async (projectId: string, newTitle: string) => {
@@ -643,7 +928,71 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     set({ project });
     get().saveCurrentProject();
   },
-  setSelectedSceneId: (id) => set({ selectedSceneId: id }),
+  setSelectedSceneId: (id) => set({ 
+    selectedSceneId: id,
+    selectedSceneIds: id ? [id] : []
+  }),
+  setSelectedSceneIds: (ids) => set({
+    selectedSceneIds: ids,
+    selectedSceneId: ids.length > 0 ? ids[ids.length - 1] : null,
+  }),
+  toggleSelectScene: (id, isMulti = false, isRange = false) => {
+    const { project, selectedSceneIds, selectedSceneId } = get();
+    const allScenes = project.scenes;
+
+    if (isRange) {
+      const anchorId = selectedSceneId || (selectedSceneIds.length > 0 ? selectedSceneIds[selectedSceneIds.length - 1] : id);
+      const anchorIdx = allScenes.findIndex(s => s.id === anchorId);
+      const targetIdx = allScenes.findIndex(s => s.id === id);
+
+      if (anchorIdx !== -1 && targetIdx !== -1) {
+        const start = Math.min(anchorIdx, targetIdx);
+        const end = Math.max(anchorIdx, targetIdx);
+        const rangeIds = allScenes.slice(start, end + 1).map(s => s.id);
+        const merged = Array.from(new Set([...selectedSceneIds, ...rangeIds]));
+        set({
+          selectedSceneIds: merged,
+          selectedSceneId: id,
+        });
+        return;
+      }
+    }
+
+    if (isMulti) {
+      const exists = selectedSceneIds.includes(id);
+      let newIds: string[];
+      if (exists) {
+        newIds = selectedSceneIds.filter(i => i !== id);
+      } else {
+        newIds = [...selectedSceneIds, id];
+      }
+      set({
+        selectedSceneIds: newIds,
+        selectedSceneId: newIds.length > 0 ? (newIds.includes(id) ? id : newIds[newIds.length - 1]) : null,
+      });
+      return;
+    }
+
+    // Standard single click
+    set({
+      selectedSceneIds: [id],
+      selectedSceneId: id,
+    });
+  },
+  selectAllScenes: () => {
+    const { project } = get();
+    const allIds = project.scenes.map(s => s.id);
+    set({
+      selectedSceneIds: allIds,
+      selectedSceneId: allIds[0] || null,
+    });
+  },
+  clearSceneSelection: () => {
+    set({
+      selectedSceneIds: [],
+      selectedSceneId: null,
+    });
+  },
   setCurrentTime: (time) => {
     const t = Math.max(0, time);
     if (Math.abs(get().currentTime - t) > 0.001) {
@@ -698,9 +1047,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   setCustomPromptImportModalOpen: (open) => set({ customPromptImportModalOpen: open }),
   gapCheckerModalOpen: false,
   setGapCheckerModalOpen: (open) => set({ gapCheckerModalOpen: open }),
+  batchSceneDeleteModalOpen: false,
+  setBatchSceneDeleteModalOpen: (open) => set({ batchSceneDeleteModalOpen: open }),
 
   // ─── Global Persistent API Key Pool (Workable until deleted) ───
-  voiceMasteringPreset: 'podcast_warmth' as AudioMasteringPreset,
+  voiceMasteringPreset: 'broadcast_studio' as AudioMasteringPreset,
   setVoiceMasteringPreset: (preset) => set({ voiceMasteringPreset: preset }),
   pronunciationRules: [
     { id: 'rule-ai', pattern: 'AI', replacement: 'এআই' },
@@ -735,14 +1086,56 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             return [''];
           };
 
+          let groqKeys = parseKeys('groqApiKey');
+          let geminiKeys = parseKeys('geminiApiKey');
+          let openaiKeys = parseKeys('openaiApiKey');
+          let elevenlabsKeys = parseKeys('elevenlabsApiKey');
+
+          let needsResave = false;
+
+          // Intelligent auto-healing: detect if Groq (gsk_) and Gemini (AIzaSy) were inverted
+          const geminiHasGroq = geminiKeys.some((k) => k.startsWith('gsk_'));
+          const groqHasGemini = groqKeys.some((k) => k.startsWith('AIzaSy'));
+
+          if (geminiHasGroq && groqHasGemini) {
+            console.info('[useProjectStore] Detected swapped Groq and Gemini API keys. Auto-correcting...');
+            const temp = groqKeys;
+            groqKeys = geminiKeys;
+            geminiKeys = temp;
+            needsResave = true;
+          } else {
+            if (geminiHasGroq && (!groqKeys[0] || groqKeys.length === 0)) {
+              groqKeys = geminiKeys.filter((k) => k.startsWith('gsk_'));
+              geminiKeys = geminiKeys.filter((k) => !k.startsWith('gsk_'));
+              if (geminiKeys.length === 0) geminiKeys = [''];
+              needsResave = true;
+            }
+            if (groqHasGemini && (!geminiKeys[0] || geminiKeys.length === 0)) {
+              geminiKeys = groqKeys.filter((k) => k.startsWith('AIzaSy'));
+              groqKeys = groqKeys.filter((k) => !k.startsWith('AIzaSy'));
+              if (groqKeys.length === 0) groqKeys = [''];
+              needsResave = true;
+            }
+          }
+
           const loaded = {
-            groq: parseKeys('groqApiKey'),
-            gemini: parseKeys('geminiApiKey'),
-            openai: parseKeys('openaiApiKey'),
-            elevenlabs: parseKeys('elevenlabsApiKey'),
+            groq: groqKeys,
+            gemini: geminiKeys,
+            openai: openaiKeys,
+            elevenlabs: elevenlabsKeys,
           };
 
           set({ globalApiKeys: loaded });
+
+          if (needsResave && window.electronAPI?.saveSettings) {
+            window.electronAPI.saveSettings({
+              groqApiKey: groqKeys.filter(Boolean).join(', '),
+              groqApiKeys: groqKeys.filter(Boolean),
+              geminiApiKey: geminiKeys.filter(Boolean).join(', '),
+              geminiApiKeys: geminiKeys.filter(Boolean),
+            }).catch(() => {});
+          }
+
           return loaded;
         }
       }
@@ -836,14 +1229,15 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         }
 
         if (newPrompt && (newPrompt !== scene.prompt || options?.overwriteExisting)) {
+          const hasMedia = Boolean(scene.localImagePath || scene.imageUrl || scene.localVideoPath || scene.videoUrl);
           return {
             ...scene,
             prompt: newPrompt,
-            status: 'pending' as const,
-            localImagePath: undefined,
-            imageUrl: undefined,
-            localVideoPath: undefined,
-            videoUrl: undefined,
+            status: hasMedia ? ('ready' as const) : (scene.status || 'pending'),
+            localImagePath: scene.localImagePath,
+            imageUrl: scene.imageUrl || (scene.localImagePath ? `media://${scene.localImagePath.replace(/\\/g, '/')}` : undefined),
+            localVideoPath: scene.localVideoPath,
+            videoUrl: scene.videoUrl || (scene.localVideoPath ? `media://${scene.localVideoPath.replace(/\\/g, '/')}` : undefined),
             hasMismatchWarning: false,
           };
         }
@@ -864,7 +1258,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             durationInSeconds: 3.5,
             prompt: p.prompt,
             status: 'pending' as const,
-            motionType: 'zoom_in',
+            motionType: getMotionForIndex(updatedScenes.length, project.metadata?.motionRhythm),
             transitionType: 'cross_dissolve',
             transitionDuration: 0.4,
             subtitles: [],
@@ -939,9 +1333,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   applyManifestToTimeline: () => {
-    const { project } = get();
+    const { project, pushUndoSnapshot } = get();
     const manifest = project.metadata.promptManifest;
     if (!manifest || !manifest.entries || Object.keys(manifest.entries).length === 0) return;
+    pushUndoSnapshot('Apply Prompt Manifest to Timeline');
 
     // Pass project.scenes and metadata.mediaAssets so all generated images, local paths, and customizations are preserved
     const timelineScenes = manifestToTimelineScenes(
@@ -1179,6 +1574,141 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     },
   })),
 
+  setCaptionPosition: (captionPosition) => {
+    set((state) => ({
+      project: {
+        ...state.project,
+        metadata: {
+          ...state.project.metadata,
+          captionPosition,
+          updatedAt: Date.now(),
+        },
+      },
+    }));
+    get().saveCurrentProject();
+  },
+
+  autoGenerateSubtitlesFromVoiceover: async (audioPath?: string) => {
+    const { project } = get();
+    const targetAudio =
+      audioPath ||
+      project.metadata.audioPath ||
+      project.metadata.audioClips?.find((c) => c.track === 'A1' || c.category === 'voiceover')?.filePath ||
+      project.metadata.mediaAssets?.find((m) => m.type === 'voiceover')?.path;
+
+    if (!targetAudio) {
+      return { success: false, error: 'No voiceover audio found on Track A1 or project assets.' };
+    }
+
+    set({ isTranscribingSubtitles: true });
+    try {
+      if (!window.electronAPI?.transcribeAudioFile) {
+        return { success: false, error: 'Audio transcription is not available in this environment.' };
+      }
+
+      const settings = window.electronAPI.getSettings ? await window.electronAPI.getSettings() : {};
+      const geminiKey = settings?.geminiApiKey;
+      const groqKey = settings?.groqApiKey;
+      const openaiKey = settings?.openaiApiKey;
+
+      // PROVIDER PRIORITY for subtitle accuracy:
+      // 1. Groq Whisper — Real forced-alignment timestamps (frame-accurate, like DaVinci/Premiere)
+      // 2. OpenAI Whisper — Also real forced-alignment timestamps
+      // 3. Gemini — LLM-estimated timestamps (less accurate, can drift 0.5-2s)
+      // Professional tools (DaVinci Resolve, CapCut, Adobe) all use acoustic forced-alignment
+      // which is what Whisper provides. Gemini estimates from text patterns, not audio waveform.
+      let provider: 'groq' | 'openai' | 'gemini' = 'gemini';
+      let apiKey: string | undefined = geminiKey;
+
+      if (groqKey) {
+        provider = 'groq';
+        apiKey = groqKey;
+        console.log('[Subtitles] Using Groq Whisper for frame-accurate forced-alignment timestamps...');
+      } else if (openaiKey) {
+        provider = 'openai';
+        apiKey = openaiKey;
+        console.log('[Subtitles] Using OpenAI Whisper for frame-accurate forced-alignment timestamps...');
+      } else {
+        console.log('[Subtitles] No Groq/OpenAI key — using Gemini (timestamps may be slightly estimated). For best accuracy, add a Groq API key in Settings.');
+      }
+
+      const result = await window.electronAPI.transcribeAudioFile(
+        targetAudio,
+        apiKey,
+        provider,
+        project.metadata.fps || 30
+      );
+
+      if (!result || !result.words || result.words.length === 0) {
+        return { success: false, error: 'No spoken words could be transcribed from the voiceover.' };
+      }
+
+      const allWords = result.words;
+
+      // Assign words accurately to each timeline scene according to its start/end window
+      const updatedScenes = project.scenes.map((scene) => {
+        const sceneStart = scene.startInSeconds;
+        const sceneEnd = scene.startInSeconds + scene.durationInSeconds;
+
+        const sceneWords = allWords.filter(
+          (w) => w.start >= sceneStart - 0.1 && w.start < sceneEnd
+        );
+
+        return {
+          ...scene,
+          subtitles: sceneWords,
+        };
+      });
+
+      const updatedMetadata = {
+        ...project.metadata,
+        captionStyle: (project.metadata.captionStyle && project.metadata.captionStyle !== 'none')
+          ? project.metadata.captionStyle
+          : ('documentary' as const),
+        updatedAt: Date.now(),
+      };
+
+      set({
+        project: {
+          ...project,
+          scenes: updatedScenes,
+          metadata: updatedMetadata,
+        },
+      });
+
+      get().saveCurrentProject();
+
+      return {
+        success: true,
+        wordsCount: allWords.length,
+      };
+    } catch (err: any) {
+      console.error('Failed to transcribe voiceover speech:', err);
+      return {
+        success: false,
+        error: err.message || 'Speech transcription failed.',
+      };
+    } finally {
+      set({ isTranscribingSubtitles: false });
+    }
+  },
+
+  clearAllSubtitles: () => {
+    const { project } = get();
+    const updatedScenes = project.scenes.map((s) => ({ ...s, subtitles: [] }));
+    set({
+      project: {
+        ...project,
+        scenes: updatedScenes,
+        metadata: {
+          ...project.metadata,
+          updatedAt: Date.now(),
+        },
+      },
+    });
+    get().saveCurrentProject();
+  },
+
   setBgMusic: (bgMusicPath, volume, audioDucking, duration) => set((state) => ({
     project: {
       ...state.project,
@@ -1322,7 +1852,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         startInSeconds,
         durationInSeconds: 4.0,
         prompt: asset.prompt || asset.name || 'Imported Media Asset',
-        motionType: 'zoom_in',
+        motionType: getMotionForIndex(project.scenes.length, project.metadata?.motionRhythm),
         transitionType: 'cross_dissolve',
         transitionDuration: 0.5,
         colorLUT: 'none',
@@ -1429,76 +1959,88 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   // Overlay Media Clips (Track V2, V3)
-  addOverlayClip: (clip) => set((state) => {
-    const newClip: OverlayClip = {
-      ...clip,
-      id: `overlay-clip-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      opacity: clip.opacity ?? 1.0,
-    };
-    const existing = state.project.metadata.overlayClips || [];
-    const currentMutes = state.project.metadata.trackMutes || {};
-    return {
-      project: {
-        ...state.project,
-        metadata: {
-          ...state.project.metadata,
-          overlayClips: [...existing, newClip],
-          trackMutes: {
-            ...currentMutes,
-            v2: false,
+  addOverlayClip: (clip) => {
+    set((state) => {
+      const newClip: OverlayClip = {
+        ...clip,
+        id: `overlay-clip-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        opacity: clip.opacity ?? 1.0,
+      };
+      const existing = state.project.metadata.overlayClips || [];
+      const currentMutes = state.project.metadata.trackMutes || {};
+      return {
+        project: {
+          ...state.project,
+          metadata: {
+            ...state.project.metadata,
+            overlayClips: [...existing, newClip],
+            trackMutes: {
+              ...currentMutes,
+              v2: false,
+            },
+            updatedAt: Date.now(),
           },
-          updatedAt: Date.now(),
         },
-      },
-    };
-  }),
+      };
+    });
+    get().saveCurrentProject();
+  },
 
-  updateOverlayClip: (id, updates) => set((state) => {
-    const existing = state.project.metadata.overlayClips || [];
-    const updated = existing.map((c) => (c.id === id ? { ...c, ...updates } : c));
-    return {
-      project: {
-        ...state.project,
-        metadata: {
-          ...state.project.metadata,
-          overlayClips: updated,
-          updatedAt: Date.now(),
+  updateOverlayClip: (id, updates) => {
+    set((state) => {
+      const existing = state.project.metadata.overlayClips || [];
+      const updated = existing.map((c) => (c.id === id ? { ...c, ...updates } : c));
+      return {
+        project: {
+          ...state.project,
+          metadata: {
+            ...state.project.metadata,
+            overlayClips: updated,
+            updatedAt: Date.now(),
+          },
         },
-      },
-    };
-  }),
+      };
+    });
+    get().saveCurrentProject();
+  },
 
-  deleteOverlayClip: (id) => set((state) => {
-    const existing = state.project.metadata.overlayClips || [];
-    const remaining = existing.filter((c) => c.id !== id);
-    return {
-      project: {
-        ...state.project,
-        metadata: {
-          ...state.project.metadata,
-          overlayClips: remaining,
-          updatedAt: Date.now(),
+  deleteOverlayClip: (id) => {
+    set((state) => {
+      const existing = state.project.metadata.overlayClips || [];
+      const remaining = existing.filter((c) => c.id !== id);
+      return {
+        project: {
+          ...state.project,
+          metadata: {
+            ...state.project.metadata,
+            overlayClips: remaining,
+            updatedAt: Date.now(),
+          },
         },
-      },
-    };
-  }),
+      };
+    });
+    get().saveCurrentProject();
+  },
 
-  moveOverlayClip: (id, newStartTime) => set((state) => {
-    const existing = state.project.metadata.overlayClips || [];
-    const updated = existing.map((c) =>
-      c.id === id ? { ...c, startTime: Math.max(0, newStartTime) } : c
-    );
-    return {
-      project: {
-        ...state.project,
-        metadata: {
-          ...state.project.metadata,
-          overlayClips: updated,
-          updatedAt: Date.now(),
+  moveOverlayClip: (id, newStartTime) => {
+    set((state) => {
+      const existing = state.project.metadata.overlayClips || [];
+      const updated = existing.map((c) =>
+        c.id === id ? { ...c, startTime: Math.max(0, newStartTime) } : c
+      );
+      return {
+        project: {
+          ...state.project,
+          metadata: {
+            ...state.project.metadata,
+            overlayClips: updated,
+            updatedAt: Date.now(),
+          },
         },
-      },
-    };
-  }),
+      };
+    });
+    get().saveCurrentProject();
+  },
 
   // Freeform Audio Clips
   addAudioClip: (clip) => set((state) => {
@@ -1634,50 +2176,123 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   animateSceneToVideo: async (sceneId: string) => {
-    const { project, flowSettings } = get();
+    const { 
+      project, 
+      flowSettings, 
+      isColabConnected, 
+      colabVideoEngine, 
+      colabMotionIntensity 
+    } = get();
     const scene = project.scenes.find((s) => s.id === sceneId);
     if (!scene) return false;
 
-    get().updateScene(sceneId, {
-      mediaType: 'video',
-      status: 'generating',
-      errorMessage: undefined,
-    });
-
-    const isConnected = get().browsers.some((b) => b.connected);
-    if (!isConnected) {
-      get().updateScene(sceneId, {
-        status: 'error',
-        errorMessage: 'Chrome Flow browser is disconnected. Connect to port 9222/9223 in Flow Studio.',
-      });
-      return false;
+    let isConnected = get().isColabConnected;
+    if (!isConnected && window.electronAPI?.colabTestConnection) {
+      isConnected = await get().testColabConnection();
     }
 
-    try {
-      const targetSettings = {
-        ...flowSettings,
-        mode: 'video' as const,
-        videoModel: flowSettings.videoModel || 'Veo 3.1 - Fast',
-        videoDuration: flowSettings.videoDuration || '4s',
-      };
-
-      if (window.electronAPI?.enqueueGeneration) {
-        await window.electronAPI.enqueueGeneration(
-          scene.id,
-          scene.prompt,
-          project.metadata.id,
-          targetSettings
-        );
-        return true;
+    // ── PRIORITY 1: Cloud AI Video Worker (Colab Wan 2.1 / LTX-Video) ──
+    if (isConnected && window.electronAPI?.colabGenerateVideo) {
+      const rawImagePath = scene.localImagePath || (scene.imageUrl?.startsWith('media://') ? scene.imageUrl.replace('media://', '') : scene.imageUrl);
+      if (!rawImagePath) {
+        get().updateScene(sceneId, {
+          status: 'error',
+          errorMessage: 'No image found for this scene. Generate an image first before animating to video.',
+        });
+        return false;
       }
-      return false;
-    } catch (err: any) {
+
       get().updateScene(sceneId, {
-        status: 'error',
-        errorMessage: err.message || 'Failed to trigger video generation',
+        mediaType: 'video',
+        status: 'generating',
+        errorMessage: undefined,
       });
-      return false;
+
+      try {
+        const res = await window.electronAPI.colabGenerateVideo({
+          sceneId: scene.id,
+          imagePath: rawImagePath,
+          prompt: scene.prompt,
+          engine: colabVideoEngine,
+          motionIntensity: colabMotionIntensity,
+          projectId: project.metadata.id,
+        });
+
+        if (res.success && res.videoPath) {
+          const videoUri = `media://${res.videoPath.replace(/\\/g, '/')}`;
+          get().updateScene(sceneId, {
+            mediaType: 'video',
+            localVideoPath: res.videoPath,
+            videoUrl: videoUri,
+            status: 'ready',
+          });
+
+          get().addMediaAsset({
+            type: 'video',
+            name: `${colabVideoEngine === 'wan2.1' ? 'Wan 2.1' : 'LTX'} AI Video Scene`,
+            path: res.videoPath,
+            thumbnailUrl: videoUri,
+          });
+          return true;
+        } else {
+          get().updateScene(sceneId, {
+            status: 'error',
+            errorMessage: res.error || 'Failed to generate video on Cloud GPU',
+          });
+          return false;
+        }
+      } catch (err: any) {
+        get().updateScene(sceneId, {
+          status: 'error',
+          errorMessage: err.message || 'Cloud generation request failed',
+        });
+        return false;
+      }
     }
+
+    // ── PRIORITY 2: Google Flow Browser (Veo) ──
+    const isFlowConnected = get().browsers.some((b) => b.connected);
+    if (isFlowConnected) {
+      get().updateScene(sceneId, {
+        mediaType: 'video',
+        status: 'generating',
+        errorMessage: undefined,
+      });
+
+      try {
+        const targetSettings = {
+          ...flowSettings,
+          mode: 'video' as const,
+          videoModel: flowSettings.videoModel || 'Veo 3.1 - Fast',
+          videoDuration: flowSettings.videoDuration || '4s',
+        };
+
+        if (window.electronAPI?.enqueueGeneration) {
+          await window.electronAPI.enqueueGeneration(
+            scene.id,
+            scene.prompt,
+            project.metadata.id,
+            targetSettings
+          );
+          return true;
+        }
+        return false;
+      } catch (err: any) {
+        get().updateScene(sceneId, {
+          status: 'error',
+          errorMessage: err.message || 'Failed to trigger video generation',
+        });
+        return false;
+      }
+    }
+
+    // ── NEITHER CONNECTED: Open Cloud Video Modal ──
+    set({ isCloudVideoModalOpen: true });
+    get().updateScene(sceneId, {
+      status: 'error',
+      errorMessage: 'Cloud GPU is not connected. Open Cloud AI Video to connect Google Colab.',
+    });
+    return false;
   },
 
   autoGenerateSoundEffects: () => {
@@ -1773,9 +2388,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     get().updateScene(id, { motionType });
   },
 
-  applyDynamicMotionToAllScenes: (forceAll = true) => {
+  applyMotionRhythmToAllScenes: (rhythm, forceAll = true) => {
     const { project } = get();
-    const motionCycle: MotionType[] = ['zoom_in', 'pan_right', 'zoom_out', 'pan_left'];
+    const targetRhythm: MotionRhythmPreset = rhythm || project.metadata?.motionRhythm || 'dynamic_alternating';
+    const cycle = MOTION_RHYTHM_CYCLES[targetRhythm] || MOTION_RHYTHM_CYCLES.dynamic_alternating;
     const updatedScenes = project.scenes.map((s, idx) => {
       // Images under 1.5s must be static
       if ((s.durationInSeconds || 0) < 1.5) {
@@ -1787,7 +2403,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       if (forceAll || !s.motionType || s.motionType === 'static' || s.motionType === 'dolly_zoom' || s.motionType === 'handheld_drift') {
         return {
           ...s,
-          motionType: motionCycle[idx % motionCycle.length],
+          motionType: cycle[idx % cycle.length],
         };
       }
       return s;
@@ -1799,6 +2415,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         scenes: updatedScenes,
         metadata: {
           ...project.metadata,
+          motionRhythm: targetRhythm,
           updatedAt: Date.now(),
         },
       },
@@ -1806,8 +2423,29 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     get().saveCurrentProject();
   },
 
-  splitSceneAtTime: (timeInSeconds) => {
+  setMotionRhythmPreset: (rhythm) => {
     const { project } = get();
+    set({
+      project: {
+        ...project,
+        metadata: {
+          ...project.metadata,
+          motionRhythm: rhythm,
+          updatedAt: Date.now(),
+        },
+      },
+    });
+    get().saveCurrentProject();
+  },
+
+  applyDynamicMotionToAllScenes: (forceAll = true) => {
+    const { project } = get();
+    const activeRhythm = project.metadata?.motionRhythm || 'dynamic_alternating';
+    get().applyMotionRhythmToAllScenes(activeRhythm, forceAll);
+  },
+
+  splitSceneAtTime: (timeInSeconds) => {
+    const { project, pushUndoSnapshot } = get();
     const sceneIndex = project.scenes.findIndex(
       (s) => timeInSeconds > s.startInSeconds && timeInSeconds < s.startInSeconds + s.durationInSeconds
     );
@@ -1819,6 +2457,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const secondDuration = targetScene.durationInSeconds - firstDuration;
 
     if (firstDuration < 0.3 || secondDuration < 0.3) return;
+    pushUndoSnapshot('Split Scene');
 
     const firstSubtitles = targetScene.subtitles.filter((w) => w.end <= timeInSeconds);
     const secondSubtitles = targetScene.subtitles.filter((w) => w.start >= timeInSeconds);
@@ -1856,10 +2495,14 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     });
   },
 
-  deleteScene: (id) => {
-    const { project, selectedSceneId } = get();
+  deleteScenes: (ids: string[]) => {
+    const { project, selectedSceneId, selectedSceneIds, pushUndoSnapshot } = get();
+    if (!ids || ids.length === 0) return;
+    pushUndoSnapshot(`Delete ${ids.length} Scene(s)`);
+    const idSet = new Set(ids);
 
-    const filtered = project.scenes.filter((s) => s.id !== id);
+    const deletedScenes = project.scenes.filter((s) => idSet.has(s.id));
+    const filtered = project.scenes.filter((s) => !idSet.has(s.id));
     
     // Recalculate start times & duration
     let cur = 0;
@@ -1873,22 +2516,71 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       ? Math.max(...recomputed.map((s) => s.startInSeconds + s.durationInSeconds))
       : 0;
 
+    const remainingSelected = selectedSceneIds.filter((id) => !idSet.has(id));
+    const newSelectedId = (selectedSceneId && !idSet.has(selectedSceneId))
+      ? selectedSceneId
+      : (remainingSelected[0] || recomputed[0]?.id || null);
+
+    // Also clean up manifest entries for the deleted scenes if present
+    let nextManifest = project.metadata.promptManifest;
+    if (nextManifest && nextManifest.entries) {
+      const nextEntries = { ...nextManifest.entries };
+      let changed = false;
+      for (const ds of deletedScenes) {
+        const tcInfo = extractTimecode(ds.prompt);
+        const tc = tcInfo?.timecode;
+        if (tc && nextEntries[tc]) {
+          delete nextEntries[tc];
+          changed = true;
+        }
+      }
+      if (changed) {
+        nextManifest = {
+          ...nextManifest,
+          entries: nextEntries,
+          updatedAt: Date.now(),
+        };
+      }
+    }
+
     set({
       project: {
         ...project,
         scenes: recomputed,
         metadata: {
           ...project.metadata,
+          promptManifest: nextManifest,
           audioDuration: Math.max(project.metadata.audioDuration || 0, totalDur),
           updatedAt: Date.now(),
         },
       },
-      selectedSceneId: selectedSceneId === id ? recomputed[0]?.id || null : selectedSceneId,
+      selectedSceneIds: remainingSelected,
+      selectedSceneId: newSelectedId,
     });
+
+    get().saveCurrentProject();
+  },
+
+  deleteScene: (id: string) => {
+    get().deleteScenes([id]);
+  },
+
+  deleteSceneRange: (fromOrder: number, toOrder: number) => {
+    const { project, deleteScenes } = get();
+    const min = Math.min(fromOrder, toOrder);
+    const max = Math.max(fromOrder, toOrder);
+    const targets = project.scenes
+      .filter((s) => (s.order + 1) >= min && (s.order + 1) <= max)
+      .map(s => s.id);
+    if (targets.length > 0) {
+      deleteScenes(targets);
+    }
   },
 
   reorderScenes: (startIndex, endIndex) => {
-    const { project } = get();
+    const { project, pushUndoSnapshot } = get();
+    if (startIndex === endIndex) return;
+    pushUndoSnapshot('Reorder Scenes');
     const result = Array.from(project.scenes);
     const [removed] = result.splice(startIndex, 1);
     result.splice(endIndex, 0, removed);
@@ -1935,7 +2627,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       startInSeconds: 0,
       durationInSeconds: customDuration,
       prompt: fileName,
-      motionType: 'zoom_in',
+      motionType: getMotionForIndex(index, project.metadata?.motionRhythm),
       motionIntensity: 1,
       transitionType: 'cross_dissolve',
       transitionDuration: 0.5,
@@ -1985,7 +2677,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       startInSeconds: 0,
       durationInSeconds: customDuration,
       prompt,
-      motionType: 'zoom_in',
+      motionType: getMotionForIndex(index, project.metadata?.motionRhythm),
       motionIntensity: 1,
       transitionType: 'cross_dissolve',
       transitionDuration: 0.5,
@@ -2042,11 +2734,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   updateSceneDuration: (id, newDuration) => {
-    const { project } = get();
+    const { project, pushUndoSnapshot } = get();
     if (newDuration < 0.3) return;
 
     const sceneIndex = project.scenes.findIndex((s) => s.id === id);
     if (sceneIndex === -1) return;
+    pushUndoSnapshot('Adjust Scene Duration');
 
     const updated = [...project.scenes];
     const targetScene = updated[sceneIndex];
@@ -2079,9 +2772,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   trimSceneStart: (id, deltaSeconds) => {
-    const { project } = get();
+    const { project, pushUndoSnapshot } = get();
     const sceneIndex = project.scenes.findIndex((s) => s.id === id);
     if (sceneIndex === -1) return;
+    pushUndoSnapshot('Trim Scene Start');
 
     const scene = project.scenes[sceneIndex];
     const maxDelta = scene.durationInSeconds - 0.3;
@@ -2106,9 +2800,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   duplicateScene: (id) => {
-    const { project } = get();
+    const { project, pushUndoSnapshot } = get();
     const sceneIndex = project.scenes.findIndex((s) => s.id === id);
     if (sceneIndex === -1) return;
+    pushUndoSnapshot('Duplicate Scene');
 
     const source = project.scenes[sceneIndex];
     const newScene: SceneSegment = {
@@ -2224,6 +2919,19 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       : project.scenes.filter((s) => s.status !== 'ready' || s.mediaType !== 'video' || !s.localVideoPath);
 
     if (scenesToGen.length === 0) return;
+
+    // Check if Colab GPU is connected or can auto-connect
+    let colabReady = get().isColabConnected;
+    if (!colabReady && window.electronAPI?.colabTestConnection) {
+      colabReady = await get().testColabConnection();
+    }
+
+    if (colabReady && window.electronAPI?.colabGenerateVideo) {
+      for (const s of scenesToGen) {
+        await get().animateSceneToVideo(s.id);
+      }
+      return;
+    }
 
     scenesToGen.forEach((s) => {
       updateScene(s.id, {
@@ -2418,10 +3126,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     updateScene(sceneId, {
       status: 'generating',
       mediaType: isVideo ? 'video' : 'image',
-      localImagePath: undefined,
-      imageUrl: undefined,
-      localVideoPath: undefined,
-      videoUrl: undefined,
+      localImagePath: scene.localImagePath,
+      imageUrl: scene.imageUrl,
+      localVideoPath: scene.localVideoPath,
+      videoUrl: scene.videoUrl,
       errorMessage: undefined,
       hasMismatchWarning: false,
       mismatchReason: undefined,
@@ -2490,10 +3198,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const updatedScenes = project.scenes.map((s) => ({
       ...s,
       mediaType: isVideo ? ('video' as const) : ('image' as const),
-      localImagePath: undefined,
-      imageUrl: undefined,
-      localVideoPath: undefined,
-      videoUrl: undefined,
+      localImagePath: s.localImagePath,
+      imageUrl: s.imageUrl,
+      localVideoPath: s.localVideoPath,
+      videoUrl: s.videoUrl,
       status: 'generating' as const,
       errorMessage: undefined,
       hasMismatchWarning: false,
@@ -2508,6 +3216,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         updatedAt: Date.now(),
       },
     });
+
+    get().startGenerationBatchTracking(project.scenes.length, isVideo ? 'video' : 'image');
 
     if (isVideo && window.electronAPI?.batchGenerateVideos) {
       await window.electronAPI.batchGenerateVideos(
@@ -2533,6 +3243,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       (isVideo ? (!s.localVideoPath && s.status !== 'ready') : (!s.localImagePath && s.status !== 'ready'))
     );
     if (failedScenes.length === 0) return;
+
+    set({ isGenerationPaused: false });
+    get().startGenerationBatchTracking(failedScenes.length, isVideo ? 'video' : 'image');
 
     failedScenes.forEach((s) => {
       updateScene(s.id, { 
@@ -2569,6 +3282,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     });
 
     if (targetScenes.length === 0) return { count: 0 };
+
+    get().startGenerationBatchTracking(targetScenes.length, isVideo ? 'video' : 'image');
 
     targetScenes.forEach((s) => {
       updateScene(s.id, {
@@ -2610,6 +3325,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     });
 
     if (targetScenes.length === 0) return { count: 0 };
+
+    get().startGenerationBatchTracking(targetScenes.length, isVideo ? 'video' : 'image');
 
     targetScenes.forEach((s) => {
       updateScene(s.id, {
@@ -2662,10 +3379,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     const updatedScenes = project.scenes.map((s) => ({
       ...s,
       mediaType: isVideo ? ('video' as const) : ('image' as const),
-      localImagePath: undefined,
-      imageUrl: undefined,
-      localVideoPath: undefined,
-      videoUrl: undefined,
+      localImagePath: s.localImagePath,
+      imageUrl: s.imageUrl,
+      localVideoPath: s.localVideoPath,
+      videoUrl: s.videoUrl,
       status: 'generating' as const,
       errorMessage: undefined,
       hasMismatchWarning: false,
@@ -2680,6 +3397,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         updatedAt: Date.now(),
       },
     });
+
+    get().startGenerationBatchTracking(project.scenes.length, isVideo ? 'video' : 'image');
 
     const projectId = project.metadata.id || 'default_project';
     const targetSettings = {
@@ -2726,14 +3445,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     if (targetScenes.length === 0) return { count: 0 };
 
+    get().startGenerationBatchTracking(targetScenes.length, isVideo ? 'video' : 'image');
+
     targetScenes.forEach((s) => {
       updateScene(s.id, {
         status: 'generating',
         mediaType: isVideo ? 'video' : 'image',
-        localImagePath: onlyUnready && s.localImagePath ? s.localImagePath : undefined,
-        imageUrl: onlyUnready && s.imageUrl ? s.imageUrl : undefined,
-        localVideoPath: onlyUnready && s.localVideoPath ? s.localVideoPath : undefined,
-        videoUrl: onlyUnready && s.videoUrl ? s.videoUrl : undefined,
+        localImagePath: s.localImagePath,
+        imageUrl: s.imageUrl,
+        localVideoPath: s.localVideoPath,
+        videoUrl: s.videoUrl,
         errorMessage: undefined,
         hasMismatchWarning: false,
         mismatchReason: undefined,
@@ -2784,14 +3505,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     if (targetScenes.length === 0) return { count: 0 };
 
+    get().startGenerationBatchTracking(targetScenes.length, isVideo ? 'video' : 'image');
+
     targetScenes.forEach((s) => {
       updateScene(s.id, {
         status: 'generating',
         mediaType: isVideo ? 'video' : 'image',
-        localImagePath: onlyUnready && s.localImagePath ? s.localImagePath : undefined,
-        imageUrl: onlyUnready && s.imageUrl ? s.imageUrl : undefined,
-        localVideoPath: onlyUnready && s.localVideoPath ? s.localVideoPath : undefined,
-        videoUrl: onlyUnready && s.videoUrl ? s.videoUrl : undefined,
+        localImagePath: s.localImagePath,
+        imageUrl: s.imageUrl,
+        localVideoPath: s.localVideoPath,
+        videoUrl: s.videoUrl,
         errorMessage: undefined,
         hasMismatchWarning: false,
         mismatchReason: undefined,
@@ -2861,13 +3584,36 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       await window.electronAPI.pauseGeneration();
     }
     set({ isGenerationPaused: true });
+    get().pauseGenerationTracking();
   },
 
   resumeBatchGeneration: async () => {
+    set({ isGenerationPaused: false });
+    get().resumeGenerationTracking();
     if (window.electronAPI?.resumeGeneration) {
       await window.electronAPI.resumeGeneration();
     }
-    set({ isGenerationPaused: false });
+    // If all scenes in the current batch were left uncompleted, re-enqueue them
+    const { project, flowSettings } = get();
+    const isVideo = flowSettings.mode === 'video';
+    const unreadyScenes = project.scenes.filter((s) =>
+      s.status === 'generating' || (s.status === 'error' && (isVideo ? !s.localVideoPath : !s.localImagePath))
+    );
+    if (unreadyScenes.length > 0) {
+      if (isVideo && window.electronAPI?.batchGenerateVideos) {
+        await window.electronAPI.batchGenerateVideos(
+          unreadyScenes.map((s) => ({ id: s.id, prompt: s.prompt })),
+          project.metadata.id,
+          flowSettings
+        );
+      } else if (window.electronAPI?.batchGenerate) {
+        await window.electronAPI.batchGenerate(
+          unreadyScenes.map((s) => ({ id: s.id, prompt: s.prompt })),
+          project.metadata.id,
+          flowSettings
+        );
+      }
+    }
   },
 
   stopBatchGeneration: async () => {
@@ -2882,6 +3628,105 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }
     });
     set({ isGenerationPaused: false });
+    get().stopBatchGenerationTracking();
+  },
+
+  generationProgress: {
+    isActive: false,
+    isPaused: false,
+    startTime: null,
+    lastFinishTime: null,
+    totalInBatch: 0,
+    completedInBatch: 0,
+    failedInBatch: 0,
+    mediaType: 'image',
+    recentDurations: [],
+    sessionAvgSpeed: null,
+  },
+
+  startGenerationBatchTracking: (totalCount: number, mediaType?: 'image' | 'video') => {
+    const current = get().generationProgress;
+    set({
+      generationProgress: {
+        ...current,
+        isActive: true,
+        isPaused: false,
+        startTime: Date.now(),
+        lastFinishTime: null,
+        totalInBatch: Math.max(1, totalCount),
+        completedInBatch: 0,
+        failedInBatch: 0,
+        mediaType: mediaType || 'image',
+      },
+    });
+  },
+
+  recordJobProgressEvent: (sceneId: string, status: 'ready' | 'error' | 'generating') => {
+    if (status !== 'ready' && status !== 'error') return;
+
+    const { generationProgress, project } = get();
+    const now = Date.now();
+
+    const wasActive = generationProgress.isActive;
+    const baseTime = generationProgress.lastFinishTime || generationProgress.startTime || now;
+    const rawDuration = Math.max(0.5, (now - baseTime) / 1000);
+
+    // Limit outlier durations (e.g., if computer went to sleep) to 120s for image, 300s for video
+    const maxDuration = generationProgress.mediaType === 'video' ? 300 : 120;
+    const clampedDuration = Math.min(rawDuration, maxDuration);
+
+    const newDurations = [...generationProgress.recentDurations, clampedDuration].slice(-10);
+    const newSessionAvg = newDurations.reduce((acc, d) => acc + d, 0) / newDurations.length;
+
+    const newCompleted = generationProgress.completedInBatch + (status === 'ready' ? 1 : 0);
+    const newFailed = generationProgress.failedInBatch + (status === 'error' ? 1 : 0);
+
+    const remainingGenerating = project.scenes.filter((s) => s.id !== sceneId && s.status === 'generating').length;
+    const isStillActive = wasActive && (remainingGenerating > 0 || newCompleted + newFailed < generationProgress.totalInBatch);
+
+    set({
+      generationProgress: {
+        ...generationProgress,
+        isActive: isStillActive,
+        lastFinishTime: now,
+        completedInBatch: newCompleted,
+        failedInBatch: newFailed,
+        recentDurations: newDurations,
+        sessionAvgSpeed: newSessionAvg,
+      },
+    });
+  },
+
+  pauseGenerationTracking: () => {
+    const { generationProgress } = get();
+    set({
+      generationProgress: {
+        ...generationProgress,
+        isPaused: true,
+      },
+    });
+  },
+
+  resumeGenerationTracking: () => {
+    const { generationProgress } = get();
+    set({
+      generationProgress: {
+        ...generationProgress,
+        isPaused: false,
+        lastFinishTime: Date.now(), // Reset finish time anchor so pause time is not attributed to speed
+      },
+    });
+  },
+
+  stopBatchGenerationTracking: () => {
+    const { generationProgress } = get();
+    set({
+      generationProgress: {
+        ...generationProgress,
+        isActive: false,
+        isPaused: false,
+      },
+    });
   },
 
   autoArrangeImagesByTimestamp: (
@@ -3224,6 +4069,20 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     return null;
   },
 
+  saveDesignedVoice: async (profile: any) => {
+    try {
+      if (window.electronAPI?.saveDesignedVoice) {
+        const saved: VoiceProfile = await window.electronAPI.saveDesignedVoice(profile);
+        await get().loadVoiceProfiles();
+        set({ activeVoiceProfile: saved });
+        return saved;
+      }
+    } catch (err: any) {
+      console.error('[Store] Failed to save designed voice:', err.message);
+    }
+    return null;
+  },
+
   deleteCustomVoice: async (id: string) => {
     try {
       if (window.electronAPI?.deleteCustomVoice) {
@@ -3324,6 +4183,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             ? 'OpenAI HD'
             : req.engine === 'edge_tts'
             ? 'Edge Neural Studio'
+            : req.engine === 'f5_tts'
+            ? 'F5-TTS Flow Matching'
             : req.engine === 'indic_f5'
             ? 'IndicF5'
             : req.engine === 'chatterbox'
@@ -3341,15 +4202,31 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           }
         }
 
+        // Detect emotion from mood/mode tags if not specified, and sanitize speech text
+        const effectiveEmotion = detectEmotionFromText(cleanText, req.emotion);
+        const speechCleanText = cleanSpeechText(cleanText, { preservePauses: true });
+
+        // Enforce character limit for selected voice engine
+        const limitCheck = validateVoiceText(speechCleanText, req.engine);
+        if (!limitCheck.isValid) {
+          set({ isGeneratingTTS: false, ttsProgressMessage: null });
+          return {
+            success: false,
+            error: limitCheck.errorMessage || `Script exceeds the ${limitCheck.maxChars} character limit for this voice model.`,
+          };
+        }
+
         // Auto-inject apiKey from global store if not supplied
         const effectiveReq: TTSGenerationRequest = {
           ...req,
-          text: cleanText,
+          text: speechCleanText,
+          emotion: effectiveEmotion,
           masteringPreset: req.masteringPreset || get().voiceMasteringPreset,
           apiKey:
             req.apiKey ||
             (req.engine === 'google'
-              ? get().globalApiKeys.gemini?.[0]
+              // Send ALL Gemini keys (newline-joined) for pool rotation on quota exhaustion
+              ? (get().globalApiKeys.gemini || []).filter(Boolean).join('\n') || undefined
               : req.engine === 'elevenlabs'
               ? get().globalApiKeys.elevenlabs?.[0]
               : req.engine === 'openai'
@@ -3437,23 +4314,51 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     }
   },
 
-  sendVoiceoverToTimeline: async (audioPath: string, scriptText: string, customDuration?: number) => {
-    const { project, setProject, setViewMode } = get();
+  sendVoiceoverToTimeline: async (
+    audioPath: string,
+    scriptText: string,
+    customDuration?: number,
+    mode: 'replace_main' | 'insert_at_playhead' = 'replace_main'
+  ) => {
+    const { project, currentTime, pushUndoSnapshot, setProject, setViewMode } = get();
+    pushUndoSnapshot(mode === 'insert_at_playhead' ? 'Insert Voiceover at Playhead' : 'Send Voiceover to Timeline');
+
     const duration = customDuration || (await getExactAudioDuration(audioPath)) || 10.0;
     const fileName = audioPath.split(/[\\/]/).pop() || 'TTS Voiceover';
+
+    const insertTime = mode === 'insert_at_playhead' ? Math.max(0, currentTime) : 0;
 
     const voiceClip: AudioClip = {
       id: `voice-${Date.now()}`,
       name: fileName,
       filePath: audioPath,
       track: 'A1',
-      startTime: 0,
+      startTime: insertTime,
       duration,
       volume: 1.0,
       category: 'voiceover',
     };
 
-    const existingClips = (project.metadata.audioClips || []).filter((c) => c.track !== 'A1');
+    let updatedAudioClips: AudioClip[] = [];
+    if (mode === 'replace_main') {
+      // Replace existing A1 track
+      const nonA1Clips = (project.metadata.audioClips || []).filter((c) => c.track !== 'A1');
+      updatedAudioClips = [...nonA1Clips, voiceClip];
+    } else {
+      // Insert at playhead with automatic ripple shifting of subsequent A1 clips
+      const currentClips = project.metadata.audioClips || [];
+      updatedAudioClips = currentClips.map((c) => {
+        if (c.track === 'A1' && c.startTime >= insertTime) {
+          return {
+            ...c,
+            startTime: +(c.startTime + duration).toFixed(3),
+          };
+        }
+        return c;
+      });
+      updatedAudioClips.push(voiceClip);
+    }
+
     const existingMedia = project.metadata.mediaAssets || [];
     const mediaAsset: MediaAsset = {
       id: `media-${Date.now()}`,
@@ -3464,10 +4369,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       addedAt: Date.now(),
     };
 
-    // If no scenes or user wants fresh storyboard, split script text into scenes
+    // If no scenes or user has an empty storyboard, generate initial scenes from script
     let scenes = project.scenes;
-    if (!scenes || scenes.length === 0 || scenes.length === 1) {
-      const sentences = scriptText
+    if (!scenes || scenes.length === 0 || (scenes.length === 1 && !scenes[0].localImagePath)) {
+      const cleanScript = cleanSubtitleText(scriptText);
+      const sentences = cleanScript
         .split(/(?<=[.?!।\n])\s+/)
         .map((s) => s.trim())
         .filter(Boolean);
@@ -3480,7 +4386,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           startInSeconds: +(idx * segDur).toFixed(3),
           durationInSeconds: +segDur.toFixed(3),
           prompt: sentence,
-          motionType: 'zoom_in',
+          motionType: getMotionForIndex(idx, project.metadata?.motionRhythm),
           transitionType: 'cross_dissolve',
           status: 'pending',
           subtitles: [{
@@ -3492,14 +4398,19 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }
     }
 
+    const maxAudioEnd = updatedAudioClips.reduce(
+      (max, c) => Math.max(max, c.startTime + c.duration),
+      0
+    );
+
     const updatedProject: Project = {
       ...project,
       metadata: {
         ...project.metadata,
         audioPath,
-        audioDuration: duration,
+        audioDuration: Math.max(project.metadata.audioDuration || 0, maxAudioEnd, duration),
         scriptText,
-        audioClips: [...existingClips, voiceClip],
+        audioClips: updatedAudioClips,
         mediaAssets: existingMedia.some((m) => m.path === audioPath) ? existingMedia : [...existingMedia, mediaAsset],
         updatedAt: Date.now(),
       },

@@ -7,6 +7,7 @@ import ffmpegPath from 'ffmpeg-static';
 import { TTSGenerationRequest } from '../../src/types';
 
 import { EdgeTtsService } from './edgeTtsService';
+import { cleanSpeechText } from './ttsTextSanitizer';
 
 export class GoogleTtsService {
   private resolvedFfmpegPath: string;
@@ -22,57 +23,54 @@ export class GoogleTtsService {
    * If voice is a Gemini model and an API key is present, uses Gemini Flash Audio.
    * Otherwise, seamlessly falls back to Edge Neural (preserving gender) or Google Free Web TTS.
    */
+  /**
+   * Parses raw API key string into a deduplicated pool of trimmed keys.
+   * Supports newline, comma, or semicolon separation (one key per Gmail account).
+   */
+  private parseKeyPool(rawKey: string): string[] {
+    return rawKey
+      .split(/[\n,;]+/)
+      .map((k) => k.trim())
+      .filter(Boolean)
+      .filter((v, i, a) => a.indexOf(v) === i); // deduplicate
+  }
+
+  /**
+   * Main Google Gemini Speech Synthesizer.
+   * Requires a valid Gemini API key. Multiple keys (separated by newline/comma) are
+   * rotated automatically when quota is exhausted on any individual key.
+   * Does NOT fall back to Edge Neural — Gemini engine should produce Gemini audio.
+   */
   public async synthesizeToFile(
     req: TTSGenerationRequest,
     outputPath: string,
     apiKey?: string
   ): Promise<boolean> {
-    const isGeminiVoice = req.voiceId.startsWith('google-gemini-') || ['aoede', 'charon', 'fenrir', 'kore', 'puck'].includes(req.voiceId.toLowerCase());
-    const isMaleVoice = ['charon', 'fenrir', 'puck', 'google-gemini-charon', 'google-gemini-fenrir', 'google-gemini-puck'].includes(req.voiceId.toLowerCase());
-
-    if (isGeminiVoice && apiKey && apiKey.trim()) {
-      try {
-        console.log(`[GoogleTtsService] Synthesizing with Google Gemini Flash Audio: voice=${req.voiceId}...`);
-        const geminiSuccess = await this.synthesizeWithGemini(req, outputPath, apiKey.trim());
-        if (geminiSuccess && fs.existsSync(outputPath)) {
-          return true;
-        }
-      } catch (err: any) {
-        console.warn(`[GoogleTtsService] Gemini Audio error (${err.message}). Falling back...`);
-      }
+    if (!apiKey || !apiKey.trim()) {
+      throw new Error(
+        'Gemini API key is required. Please add your key in Settings → API Keys. ' +
+        'Get a free key at https://aistudio.google.com/app/apikey'
+      );
     }
 
-    // If male voice was requested, NEVER use Google Free Web TTS (which is female-only).
-    // Instead, route to Microsoft Edge Neural male voice to preserve voice gender!
-    if (isMaleVoice) {
-      console.log(`[GoogleTtsService] Male voice selected (${req.voiceId}). Routing fallback to Edge Neural Male (Christopher)...`);
-      try {
-        const edgeSuccess = await this.edgeTtsService.synthesizeToFile(req.text, outputPath, {
-          voice: 'en-US-ChristopherNeural',
-          lang: req.language || 'en',
-          rate: req.speed ?? 1.0,
-          pitch: req.pitch ?? 0,
-        });
-        if (edgeSuccess && fs.existsSync(outputPath)) {
-          return true;
-        }
-      } catch (edgeErr: any) {
-        console.warn(`[GoogleTtsService] Edge fallback warning:`, edgeErr.message);
-      }
+    const keyPool = this.parseKeyPool(apiKey);
+    if (keyPool.length === 0) {
+      throw new Error('No valid Gemini API keys found. Please add at least one key in Settings → API Keys.');
     }
 
-    // Google Free Web TTS (Zero API key needed)
-    console.log(`[GoogleTtsService] Synthesizing with Google Free Web TTS: voice=${req.voiceId}, lang=${req.language || 'auto'}...`);
-    return await this.synthesizeWithGoogleWeb(req, outputPath);
+    console.log(`[GoogleTtsService] Synthesizing with Gemini Flash Audio: voice=${req.voiceId}, keys=${keyPool.length}...`);
+    return await this.synthesizeWithGemini(req, outputPath, keyPool);
   }
 
   /**
    * Synthesizes speech using Google Gemini Flash Audio generation.
+   * Implements API key pool rotation: on quota errors (429) it moves to the next key.
+   * Strategy: iterate models × keys, so each model is tried with all keys before moving on.
    */
   private async synthesizeWithGemini(
     req: TTSGenerationRequest,
     outputPath: string,
-    apiKey: string
+    keyPool: string[]
   ): Promise<boolean> {
     const voiceMap: Record<string, string> = {
       'google-gemini-aoede': 'Aoede',
@@ -85,178 +83,172 @@ export class GoogleTtsService {
       'fenrir': 'Fenrir',
       'kore': 'Kore',
       'puck': 'Puck',
+      'google-bn-bashkar': 'Charon',
+      'google-bn-shikha': 'Aoede',
+      'google-gemini-bn-charon': 'Charon',
+      'google-gemini-bn-shikha': 'Aoede',
+      'google-hi-madhur': 'Charon',
+      'google-hi-swara': 'Aoede',
+      'google-gemini-hi-charon': 'Charon',
+      'google-gemini-hi-swara': 'Aoede',
+      'google-es-camila': 'Aoede',
     };
 
     const targetVoice = voiceMap[req.voiceId.toLowerCase()] || 'Aoede';
-    // Active Gemini TTS and native audio models in Google Generative Language API
+    // Gemini TTS models that support generateContent with AUDIO responseModality.
+    // Order: fastest/best first, quota-limited last.
+    // Removed: gemini-2.0-flash (deprecated), gemini-2.5-flash-native-audio-latest (WebSocket only),
+    //          gemini-2.0-flash-exp (not found in v1beta)
     const models = [
-      'gemini-2.5-flash-preview-tts',
-      'gemini-2.5-flash-native-audio-latest',
-      'gemini-3.1-flash-tts-preview',
-      'gemini-2.5-pro-preview-tts',
-      'gemini-2.0-flash',
+      'gemini-2.5-flash-preview-tts',  // Primary: dedicated TTS model
+      'gemini-3.6-flash',               // Google-recommended replacement for gemini-2.0-flash
+      'gemini-2.5-pro-preview-tts',     // High quality but quota-limited on free tier
     ];
 
     let lastError: any = null;
 
-    for (const model of models) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const cleanPromptText = cleanSpeechText(req.text, { preservePauses: true });
+    const emotion = req.emotion && req.emotion !== 'neutral' && req.emotion !== 'auto'
+      ? req.emotion
+      : null;
+    const deliveryDirective = emotion
+      ? `You are a professional studio voice narrator. Speak with an authentic, ${emotion}, and deeply emotionally resonant tone. Where you see ellipses (...) or blank lines, pause naturally and poignantly without speaking. Never read aloud any bracket directives, stage directions, or the word 'pause'. Speak ONLY the narrative text.`
+      : `You are a professional studio voice narrator. Speak with a deep, warm, reflective, and emotionally resonant cadence — like a seasoned documentarian. Where you see ellipses (...) or blank lines, pause naturally and meaningfully. Never read aloud any bracket directives, stage directions, or the word 'pause'. Speak ONLY the narrative text.`;
 
-        const payload = {
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: `Please read aloud the following text exactly as provided, with clear, natural pronunciation and cadence. Do not include any introductory or concluding remarks, explanations, or commentary. Speak only the exact text:\n\n${req.text}`,
-                },
-              ],
+    const quotaExhaustedKeys = new Set<string>();
+
+    // Strategy: for each model, try each key in the pool.
+    // On 429 (quota exceeded), mark that key as exhausted and try the next key.
+    // On other errors (timeout, model not supported), skip this model entirely.
+    for (const model of models) {
+      for (let keyIndex = 0; keyIndex < keyPool.length; keyIndex++) {
+        const currentKey = keyPool[keyIndex];
+
+        // Skip keys already known to be quota-exhausted for this request
+        if (quotaExhaustedKeys.has(currentKey)) {
+          continue;
+        }
+
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${currentKey}`;
+          const keyLabel = keyPool.length > 1 ? ` [key ${keyIndex + 1}/${keyPool.length}]` : '';
+          console.log(`[GoogleTtsService] Trying model=${model}${keyLabel}...`);
+
+          // Use systemInstruction for directive (proper Gemini TTS API format)
+          // and keep the user content as pure speech text only.
+          const payload: any = {
+            system_instruction: {
+              parts: [{ text: deliveryDirective }],
             },
-          ],
-          generationConfig: {
-            responseModalities: ['AUDIO'],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: targetVoice,
+            contents: [
+              {
+                role: 'user',
+                parts: [{ text: cleanPromptText }],
+              },
+            ],
+            generationConfig: {
+              responseModalities: ['AUDIO'],
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: targetVoice,
+                  },
                 },
               },
             },
-          },
-        };
+          };
 
-        const response = await axios.post(url, payload, {
-          headers: { 'Content-Type': 'application/json' },
-          timeout: 45000,
-        });
+          const response = await axios.post(url, payload, {
+            headers: { 'Content-Type': 'application/json' },
+            timeout: 60000,
+          });
 
-        const candidates = response.data?.candidates;
-        if (!candidates || candidates.length === 0) {
-          throw new Error(`Gemini ${model} returned no candidates.`);
-        }
+          const candidates = response.data?.candidates;
+          if (!candidates || candidates.length === 0) {
+            const feedback = response.data?.promptFeedback;
+            const blockReason = feedback?.blockReason || 'unknown';
+            throw new Error(`No candidates returned. Block reason: ${blockReason}`);
+          }
 
-        const parts = candidates[0]?.content?.parts || [];
-        const audioPart = parts.find((p: any) => p.inlineData && p.inlineData.data);
+          const candidate = candidates[0];
+          const finishReason = candidate?.finishReason || 'UNKNOWN';
+          const parts = candidate?.content?.parts || [];
+          const audioPart = parts.find((p: any) => p.inlineData && p.inlineData.data);
 
-        if (!audioPart || !audioPart.inlineData?.data) {
-          throw new Error(`Gemini ${model} response did not contain audio data.`);
-        }
+          if (!audioPart || !audioPart.inlineData?.data) {
+            const safetyRatings = candidate?.safetyRatings?.map((r: any) => `${r.category}:${r.probability}`).join(', ') || 'none';
+            throw new Error(`No audio data in response (finishReason=${finishReason}, safety=[${safetyRatings}]).`);
+          }
 
-        const rawAudioBuffer = Buffer.from(audioPart.inlineData.data, 'base64');
-        const mimeType = (audioPart.inlineData.mimeType || '').toLowerCase();
+          const rawAudioBuffer = Buffer.from(audioPart.inlineData.data, 'base64');
 
-        const tempDir = os.tmpdir();
-        const tempRawPath = path.join(tempDir, `gemini_audio_raw_${Date.now()}.tmp`);
+          const tempDir = os.tmpdir();
+          const tempRawPath = path.join(tempDir, `gemini_audio_raw_${Date.now()}.tmp`);
+          let inputAudioPath = tempRawPath;
 
-        let inputAudioPath = tempRawPath;
+          const isRiff = rawAudioBuffer.subarray(0, 4).toString() === 'RIFF';
+          const isMp3 =
+            rawAudioBuffer.subarray(0, 3).toString() === 'ID3' ||
+            (rawAudioBuffer.length > 2 && rawAudioBuffer[0] === 0xff && (rawAudioBuffer[1] & 0xe0) === 0xe0);
 
-        // Check if raw PCM or WAV
-        const isRiff = rawAudioBuffer.subarray(0, 4).toString() === 'RIFF';
-        const isMp3 =
-          rawAudioBuffer.subarray(0, 3).toString() === 'ID3' ||
-          (rawAudioBuffer.length > 2 && rawAudioBuffer[0] === 0xff && (rawAudioBuffer[1] & 0xe0) === 0xe0);
+          if (isMp3 && (!req.speed || req.speed === 1.0)) {
+            await fs.writeFile(outputPath, rawAudioBuffer);
+            console.log(`[GoogleTtsService] ✓ Gemini voice "${targetVoice}" via ${model}${keyLabel} -> ${outputPath}`);
+            return true;
+          }
 
-        if (isMp3 && (!req.speed || req.speed === 1.0)) {
-          // Direct MP3 output without filter adjustments
-          await fs.writeFile(outputPath, rawAudioBuffer);
+          if (isRiff || isMp3) {
+            await fs.writeFile(tempRawPath, rawAudioBuffer);
+          } else {
+            // Raw PCM 24000Hz 16-bit mono -> add WAV header
+            const wavBuffer = this.pcmToWav(rawAudioBuffer, 24000, 1, 16);
+            const tempWavPath = path.join(tempDir, `gemini_audio_${Date.now()}.wav`);
+            await fs.writeFile(tempWavPath, wavBuffer);
+            inputAudioPath = tempWavPath;
+          }
+
+          await this.convertAudioToMp3(inputAudioPath, outputPath, req.speed);
+
+          try {
+            if (fs.existsSync(inputAudioPath)) await fs.unlink(inputAudioPath);
+            if (fs.existsSync(tempRawPath)) await fs.unlink(tempRawPath);
+          } catch {}
+
+          console.log(`[GoogleTtsService] ✓ Gemini voice "${targetVoice}" via ${model}${keyLabel} -> ${outputPath}`);
           return true;
+
+        } catch (err: any) {
+          const statusCode = err.response?.status;
+          const errMsg = err.response?.data?.error?.message || err.message || '';
+
+          if (statusCode === 429 || errMsg.toLowerCase().includes('quota')) {
+            // Quota exhausted on this key — try the next one
+            quotaExhaustedKeys.add(currentKey);
+            console.warn(`[GoogleTtsService] Key ${keyIndex + 1}/${keyPool.length} quota exhausted for model ${model}. Rotating to next key...`);
+            lastError = err;
+            continue; // try next key
+          }
+
+          // Non-quota error (model deprecated, timeout, not found, etc.) — skip this model
+          lastError = err;
+          console.warn(`[GoogleTtsService] Model ${model} failed (non-quota):`, errMsg);
+          break; // break key loop, move to next model
         }
-
-        if (isRiff || isMp3) {
-          await fs.writeFile(tempRawPath, rawAudioBuffer);
-        } else {
-          // Raw PCM 24000Hz, 16-bit mono -> prepend standard 44-byte WAV header
-          const wavBuffer = this.pcmToWav(rawAudioBuffer, 24000, 1, 16);
-          const tempWavPath = path.join(tempDir, `gemini_audio_${Date.now()}.wav`);
-          await fs.writeFile(tempWavPath, wavBuffer);
-          inputAudioPath = tempWavPath;
-        }
-
-        // Convert to high-quality MP3 via FFmpeg with optional speed adjustment
-        await this.convertAudioToMp3(inputAudioPath, outputPath, req.speed);
-
-        // Cleanup temporary file
-        try {
-          if (fs.existsSync(inputAudioPath)) await fs.unlink(inputAudioPath);
-          if (fs.existsSync(tempRawPath)) await fs.unlink(tempRawPath);
-        } catch {}
-
-        console.log(`[GoogleTtsService] ✓ Successfully synthesized Gemini voice "${targetVoice}" -> ${outputPath}`);
-        return true;
-      } catch (err: any) {
-        lastError = err;
-        console.warn(`[GoogleTtsService] Model ${model} audio generation failed:`, err.response?.data?.error?.message || err.message);
       }
     }
 
-    throw lastError || new Error('Failed to generate audio from Google Gemini models.');
-  }
-
-  /**
-   * Synthesizes speech using Google Free Web TTS (zero API key needed).
-   */
-  private async synthesizeWithGoogleWeb(
-    req: TTSGenerationRequest,
-    outputPath: string
-  ): Promise<boolean> {
-    const lang = this.resolveLanguage(req);
-    const cleanText = req.text
-      .replace(/\[(?:laugh|sigh|cough|chuckle|gasp|whisper)\]/gi, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    if (!cleanText) {
-      throw new Error('No valid text to synthesize.');
+    // Build a user-friendly error message
+    const allKeysExhausted = quotaExhaustedKeys.size >= keyPool.length;
+    if (allKeysExhausted) {
+      const keyCount = keyPool.length;
+      throw new Error(
+        `All ${keyCount} Gemini API key${keyCount > 1 ? 's' : ''} have exceeded their quota. ` +
+        `Add more API keys (from different Google accounts) in Settings → API Keys → Gemini. ` +
+        `Free keys reset daily. Get more at https://aistudio.google.com/app/apikey`
+      );
     }
 
-    // Split text into manageable chunks (<= 180 chars) along sentence / punctuation boundaries
-    const chunks = this.splitIntoChunks(cleanText, 180);
-    const audioBuffers: Buffer[] = [];
-
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const encoded = encodeURIComponent(chunk);
-      const url = `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${lang}&q=${encoded}`;
-
-      const res = await axios.get(url, {
-        responseType: 'arraybuffer',
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          Referer: 'https://translate.google.com/',
-        },
-        timeout: 20000,
-      });
-
-      if (res.data && res.data.byteLength > 0) {
-        audioBuffers.push(Buffer.from(res.data));
-      }
-
-      // Small delay between chunks to prevent rate limiting
-      if (i < chunks.length - 1) {
-        await new Promise((r) => setTimeout(r, 120));
-      }
-    }
-
-    if (audioBuffers.length === 0) {
-      throw new Error('Google Free Web TTS did not return audio.');
-    }
-
-    const combinedMp3 = Buffer.concat(audioBuffers);
-    const tempDir = os.tmpdir();
-    const tempCombinedPath = path.join(tempDir, `google_web_tts_${Date.now()}.mp3`);
-
-    await fs.writeFile(tempCombinedPath, combinedMp3);
-
-    // Normalize and apply speed with FFmpeg
-    await this.convertAudioToMp3(tempCombinedPath, outputPath, req.speed);
-
-    try {
-      if (fs.existsSync(tempCombinedPath)) await fs.unlink(tempCombinedPath);
-    } catch {}
-
-    return fs.existsSync(outputPath);
+    throw lastError || new Error('All Gemini models failed. Check your API key and try again.');
   }
 
   /**

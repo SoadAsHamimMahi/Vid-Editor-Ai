@@ -33,9 +33,11 @@ import {
   Target,
   Pause,
   Play,
-  Square
+  Square,
+  Zap
 } from 'lucide-react';
 import { BrowserInstanceInfo, FlowGenerationMode } from '../../types';
+import { useGenerationETA } from '../../hooks/useGenerationETA';
 
 export const FlowImageGeneratorPanel: React.FC = () => {
   const { 
@@ -86,6 +88,9 @@ export const FlowImageGeneratorPanel: React.FC = () => {
   const [rangeOnlyUnready, setRangeOnlyUnready] = useState<boolean>(false);
   const [isRangeGenerating, setIsRangeGenerating] = useState<boolean>(false);
   const [isRangeExpanded, setIsRangeExpanded] = useState<boolean>(true);
+
+  // Live real-time generation speed & ETA tracker
+  const eta = useGenerationETA();
 
   // Default initialize with 2 browsers if list is empty
   useEffect(() => {
@@ -237,7 +242,27 @@ export const FlowImageGeneratorPanel: React.FC = () => {
     }
   };
 
-  const [concurrency, setConcurrency] = useState<number>(3);
+  const [concurrency, setConcurrency] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('flow_concurrency');
+      if (saved) {
+        const val = parseInt(saved, 10);
+        if (val >= 1 && val <= 6) return val;
+      }
+    } catch {}
+    return 3;
+  });
+
+  useEffect(() => {
+    try {
+      if ((window.electronAPI as any)?.setCdpConcurrency) {
+        (window.electronAPI as any).setCdpConcurrency(concurrency);
+      }
+      localStorage.setItem('flow_concurrency', concurrency.toString());
+    } catch (e) {
+      console.warn('Could not sync initial concurrency:', e);
+    }
+  }, [concurrency]);
 
   const handleConcurrencyChange = async (val: number) => {
     setConcurrency(val);
@@ -245,6 +270,7 @@ export const FlowImageGeneratorPanel: React.FC = () => {
       if ((window.electronAPI as any)?.setCdpConcurrency) {
         await (window.electronAPI as any).setCdpConcurrency(val);
       }
+      localStorage.setItem('flow_concurrency', val.toString());
     } catch (e) {
       console.warn('Could not update concurrency:', e);
     }
@@ -324,7 +350,16 @@ export const FlowImageGeneratorPanel: React.FC = () => {
 
   // Retry only failed scenes
   const handleRetryFailed = async () => {
-    await retryFailedScenes();
+    setIsBatchGenerating(true);
+    try {
+      await retryFailedScenes();
+      setPullFeedback('🚀 Retrying failed scene(s)...');
+      setTimeout(() => setPullFeedback(null), 4000);
+    } catch (err: any) {
+      setPullFeedback(`⚠️ Retry error: ${err.message}`);
+    } finally {
+      setIsBatchGenerating(false);
+    }
   };
 
   const totalScenes = project.scenes.length;
@@ -455,6 +490,42 @@ export const FlowImageGeneratorPanel: React.FC = () => {
           </span>
         </div>
 
+        {/* Parallel Mode Concurrency Controls */}
+        <div className="space-y-1.5 pt-2 border-t border-[#252536]">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-slate-300 font-semibold flex items-center gap-1.5">
+              <Zap className="w-3.5 h-3.5 text-amber-400" />
+              <span>Generation Speed & Parallel Mode:</span>
+            </span>
+            <span className="text-purple-300 font-mono font-bold bg-purple-950/70 px-2 py-0.5 rounded border border-purple-500/40 text-[10px]">
+              {concurrency === 1 ? '1x Solo (1-by-1)' : `${concurrency}x Parallel Engine`}
+            </span>
+          </div>
+          <div className="grid grid-cols-4 gap-1">
+            {[
+              { level: 1, label: '1x Solo', desc: '1-by-1' },
+              { level: 2, label: '2x Safe', desc: 'Parallel' },
+              { level: 3, label: '3x Studio', desc: 'Fast' },
+              { level: 4, label: '4x Turbo', desc: 'Turbo' },
+            ].map(({ level, label, desc }) => (
+              <button
+                key={level}
+                type="button"
+                onClick={() => handleConcurrencyChange(level)}
+                className={`py-1.5 px-1 rounded-lg text-center font-bold border transition-all cursor-pointer ${
+                  concurrency === level
+                    ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white border-purple-400 shadow-md scale-[1.02]'
+                    : 'bg-[#1b1b26] text-slate-400 border-[#2b2b3a] hover:text-slate-200 hover:border-slate-500'
+                }`}
+                title={`Run generation with ${level} concurrent generation slot(s)`}
+              >
+                <div className="text-[11px] leading-tight">{label}</div>
+                <div className={`text-[9px] font-normal ${concurrency === level ? 'text-purple-200' : 'text-slate-500'}`}>{desc}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* ─── Dynamic Generation Hub States ─── */}
         {totalScenes === 0 ? (
           /* STATE 1: Empty Project / No Scenes in Timeline */
@@ -489,36 +560,105 @@ export const FlowImageGeneratorPanel: React.FC = () => {
                 <FileText className="w-3.5 h-3.5 text-purple-400" />
                 <span>📝 AI Script Director / Text to Scenes</span>
               </button>
+
+              <button
+                onClick={() => setCustomPromptImportModalOpen(true)}
+                className="w-full py-2 px-3 rounded-xl font-semibold text-[11px] bg-purple-950/40 hover:bg-purple-900/60 text-purple-300 border border-purple-500/40 flex items-center justify-center gap-1.5 cursor-pointer active:scale-98 transition-all"
+                title="Paste multi-scene prompt manifests (#0-00, #0-04) from ChatGPT or Claude"
+              >
+                <FileText className="w-3.5 h-3.5 text-purple-400" />
+                <span>📋 Paste Prompts (ChatGPT / Claude)</span>
+              </button>
             </div>
           </div>
         ) : pendingScenesCount > 0 ? (
           /* STATE 2: Pending Scenes Ready to Generate */
           <>
-            {/* Primary Hero Generate Action Button or Active Pause/Resume Control */}
-            {isBatchGenerating || generatingCount > 0 ? (
-              <div className="p-3 bg-[#161426] rounded-xl border border-purple-500/50 space-y-2.5 shadow-lg animate-in fade-in duration-200">
-                <div className="flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-2 font-bold">
-                    {isGenerationPaused ? (
-                      <span className="flex items-center gap-1.5 text-amber-400">
-                        <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
-                        <span>⏸️ Generation Paused</span>
+            {/* Primary Hero Generate Action Button or Active Pause/Resume Control with Live ETA */}
+            {isBatchGenerating || generatingCount > 0 || eta.isGenerating ? (
+              <div className="p-3.5 bg-[#141224] rounded-2xl border border-purple-500/60 space-y-3 shadow-2xl animate-in fade-in duration-200">
+                {/* Header row: Status badge + Mode + Count */}
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    {isGenerationPaused || eta.isPaused ? (
+                      <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 font-bold text-[11px]">
+                        <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                        <span>⏸️ Paused</span>
                       </span>
                     ) : (
-                      <span className="flex items-center gap-1.5 text-cyan-300">
+                      <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 font-bold text-[11px]">
                         <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
-                        <span>Generating ({generatingCount > 0 ? generatingCount : pendingScenesCount} in flight)</span>
+                        <span>Generating {eta.mediaType === 'video' ? 'Videos' : 'Images'}</span>
                       </span>
                     )}
                   </div>
-                  <span className="text-[10px] font-mono text-purple-300 bg-purple-950/80 px-2 py-0.5 rounded-full border border-purple-500/40">
-                    {pendingScenesCount} remaining
-                  </span>
+
+                  <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                    <span className="text-purple-300 bg-purple-950/80 px-2.5 py-0.5 rounded-full border border-purple-500/40 font-bold">
+                      {eta.completedCount} / {eta.totalCount} Done ({eta.percentComplete}%)
+                    </span>
+                  </div>
                 </div>
 
+                {/* Animated Progress Bar */}
+                <div className="space-y-1">
+                  <div className="w-full h-2.5 bg-black/60 rounded-full overflow-hidden border border-purple-500/30 p-[1px]">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-purple-600 via-indigo-500 to-cyan-400 transition-all duration-500 shadow-[0_0_12px_rgba(6,182,212,0.6)]"
+                      style={{ width: `${Math.max(5, eta.percentComplete)}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Live Dynamic Stats Hub: Speed, Live Remaining ETA, Finish Time */}
+                <div className="grid grid-cols-3 gap-1.5 p-2 bg-[#0c0a17] rounded-xl border border-purple-900/40 text-center">
+                  {/* 1. Time Remaining (Live countdown) */}
+                  <div className="flex flex-col items-center justify-center p-1.5 rounded-lg bg-purple-950/30 border border-purple-500/20">
+                    <span className="text-[9px] uppercase tracking-wider text-purple-300 font-bold flex items-center gap-0.5">
+                      <Clock className="w-2.5 h-2.5 text-purple-400" />
+                      <span>Remaining</span>
+                    </span>
+                    <span className="text-xs font-black text-cyan-300 font-mono mt-0.5 tracking-tight">
+                      {eta.remainingSeconds > 0 ? eta.formattedETA : 'Finishing...'}
+                    </span>
+                    <span className="text-[9px] text-slate-400 font-mono mt-0.5 truncate max-w-full">
+                      {eta.remainingCount} left
+                    </span>
+                  </div>
+
+                  {/* 2. Live Speed (Rolling Average) */}
+                  <div className="flex flex-col items-center justify-center p-1.5 rounded-lg bg-purple-950/30 border border-purple-500/20">
+                    <span className="text-[9px] uppercase tracking-wider text-purple-300 font-bold flex items-center gap-0.5">
+                      <Zap className="w-2.5 h-2.5 text-amber-400" />
+                      <span>Live Speed</span>
+                    </span>
+                    <span className="text-xs font-black text-amber-300 font-mono mt-0.5 tracking-tight">
+                      {eta.formattedSpeed}
+                    </span>
+                    <span className="text-[9px] text-slate-400 font-mono mt-0.5 truncate max-w-full">
+                      {eta.concurrency > 1 ? `${eta.concurrency}x Parallel` : eta.throughputPerMinute}
+                    </span>
+                  </div>
+
+                  {/* 3. Est. Completion Clock */}
+                  <div className="flex flex-col items-center justify-center p-1.5 rounded-lg bg-purple-950/30 border border-purple-500/20">
+                    <span className="text-[9px] uppercase tracking-wider text-purple-300 font-bold flex items-center gap-0.5">
+                      <Target className="w-2.5 h-2.5 text-emerald-400" />
+                      <span>Est. Finish</span>
+                    </span>
+                    <span className="text-xs font-black text-emerald-300 font-mono mt-0.5 tracking-tight">
+                      {eta.formattedFinishTime}
+                    </span>
+                    <span className="text-[9px] text-slate-400 font-mono mt-0.5 truncate max-w-full">
+                      Elapsed {eta.formattedElapsed}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Action Buttons: Pause/Resume + Stop */}
                 <div className="grid grid-cols-2 gap-2 pt-0.5">
                   {/* Pause / Resume Button */}
-                  {isGenerationPaused ? (
+                  {isGenerationPaused || eta.isPaused ? (
                     <button
                       type="button"
                       onClick={async () => {
@@ -563,20 +703,31 @@ export const FlowImageGeneratorPanel: React.FC = () => {
                 </div>
               </div>
             ) : (
-              <button
-                onClick={async () => {
-                  setIsBatchGenerating(true);
-                  try {
-                    await generatePendingScenes();
-                  } finally {
-                    setIsBatchGenerating(false);
-                  }
-                }}
-                className="w-full py-3 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all shadow-lg active:scale-98 cursor-pointer bg-gradient-to-r from-purple-600 via-indigo-600 to-cyan-500 hover:from-purple-500 hover:to-cyan-400 text-white shadow-[0_0_18px_rgba(168,85,247,0.45)] animate-pulse"
-              >
-                <Sparkles className="w-4 h-4 text-amber-300 animate-spin" />
-                <span>⚡ Generate Pending Prompts ({pendingScenesCount} of {totalScenes} Clips)</span>
-              </button>
+              <div className="space-y-1.5">
+                <button
+                  onClick={async () => {
+                    setIsBatchGenerating(true);
+                    try {
+                      await generatePendingScenes();
+                    } finally {
+                      setIsBatchGenerating(false);
+                    }
+                  }}
+                  className="w-full py-3 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-2 transition-all shadow-lg active:scale-98 cursor-pointer bg-gradient-to-r from-purple-600 via-indigo-600 to-cyan-500 hover:from-purple-500 hover:to-cyan-400 text-white shadow-[0_0_18px_rgba(168,85,247,0.45)]"
+                >
+                  <Sparkles className="w-4 h-4 text-amber-300 animate-spin" />
+                  <span>⚡ Generate Pending Prompts ({pendingScenesCount} of {totalScenes} Clips)</span>
+                </button>
+                <div className="flex items-center justify-between px-1.5 py-1 rounded-lg bg-[#12111d] border border-purple-900/30 text-[10px] font-mono">
+                  <span className="flex items-center gap-1 text-cyan-300 font-semibold">
+                    <Clock className="w-3 h-3 text-cyan-400" />
+                    <span>Est. Time: ~{eta.initialFormattedETA}</span>
+                  </span>
+                  <span className="text-slate-400">
+                    Live Speed: <span className="text-amber-300 font-semibold">{eta.formattedSpeed}</span> {eta.concurrency > 1 ? `(${eta.concurrency}x)` : ''}
+                  </span>
+                </div>
+              </div>
             )}
 
             {/* Secondary Action: Flow Agent (Bulk Grid) */}
@@ -624,10 +775,9 @@ export const FlowImageGeneratorPanel: React.FC = () => {
             {failedScenesCount > 0 && (
               <button
                 onClick={handleRetryFailed}
-                disabled={isBatchGenerating}
-                className="w-full py-1.5 px-2.5 rounded-lg bg-red-950/60 hover:bg-red-900/70 border border-red-500/40 text-red-300 text-[11px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-98"
+                className="w-full py-2 px-3 rounded-xl bg-red-950/70 hover:bg-red-900/80 border border-red-500/50 text-red-200 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-98 shadow-md"
               >
-                <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
                 <span>⚠️ Retry {failedScenesCount} Failed Scene(s)</span>
               </button>
             )}
@@ -874,7 +1024,7 @@ export const FlowImageGeneratorPanel: React.FC = () => {
                           ) : (
                             <RotateCcw className="w-3.5 h-3.5 text-purple-200" />
                           )}
-                          <span>⚡ Regenerate Range</span>
+                          <span>⚡ Regenerate Range ({concurrency === 1 ? '1x Solo' : `${concurrency}x Parallel`})</span>
                         </button>
 
                         <button
@@ -1029,7 +1179,7 @@ export const FlowImageGeneratorPanel: React.FC = () => {
         >
           <span className="flex items-center gap-2">
             <SlidersHorizontal className="w-3.5 h-3.5 text-purple-400" />
-            <span>Engine & Parallel Settings</span>
+            <span>Engine & Settings · {concurrency === 1 ? '1x Solo' : `${concurrency}x Parallel`}</span>
           </span>
           <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${isEngineSettingsOpen ? 'rotate-180' : ''}`} />
         </button>
@@ -1147,14 +1297,17 @@ export const FlowImageGeneratorPanel: React.FC = () => {
                 {browsers.map((browser, idx) => {
                   const isLoginLoading = loadingAction?.port === browser.port && loadingAction.action === 'login';
                   const isConnectLoading = loadingAction?.port === browser.port && loadingAction.action === 'connect';
+                  const isCanvasReady = browser.connected && browser.hasProjectOpen !== false;
+                  const isNoProjectOpen = !isCanvasReady && Boolean(browser.browserOpen);
+
                   return (
                     <div key={browser.port} className="flex items-center justify-between p-2.5 bg-[#1d1d28] rounded-xl border border-[#2c2c3e]">
                       <div className="flex items-center gap-2">
-                        <span className={`w-2 h-2 rounded-full ${browser.connected ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]' : 'bg-amber-400 animate-pulse shadow-[0_0_6px_#f59e0b]'}`} />
+                        <span className={`w-2 h-2 rounded-full ${isCanvasReady ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]' : isNoProjectOpen ? 'bg-amber-400 animate-pulse shadow-[0_0_6px_#f59e0b]' : 'bg-slate-500'}`} />
                         <div>
                           <div className="font-mono font-semibold text-slate-200 text-xs">Port :{browser.port}</div>
-                          <div className={`text-[10px] font-medium ${browser.connected ? 'text-emerald-400' : 'text-amber-400'}`}>
-                            {browser.connected ? '✓ Connected' : '⚠️ Disconnected'}
+                          <div className={`text-[10px] font-medium ${isCanvasReady ? 'text-emerald-400' : isNoProjectOpen ? 'text-amber-400' : 'text-slate-400'}`}>
+                            {isCanvasReady ? '✓ Canvas Ready' : isNoProjectOpen ? '⚠️ Open a Project' : '⚠️ Disconnected'}
                           </div>
                         </div>
                         {browser.creditsText && (
@@ -1173,18 +1326,33 @@ export const FlowImageGeneratorPanel: React.FC = () => {
                         <button
                           onClick={() => handleConnect(browser.port)}
                           disabled={isConnectLoading}
+                          title={isCanvasReady ? 'Project canvas is active and ready. Click to refresh status.' : isNoProjectOpen ? 'Click to focus Flow and select/create a project' : 'Click to launch Chrome and connect'}
                           className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer active:scale-95 ${
-                            browser.connected
+                            isCanvasReady
                               ? 'bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-500/50 text-emerald-300'
+                              : isNoProjectOpen
+                              ? 'bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/50 text-amber-300'
                               : 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs'
                           }`}
                         >
                           {isConnectLoading
                             ? 'Connecting...'
-                            : browser.connected
-                            ? '✓ Reconnect'
+                            : isCanvasReady
+                            ? '✓ Ready'
+                            : isNoProjectOpen
+                            ? '📂 Open Flow'
                             : '⚡ Connect Flow'}
                         </button>
+                        {(isCanvasReady || isNoProjectOpen) && (
+                          <button
+                            onClick={() => handleClose(browser.port)}
+                            disabled={loadingAction?.port === browser.port}
+                            className="px-2 py-1 rounded-lg bg-red-950/40 hover:bg-red-900/60 border border-red-500/30 text-red-300 text-[10px] font-semibold transition-colors cursor-pointer"
+                            title="Disconnect and close this Chrome browser"
+                          >
+                            ✕ Disconnect
+                          </button>
+                        )}
                       </div>
                     </div>
                   );

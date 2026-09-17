@@ -18,26 +18,61 @@ import {
 interface StickerItem {
   id: string;
   name: string;
-  category: 'social' | 'pointers' | 'alerts' | 'emojis';
+  category: 'social' | 'audio_waves' | 'pointers' | 'alerts' | 'emojis';
   stickerId?: string; // Links to Remotion AnimatedSticker component
   previewText?: string;
   previewEmoji?: string;
   badgeBg: string;
   svgDataUri?: string;
+  defaultPosX?: number;
   defaultPosY?: number;
   defaultScale?: number;
 }
 
 const CAPCUT_STICKERS: StickerItem[] = [
-  // 1. Social & Channel Growth
+  // 1. YouTube & Social Engagement (Featured from screenshot)
+  {
+    id: 'stk-yt-sub-red',
+    name: 'Red Subscribe Button & Bell',
+    category: 'social',
+    stickerId: 'yt_subscribe_red_bell',
+    previewText: 'SUBSCRIBE! 🔔',
+    badgeBg: 'bg-red-950/80 border-red-500/80 text-red-200',
+    defaultPosX: 38,
+    defaultPosY: 38,
+    defaultScale: 0.85,
+  },
   {
     id: 'stk-yt-sub',
-    name: 'YouTube Subscribe & Bell',
+    name: 'YouTube Pill & Click',
     category: 'social',
     stickerId: 'yt_subscribe_bell',
     previewText: 'SUBSCRIBE 🔔',
     badgeBg: 'bg-rose-950/60 border-rose-500/50 text-rose-300',
+    defaultPosX: 35,
     defaultPosY: 35,
+    defaultScale: 0.85,
+  },
+  {
+    id: 'stk-hitocast-watermark',
+    name: 'Channel Brand Watermark (HITOCAST)',
+    category: 'social',
+    stickerId: 'channel_watermark_brand',
+    previewText: 'HITOCAST 🎙️',
+    badgeBg: 'bg-slate-900/90 border-red-500/60 text-white',
+    defaultPosX: 38,
+    defaultPosY: -38,
+    defaultScale: 0.8,
+  },
+  {
+    id: 'stk-yt-actions',
+    name: 'YouTube Action Bar (Like/Share)',
+    category: 'social',
+    stickerId: 'yt_engagement_bar',
+    previewText: '👍 👎 💬 ↗️ ✨',
+    badgeBg: 'bg-slate-900 border-slate-600 text-white',
+    defaultPosX: 0,
+    defaultPosY: 32,
     defaultScale: 0.85,
   },
   {
@@ -47,7 +82,31 @@ const CAPCUT_STICKERS: StickerItem[] = [
     stickerId: 'like_thumbsup',
     previewText: 'LIKE VIDEO 👍',
     badgeBg: 'bg-blue-950/60 border-blue-500/50 text-blue-300',
+    defaultPosX: 0,
     defaultPosY: 35,
+    defaultScale: 0.85,
+  },
+  // 2. Audio Waves & Voice Visualizers (from screenshot)
+  {
+    id: 'stk-voice-wave-cyan',
+    name: 'Electric Voice Wave (Moving)',
+    category: 'audio_waves',
+    stickerId: 'electric_voice_wave',
+    previewText: '⚡ VOICE WAVE ~~~',
+    badgeBg: 'bg-cyan-950/80 border-cyan-400/80 text-cyan-200',
+    defaultPosX: 0,
+    defaultPosY: 42,
+    defaultScale: 1.0,
+  },
+  {
+    id: 'stk-voice-spectrum',
+    name: 'Voice Equalizer Spectrum',
+    category: 'audio_waves',
+    stickerId: 'voice_spectrum_visualizer',
+    previewText: '📊 SPECTRUM BARS',
+    badgeBg: 'bg-indigo-950/80 border-indigo-400/80 text-indigo-200',
+    defaultPosX: 0,
+    defaultPosY: 38,
     defaultScale: 0.85,
   },
   // 2. Attention & Pointers
@@ -161,7 +220,8 @@ export const StickersPanel: React.FC = () => {
     addOverlayClip,
   } = useProjectStore();
 
-  const [categoryFilter, setCategoryFilter] = useState<'all' | 'social' | 'pointers' | 'alerts' | 'emojis'>('all');
+  const [categoryFilter, setCategoryFilter] = useState<'all' | 'social' | 'audio_waves' | 'pointers' | 'alerts' | 'emojis'>('all');
+  const [addedToast, setAddedToast] = useState<string | null>(null);
 
   const handleAddStickerToTimeline = (sticker: StickerItem) => {
     addOverlayClip({
@@ -170,16 +230,18 @@ export const StickersPanel: React.FC = () => {
       mediaType: 'image',
       track: 'V2',
       startTime: currentTime,
-      duration: 3.5,
+      duration: 5.0,
       opacity: 1.0,
       volume: 0,
       stickerId: sticker.stickerId,
       transform: {
-        x: 0,
+        x: sticker.defaultPosX ?? 0,
         y: sticker.defaultPosY ?? 0,
         scale: sticker.defaultScale ?? 0.85,
       }
     });
+    setAddedToast(`✓ Added "${sticker.name}" to Track V2!`);
+    setTimeout(() => setAddedToast(null), 3500);
   };
 
   const handleUploadCustomSticker = async () => {
@@ -239,9 +301,17 @@ export const StickersPanel: React.FC = () => {
         </button>
       </div>
 
+      {/* Added Feedback Toast */}
+      {addedToast && (
+        <div className="mx-3 mt-2 px-2.5 py-1.5 rounded-lg bg-purple-950/90 border border-purple-500/60 text-purple-200 text-[11px] flex items-center gap-1.5 shadow-md animate-in fade-in duration-200">
+          <Sparkles className="w-3 h-3 text-purple-400 shrink-0" />
+          <span>{addedToast}</span>
+        </div>
+      )}
+
       {/* Category Tabs */}
       <div className="flex items-center gap-1 p-2 border-b border-[#242131] bg-[#17161f] overflow-x-auto custom-scrollbar">
-        {(['all', 'social', 'pointers', 'alerts', 'emojis'] as const).map((cat) => (
+        {(['all', 'social', 'audio_waves', 'pointers', 'alerts', 'emojis'] as const).map((cat) => (
           <button
             key={cat}
             onClick={() => setCategoryFilter(cat)}
@@ -251,7 +321,7 @@ export const StickersPanel: React.FC = () => {
                 : 'text-slate-400 hover:text-slate-200 hover:bg-[#201e2b]'
             }`}
           >
-            {cat}
+            {cat === 'audio_waves' ? '🌊 Voice Waves' : cat}
           </button>
         ))}
       </div>

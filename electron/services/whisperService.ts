@@ -5,6 +5,7 @@ import axios from 'axios';
 import ffmpegPath from 'ffmpeg-static';
 import { WordTimestamp, SceneSegment, MotionType, TransitionType } from '../../src/types';
 import { FFmpegService } from './ffmpegService';
+import { cleanSubtitleText } from './ttsTextSanitizer';
 
 export interface TranscriptionResult {
   text: string;
@@ -30,11 +31,9 @@ export function getSingleRequestApiKey(rawKeyString?: string): string {
 export async function getWorkingGeminiModels(apiKey: string): Promise<string[]> {
   const cleanKey = getSingleRequestApiKey(apiKey);
   const reliableAudioModels = [
-    'gemini-2.5-flash',
-    'gemini-3.5-flash-lite',
-    'gemini-3.5-flash',
-    'gemini-2.5-pro',
     'gemini-2.0-flash',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash-lite',
     'gemini-1.5-flash',
     'gemini-1.5-pro',
   ];
@@ -70,7 +69,7 @@ export async function getWorkingGeminiModels(apiKey: string): Promise<string[]> 
       });
 
     // Prioritize top flash models for high speed & multimodal
-    const primaryModels = ['gemini-2.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-pro'];
+    const primaryModels = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
     const otherFlash = validModels.filter((m) => m.includes('flash') && !primaryModels.includes(m));
     const rest = validModels.filter((m) => !m.includes('flash') && !primaryModels.includes(m));
     const ordered = Array.from(new Set([...primaryModels, ...otherFlash, ...rest]));
@@ -120,6 +119,15 @@ export class WhisperService {
         throw new Error('Gemini API key is required. Please enter your free Gemini API key from https://aistudio.google.com/app/apikey or paste your script text.');
       }
 
+      // If audio is long (> 60s), transcribe in consecutive 45s chunks for complete accuracy & no token cutoffs
+      if (audioDuration > 60) {
+        try {
+          return await this.transcribeLongAudioInChunks(audioPath, cleanKey, 'gemini', audioDuration, fps, 45);
+        } catch (chunkErr: any) {
+          console.warn(`[WhisperService] Gemini chunked transcription failed (${chunkErr.message}), trying single-file fallback...`);
+        }
+      }
+
       // Optimize audio to lightweight 16kHz mono MP3 for instant upload & fast AI processing
       const tempPath = path.join(os.tmpdir(), `gemini_audio_${Date.now()}.mp3`);
       const optimizedAudioPath = await this.ffmpegService.optimizeAudioForAI(audioPath, tempPath);
@@ -128,16 +136,24 @@ export class WhisperService {
         const fileBuffer = await fs.readFile(optimizedAudioPath);
         const base64Audio = fileBuffer.toString('base64');
 
-        const prompt = `Listen carefully to this audio recording (${audioDuration.toFixed(1)}s total duration).
-Transcribe the spoken words verbatim.
-Provide word-level start and end timestamps in seconds across the audio duration.
+        const prompt = `You are a professional audio transcription system. Listen carefully to this audio recording (total duration: ${audioDuration.toFixed(2)} seconds).
 
-Return ONLY valid JSON formatted like this:
+TASK: Transcribe ALL spoken words with PRECISE acoustic timestamps.
+
+CRITICAL TIMING RULES:
+- Timestamps must reflect when the word is ACTUALLY SPOKEN in the audio, not estimated reading speed
+- Listen for the EXACT moment each word begins and ends acoustically
+- Account for natural speech patterns: pauses, emphasis, breath gaps
+- Use 2 decimal places precision (e.g. 12.34, not 12 or 12.3)
+- The last word's end timestamp must be close to ${audioDuration.toFixed(2)}s
+- Do NOT estimate or interpolate — base timing on actual audio waveform
+
+Return ONLY valid JSON, no other text:
 {
-  "text": "Full transcribed speech text here...",
+  "text": "Full transcribed speech text here",
   "words": [
-    { "word": "First", "start": 0.0, "end": 0.4 },
-    { "word": "word", "start": 0.45, "end": 0.8 }
+    { "word": "First", "start": 0.00, "end": 0.42 },
+    { "word": "word", "start": 0.48, "end": 0.85 }
   ]
 }`;
 
@@ -163,15 +179,22 @@ Return ONLY valid JSON formatted like this:
                     ],
                   },
                 ],
-                generationConfig: { responseMimeType: 'application/json' },
+                generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
               },
               { timeout: 90000 }
             );
 
-            const rawJson = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const candidate = response.data?.candidates?.[0];
+            const finishReason = candidate?.finishReason;
+            if (finishReason && finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
+              console.warn(`[WhisperService] Gemini ${modelName} blocked finishReason=${finishReason}, trying next model`);
+              continue;
+            }
+            const rawJson = candidate?.content?.parts?.[0]?.text;
             if (rawJson) {
-              const parsed = JSON.parse(rawJson);
-              if (parsed.words && parsed.words.length > 0) {
+              let parsed: any;
+              try { parsed = JSON.parse(rawJson); } catch { const m = rawJson.match(/\{[\s\S]*\}/); if (m) parsed = JSON.parse(m[0]); }
+              if (parsed?.words && parsed.words.length > 0) {
                 console.log(`[WhisperService] ✓ Success with ${modelName}! Words: ${parsed.words.length}`);
                 return {
                   text: parsed.text || parsed.words.map((w: any) => w.word).join(' '),
@@ -288,16 +311,16 @@ Return ONLY valid JSON formatted like this:
   public async transcribeLongAudioInChunks(
     audioPath: string,
     apiKey: string,
-    provider: 'openai' | 'groq',
+    provider: 'openai' | 'groq' | 'gemini',
     audioDuration: number,
     fps: number = 30,
-    chunkDurationSec: number = 90
+    chunkDurationSec: number = 45
   ): Promise<TranscriptionResult> {
     const cleanKey = getSingleRequestApiKey(apiKey);
     if (!cleanKey) throw new Error(`${provider.toUpperCase()} API key is required.`);
 
     const chunkCount = Math.ceil(audioDuration / chunkDurationSec);
-    console.log(`[WhisperService] Long audio detected (${audioDuration.toFixed(1)}s). Transcribing in ${chunkCount} consecutive segments for 100% full-timeline coverage...`);
+    console.log(`[WhisperService] Long audio detected (${audioDuration.toFixed(1)}s). Transcribing in ${chunkCount} consecutive segments via ${provider.toUpperCase()} for 100% full-timeline coverage...`);
 
     const tempDir = path.join(os.tmpdir(), `whisper_chunks_${Date.now()}`);
     await fs.ensureDir(tempDir);
@@ -326,7 +349,7 @@ Return ONLY valid JSON formatted like this:
             '-vn',
             '-ac', '1',
             '-ar', '16000',
-            '-b:a', '48k',
+            '-b:a', '32k',
             chunkAudioPath
           ]);
           proc.on('close', (code: number) => {
@@ -337,41 +360,106 @@ Return ONLY valid JSON formatted like this:
         });
 
         // Transcribe this chunk
-        const endpoint = provider === 'openai'
-          ? 'https://api.openai.com/v1/audio/transcriptions'
-          : 'https://api.groq.com/openai/v1/audio/transcriptions';
-        const model = provider === 'openai' ? 'whisper-1' : 'whisper-large-v3';
+        if (provider === 'gemini') {
+          const fileBuffer = await fs.readFile(chunkAudioPath);
+          const base64Audio = fileBuffer.toString('base64');
+          const prompt = `Listen carefully to this audio recording (${currentChunkDur.toFixed(1)}s total duration).
+Transcribe the spoken words verbatim.
+Provide word-level start and end timestamps in seconds across this chunk duration (0.0s to ${currentChunkDur.toFixed(1)}s).
 
-        const fileBuffer = await fs.readFile(chunkAudioPath);
-        const blob = new Blob([fileBuffer], { type: 'audio/mpeg' });
-        const formData = new FormData();
-        formData.append('file', blob, `chunk_${c}.mp3`);
-        formData.append('model', model);
-        formData.append('response_format', 'verbose_json');
-        formData.append('timestamp_granularities[]', 'word');
+Return valid JSON:
+{
+  "text": "Full transcribed speech text here...",
+  "words": [
+    { "word": "First", "start": 0.0, "end": 0.4 }
+  ]
+}`;
 
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${cleanKey}` },
-          body: formData,
-        });
+          const candidateModels = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
+          for (const model of candidateModels) {
+            try {
+              const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
+              const response = await axios.post(
+                url,
+                {
+                  contents: [
+                    {
+                      parts: [
+                        { inlineData: { mimeType: 'audio/mp3', data: base64Audio } },
+                        { text: prompt },
+                      ],
+                    },
+                  ],
+                  generationConfig: { temperature: 0.1, maxOutputTokens: 4096 },
+                },
+                { timeout: 35000 }
+              );
 
-        if (response.ok) {
-          const data: any = await response.json();
-          if (data.text) allTextSegments.push(data.text);
-          if (data.words && data.words.length > 0) {
-            for (const w of data.words) {
-              allWords.push({
-                word: w.word,
-                start: this.snapToFrame(chunkStart + w.start, fps),
-                end: this.snapToFrame(chunkStart + w.end, fps),
-                confidence: 0.98,
-              });
+              const candidate = response.data?.candidates?.[0];
+              const finishReason = candidate?.finishReason;
+              if (finishReason && finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
+                console.warn(`[WhisperService] Gemini chunk ${model} blocked finishReason=${finishReason}`);
+                continue;
+              }
+              const rawJson = candidate?.content?.parts?.[0]?.text;
+              if (rawJson) {
+                const parsed = JSON.parse(rawJson);
+                if (parsed.text) allTextSegments.push(parsed.text);
+                if (parsed.words && parsed.words.length > 0) {
+                  for (const w of parsed.words) {
+                    allWords.push({
+                      word: w.word,
+                      start: this.snapToFrame(chunkStart + (w.start || 0), fps),
+                      end: this.snapToFrame(chunkStart + (w.end || (w.start || 0) + 0.3), fps),
+                      confidence: 0.98,
+                    });
+                  }
+                  console.log(`[WhisperService] ✓ Chunk ${c + 1}/${chunkCount} (${chunkStart.toFixed(0)}s-${(chunkStart + currentChunkDur).toFixed(0)}s): Transcribed ${parsed.words.length} words via ${model}.`);
+                  break;
+                }
+              }
+            } catch (geminiErr: any) {
+              console.warn(`[WhisperService] Gemini model ${model} chunk ${c + 1} error:`, geminiErr.response?.data?.error?.message || geminiErr.message);
             }
-            console.log(`[WhisperService] ✓ Chunk ${c + 1}/${chunkCount} (${chunkStart.toFixed(0)}s-${(chunkStart + currentChunkDur).toFixed(0)}s): Transcribed ${data.words.length} words.`);
           }
         } else {
-          console.warn(`[WhisperService] Chunk ${c + 1}/${chunkCount} transcription warning:`, response.statusText);
+          // OpenAI / Groq Whisper API
+          const endpoint = provider === 'openai'
+            ? 'https://api.openai.com/v1/audio/transcriptions'
+            : 'https://api.groq.com/openai/v1/audio/transcriptions';
+          const model = provider === 'openai' ? 'whisper-1' : 'whisper-large-v3';
+
+          const fileBuffer = await fs.readFile(chunkAudioPath);
+          const blob = new Blob([fileBuffer], { type: 'audio/mpeg' });
+          const formData = new FormData();
+          formData.append('file', blob, `chunk_${c}.mp3`);
+          formData.append('model', model);
+          formData.append('response_format', 'verbose_json');
+          formData.append('timestamp_granularities[]', 'word');
+
+          const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${cleanKey}` },
+            body: formData,
+          });
+
+          if (response.ok) {
+            const data: any = await response.json();
+            if (data.text) allTextSegments.push(data.text);
+            if (data.words && data.words.length > 0) {
+              for (const w of data.words) {
+                allWords.push({
+                  word: w.word,
+                  start: this.snapToFrame(chunkStart + w.start, fps),
+                  end: this.snapToFrame(chunkStart + w.end, fps),
+                  confidence: 0.98,
+                });
+              }
+              console.log(`[WhisperService] ✓ Chunk ${c + 1}/${chunkCount} (${chunkStart.toFixed(0)}s-${(chunkStart + currentChunkDur).toFixed(0)}s): Transcribed ${data.words.length} words.`);
+            }
+          } else {
+            console.warn(`[WhisperService] Chunk ${c + 1}/${chunkCount} transcription warning:`, response.statusText);
+          }
         }
       }
     } finally {
@@ -482,12 +570,18 @@ Return ONLY valid JSON matching this schema:
                     ],
                   },
                 ],
-                generationConfig: { responseMimeType: 'application/json' },
+                generationConfig: { temperature: 0.1, maxOutputTokens: 8192 },
               },
               { timeout: 120000 }
             );
 
-            const rawJson = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+            const candidate = response.data?.candidates?.[0];
+            const finishReason = candidate?.finishReason;
+            if (finishReason && finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
+              console.warn(`[WhisperService] Gemini scene-gen ${modelName} blocked finishReason=${finishReason}`);
+              continue;
+            }
+            const rawJson = candidate?.content?.parts?.[0]?.text;
             if (rawJson) {
               const parsed = JSON.parse(rawJson);
               if (parsed.scenes && parsed.scenes.length > 0) {
@@ -882,9 +976,10 @@ Return ONLY valid JSON matching this schema:
   }
 
   public alignScriptTextToDuration(scriptText: string, duration: number, fps: number = 30): TranscriptionResult {
-    const words = scriptText.split(/\s+/).filter(Boolean);
+    const cleanText = cleanSubtitleText(scriptText);
+    const words = cleanText.split(/\s+/).filter(Boolean);
     if (words.length === 0) {
-      throw new Error('Provided script text is empty.');
+      throw new Error('Provided script text is empty after removing mood tags.');
     }
 
     // 1. Calculate raw proportional weights for each word and punctuation pause
@@ -931,7 +1026,7 @@ Return ONLY valid JSON matching this schema:
     }
 
     return {
-      text: scriptText,
+      text: cleanText,
       words: timestamps,
     };
   }

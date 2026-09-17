@@ -7,6 +7,7 @@ interface SubtitlesProps {
   sceneStartTime: number; // in seconds
   captionStyle?: CaptionStyle;
   autoEmojiEnabled?: boolean;
+  captionPosition?: { x: number; y: number };
 }
 
 const EMOJI_KEYWORD_MAP: Record<string, string> = {
@@ -42,7 +43,17 @@ interface SubtitleChunk {
   end: number;
 }
 
-function groupWordsIntoChunks(words: WordTimestamp[], captionStyle: CaptionStyle): SubtitleChunk[] {
+function groupWordsIntoChunks(rawWords: WordTimestamp[], captionStyle: CaptionStyle): SubtitleChunk[] {
+  // Filter out any accidental camera directives or prompt tags ([WIDE...], ESTABLISHING, etc.)
+  const words = rawWords.filter((w) => {
+    if (!w || !w.word) return false;
+    const t = w.word.trim().toUpperCase();
+    if (t.startsWith('[') || t.endsWith(']') || t.includes('ESTABLISHING') || t.includes('CLOSE-UP') || t.includes('PORTRAIT') || t.includes('SHOT]')) {
+      return false;
+    }
+    return true;
+  });
+
   if (!words || words.length === 0) return [];
 
   const isCompact = [
@@ -107,7 +118,8 @@ export const Subtitles: React.FC<SubtitlesProps> = ({
   words, 
   sceneStartTime, 
   captionStyle = 'mrbeast_impact',
-  autoEmojiEnabled = true
+  autoEmojiEnabled = true,
+  captionPosition,
 }) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
@@ -115,12 +127,15 @@ export const Subtitles: React.FC<SubtitlesProps> = ({
   // Current time in seconds relative to project timeline
   const currentTime = sceneStartTime + (frame / fps);
 
+  // Stable sentence / phrase chunking (keeps sentence on-screen while highlighting words one by one)
+  const chunks = React.useMemo(() => {
+    if (!words || words.length === 0 || captionStyle === 'none') return [];
+    return groupWordsIntoChunks(words, captionStyle);
+  }, [words, captionStyle]);
+
   if (captionStyle === 'none' || !words || words.length === 0) {
     return null;
   }
-
-  // Stable sentence / phrase chunking (keeps sentence on-screen while highlighting words one by one)
-  const chunks = React.useMemo(() => groupWordsIntoChunks(words, captionStyle), [words, captionStyle]);
 
   // Find the active sentence chunk currently being spoken
   const activeChunk = chunks.find((c, idx) => {
@@ -144,17 +159,22 @@ export const Subtitles: React.FC<SubtitlesProps> = ({
   ].includes(captionStyle);
 
   // Dynamic positioning: Higher up for 9:16 vertical shorts so it clears TikTok/Reels UI bars
-  const bottomPos = isVertical 
-    ? (isCompactStyle ? '26%' : '18%')
-    : (isCompactStyle ? '15%' : '10%');
+  const baseBottom = isVertical 
+    ? (isCompactStyle ? 26 : 18)
+    : (isCompactStyle ? 15 : 10);
+
+  const posX = captionPosition?.x ?? 0;
+  const posY = captionPosition?.y ?? 0;
 
   return (
     <div
       style={{
         position: 'absolute',
-        bottom: bottomPos,
-        left: 32,
-        right: 32,
+        bottom: `${baseBottom + posY}%`,
+        left: `calc(50% + ${posX}%)`,
+        transform: 'translateX(-50%)',
+        width: '90%',
+        maxWidth: isVertical ? '92%' : '1200px',
         display: 'flex',
         justifyContent: 'center',
         alignItems: 'center',

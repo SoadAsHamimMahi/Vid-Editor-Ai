@@ -395,6 +395,339 @@ export const AnimatedSticker: React.FC<AnimatedStickerProps> = ({
       );
     }
 
+    case 'yt_subscribe_red_bell': {
+      // Exact YouTube Red SUBSCRIBE! Button with Ringing Bell and Radiating Soundwaves (from user screenshot)
+      const bellRing = Math.sin(frame * 0.5) * 16;
+      const pulseGlow = (Math.sin(frame * 0.15) + 1) / 2;
+      const wavePulse1 = (frame * 0.08) % 1;
+
+      return (
+        <div
+          style={{
+            transform: `scale(${entrance})`,
+            display: 'inline-flex',
+            alignItems: 'center',
+            position: 'relative',
+            userSelect: 'none',
+          }}
+        >
+          {/* Main Red Pill Button */}
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              padding: '12px 28px',
+              backgroundColor: '#e50914',
+              borderRadius: '8px',
+              boxShadow: `0 8px 25px rgba(229, 9, 20, ${0.45 + pulseGlow * 0.35}), 0 0 0 2px rgba(255, 255, 255, 0.25)`,
+              fontFamily: 'Roboto, Impact, sans-serif',
+              color: '#ffffff',
+            }}
+          >
+            <span
+              style={{
+                fontSize: '24px',
+                fontWeight: 900,
+                letterSpacing: '1.2px',
+                textTransform: 'uppercase',
+                textShadow: '0 2px 4px rgba(0,0,0,0.5)',
+              }}
+            >
+              SUBSCRIBE!
+            </span>
+          </div>
+
+          {/* Floating Ringing Bell with Radiating Acoustic Soundwaves */}
+          <div
+            style={{
+              position: 'absolute',
+              top: '-26px',
+              right: '10px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            {/* Left Soundwave Arc */}
+            <svg
+              width="18"
+              height="34"
+              viewBox="0 0 18 34"
+              style={{
+                opacity: 1 - wavePulse1,
+                transform: `scale(${1 + wavePulse1 * 0.4})`,
+                marginRight: '2px',
+              }}
+            >
+              <path
+                d="M15 6 A 14 14 0 0 0 15 28"
+                fill="none"
+                stroke="#ff4d4d"
+                strokeWidth="3.5"
+                strokeLinecap="round"
+              />
+              <path
+                d="M9 11 A 8 8 0 0 0 9 23"
+                fill="none"
+                stroke="#ffffff"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+              />
+            </svg>
+
+            {/* Central Bell Body */}
+            <div
+              style={{
+                transform: `rotate(${bellRing}deg)`,
+                transformOrigin: 'top center',
+                fontSize: '32px',
+                filter: 'drop-shadow(0 4px 8px rgba(0,0,0,0.6))',
+              }}
+            >
+              🔔
+            </div>
+
+            {/* Right Soundwave Arc */}
+            <svg
+              width="18"
+              height="34"
+              viewBox="0 0 18 34"
+              style={{
+                opacity: 1 - wavePulse1,
+                transform: `scale(${1 + wavePulse1 * 0.4})`,
+                marginLeft: '2px',
+              }}
+            >
+              <path
+                d="M3 6 A 14 14 0 0 1 3 28"
+                fill="none"
+                stroke="#ff4d4d"
+                strokeWidth="3.5"
+                strokeLinecap="round"
+              />
+              <path
+                d="M9 11 A 8 8 0 0 1 9 23"
+                fill="none"
+                stroke="#ffffff"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+              />
+            </svg>
+          </div>
+        </div>
+      );
+    }
+
+    case 'electric_voice_wave': {
+      // Electric Glowing Neon Cyan Voice Waveform (Identical to user's screenshot)
+      const svgWidth = 640;
+      const svgHeight = 70;
+      const numPoints = 64;
+      const points: [number, number][] = [];
+
+      for (let i = 0; i <= numPoints; i++) {
+        const x = (i / numPoints) * svgWidth;
+        const norm = (i / numPoints) * 2 - 1; // -1 to 1
+        const windowEnvelope = Math.max(0, 1 - Math.pow(norm, 6)); // Flat center, tapered ends
+
+        // Multi-frequency harmonic synthesized speech waveform
+        const w1 = Math.sin(x * 0.04 + frame * 0.22) * 14;
+        const w2 = Math.sin(x * 0.085 - frame * 0.17) * 9;
+        const w3 = Math.cos(x * 0.14 + frame * 0.38) * 5;
+        const speechJitter = Math.sin(frame * 0.25) * Math.sin(x * 0.06) * 4;
+
+        const y = svgHeight / 2 + (w1 + w2 + w3 + speechJitter) * windowEnvelope;
+        points.push([x, y]);
+      }
+
+      const pathString = points.reduce((acc, [px, py], idx) => {
+        return idx === 0 ? `M ${px.toFixed(1)} ${py.toFixed(1)}` : `${acc} L ${px.toFixed(1)} ${py.toFixed(1)}`;
+      }, '');
+
+      return (
+        <div
+          style={{
+            transform: `scale(${entrance})`,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            userSelect: 'none',
+          }}
+        >
+          <svg width={svgWidth} height={svgHeight} viewBox={`0 0 ${svgWidth} ${svgHeight}`} style={{ overflow: 'visible' }}>
+            <defs>
+              <linearGradient id="cyanWaveGlow" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stopColor="#00b4d8" stopOpacity="0.4" />
+                <stop offset="30%" stopColor="#00f2fe" stopOpacity="1" />
+                <stop offset="70%" stopColor="#4facfe" stopOpacity="1" />
+                <stop offset="100%" stopColor="#00b4d8" stopOpacity="0.4" />
+              </linearGradient>
+            </defs>
+
+            {/* Deep glow background layer */}
+            <path
+              d={pathString}
+              fill="none"
+              stroke="url(#cyanWaveGlow)"
+              strokeWidth="9"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              opacity="0.6"
+              style={{ filter: 'blur(6px)' }}
+            />
+
+            {/* Electric Cyan Neon mid layer */}
+            <path
+              d={pathString}
+              fill="none"
+              stroke="#00f2fe"
+              strokeWidth="4"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              style={{ filter: 'drop-shadow(0 0 10px #00e5ff)' }}
+            />
+
+            {/* High-intensity White Core Beam */}
+            <path
+              d={pathString}
+              fill="none"
+              stroke="#ffffff"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </div>
+      );
+    }
+
+    case 'voice_spectrum_visualizer': {
+      // Dynamic Neon Equalizer Spectrum Bars
+      const numBars = 32;
+      const barWidth = 6;
+      const gap = 4;
+
+      return (
+        <div
+          style={{
+            transform: `scale(${entrance})`,
+            display: 'flex',
+            alignItems: 'flex-end',
+            gap: `${gap}px`,
+            height: '60px',
+            padding: '10px 18px',
+            backgroundColor: 'rgba(10, 15, 26, 0.75)',
+            backdropFilter: 'blur(10px)',
+            borderRadius: '16px',
+            border: '1px solid rgba(6, 182, 212, 0.4)',
+            boxShadow: '0 8px 32px rgba(6, 182, 212, 0.25)',
+            userSelect: 'none',
+          }}
+        >
+          {Array.from({ length: numBars }).map((_, i) => {
+            const freq = (i + 1) * 0.2;
+            const h = 8 + Math.abs(Math.sin(frame * 0.15 + freq) * Math.cos(frame * 0.08 + i * 0.3)) * 38;
+            return (
+              <div
+                key={i}
+                style={{
+                  width: `${barWidth}px`,
+                  height: `${h}px`,
+                  borderRadius: '3px',
+                  background: 'linear-gradient(to top, #06b6d4, #3b82f6, #a855f7)',
+                  boxShadow: '0 0 8px rgba(6, 182, 212, 0.6)',
+                }}
+              />
+            );
+          })}
+        </div>
+      );
+    }
+
+    case 'channel_watermark_brand': {
+      // HITOCAST Style Channel Branding with animated sound bars (Screenshot 1)
+      return (
+        <div
+          style={{
+            transform: `scale(${entrance})`,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '10px',
+            padding: '8px 18px',
+            backgroundColor: 'rgba(15, 15, 20, 0.65)',
+            backdropFilter: 'blur(12px)',
+            borderRadius: '12px',
+            border: '1px solid rgba(255, 255, 255, 0.15)',
+            boxShadow: '0 6px 20px rgba(0, 0, 0, 0.5)',
+            fontFamily: 'sans-serif',
+            userSelect: 'none',
+          }}
+        >
+          {/* Animated 4 Equalizer Bars (Red & White) */}
+          <div style={{ display: 'flex', alignItems: 'flex-end', gap: '3px', height: '22px' }}>
+            {[0, 1, 2, 3].map((barIdx) => {
+              const barH = 6 + Math.abs(Math.sin(frame * 0.2 + barIdx * 1.1)) * 14;
+              const isRed = barIdx === 1 || barIdx === 2;
+              return (
+                <div
+                  key={barIdx}
+                  style={{
+                    width: '3.5px',
+                    height: `${barH}px`,
+                    borderRadius: '2px',
+                    backgroundColor: isRed ? '#ef4444' : '#ffffff',
+                    boxShadow: isRed ? '0 0 6px rgba(239, 68, 68, 0.8)' : 'none',
+                  }}
+                />
+              );
+            })}
+          </div>
+
+          <span
+            style={{
+              color: '#ffffff',
+              fontWeight: 900,
+              fontSize: '20px',
+              letterSpacing: '1px',
+              fontFamily: 'Impact, Arial Black, sans-serif',
+            }}
+          >
+            HITOCAST
+          </span>
+        </div>
+      );
+    }
+
+    case 'yt_engagement_bar': {
+      // YouTube Action Bar (Like, Dislike, Comment, Share, Sparkle) from Screenshot 2
+      const bounce = Math.sin(frame * 0.15) * 3;
+      return (
+        <div
+          style={{
+            transform: `scale(${entrance}) translateY(${bounce}px)`,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '20px',
+            padding: '10px 24px',
+            backgroundColor: 'rgba(24, 24, 28, 0.85)',
+            backdropFilter: 'blur(12px)',
+            borderRadius: '9999px',
+            border: '1px solid rgba(255, 255, 255, 0.15)',
+            boxShadow: '0 10px 30px rgba(0,0,0,0.6)',
+            color: '#ffffff',
+            userSelect: 'none',
+          }}
+        >
+          <span style={{ fontSize: '22px', filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.5))' }}>👍</span>
+          <span style={{ fontSize: '22px', filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.5))' }}>👎</span>
+          <span style={{ fontSize: '22px', filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.5))' }}>💬</span>
+          <span style={{ fontSize: '22px', filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.5))' }}>↗️</span>
+          <span style={{ fontSize: '22px', filter: 'drop-shadow(0 2px 4px rgba(0,0,0,0.5))' }}>✨</span>
+        </div>
+      );
+    }
+
     default:
       return null;
   }

@@ -43,13 +43,17 @@ function normalizeFetchUrl(path: string): string {
   if (
     path.startsWith('http://') ||
     path.startsWith('https://') ||
-    path.startsWith('media://') ||
     path.startsWith('blob:') ||
     path.startsWith('data:')
   ) {
     return path;
   }
-  return `media://${path.replace(/\\/g, '/')}`;
+  let clean = path;
+  if (clean.startsWith('media://')) {
+    clean = clean.replace(/^media:\/\//i, '');
+  }
+  clean = clean.replace(/\\/g, '/');
+  return `media://${encodeURI(clean)}`;
 }
 
 /** ──────────────────────────────────────────────
@@ -71,9 +75,19 @@ export async function get1msWaveformPyramid(audioUrlOrPath: string): Promise<Wav
     let audioBuffer = decodedBufferCache.get(fetchUrl);
 
     if (!audioBuffer) {
-      const response = await fetch(fetchUrl);
-      if (!response.ok) throw new Error(`Fetch failed: ${response.statusText}`);
-      const arrayBuffer = await response.arrayBuffer();
+      let arrayBuffer: ArrayBuffer | null = null;
+      if (typeof window !== 'undefined' && (window as any).electronAPI?.readAudioBuffer) {
+        try {
+          arrayBuffer = await (window as any).electronAPI.readAudioBuffer(audioUrlOrPath);
+        } catch {}
+      }
+
+      if (!arrayBuffer) {
+        const response = await fetch(fetchUrl);
+        if (!response.ok) throw new Error(`Fetch failed: ${response.statusText}`);
+        arrayBuffer = await response.arrayBuffer();
+      }
+
       audioBuffer = await decodeAudioDataSafely(arrayBuffer);
       decodedBufferCache.set(fetchUrl, audioBuffer);
     }

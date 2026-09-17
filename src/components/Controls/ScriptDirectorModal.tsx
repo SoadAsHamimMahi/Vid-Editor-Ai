@@ -65,15 +65,15 @@ export const ScriptDirectorModal: React.FC<ScriptDirectorModalProps> = ({ isOpen
   const [modelChoice, setModelChoice] = useState<'groq' | 'local_heuristic' | 'gemini' | 'openai'>('groq');
   
   // Initialize from global store
-  const activeProvider = modelChoice === 'groq' ? 'groq' : modelChoice === 'gemini' ? 'gemini' : modelChoice === 'openai' ? 'openai' : 'groq';
-  const [apiKeys, setApiKeys] = useState<string[]>(() => globalApiKeys[activeProvider] || ['']);
+  const activeProvider = modelChoice === 'gemini' ? 'gemini' : modelChoice === 'openai' ? 'openai' : 'groq';
+  const activeKeys = globalApiKeys[activeProvider] || [''];
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [previewScenes, setPreviewScenes] = useState<any[] | null>(null);
   const [continuityBible, setContinuityBible] = useState<any | null>(null);
   const [directorProgress, setDirectorProgress] = useState<{ stage: string; current: number; total: number; message: string } | null>(null);
   const [previewTab, setPreviewTab] = useState<'scenes' | 'bible'>('scenes');
 
-  const getCombinedApiKey = () => apiKeys.map((k) => k.trim()).filter(Boolean).join(', ');
+  const getCombinedApiKey = () => activeKeys.map((k) => k.trim()).filter(Boolean).join(', ');
 
   // Auto-populate when opened with pendingDirectorScript from Transcriber, or load saved project script
   useEffect(() => {
@@ -127,26 +127,9 @@ export const ScriptDirectorModal: React.FC<ScriptDirectorModalProps> = ({ isOpen
   // Combined presets list
   const allPresets: VisualPresetItem[] = [...DEFAULT_VISUAL_PRESETS, ...customPresets];
 
-  // ─── Sync with Global API Key store on open / modelChoice change ───
-  useEffect(() => {
-    if (!isOpen) return;
-    if (modelChoice === 'local_heuristic') return;
-    const provider = modelChoice === 'groq' ? 'groq' : modelChoice === 'gemini' ? 'gemini' : 'openai';
-    const stored = globalApiKeys[provider];
-    if (stored && stored.length > 0) {
-      setApiKeys(stored);
-    } else {
-      loadGlobalApiKeys().then((loaded) => {
-        if (loaded[provider]) setApiKeys(loaded[provider]);
-      });
-    }
-  }, [isOpen, modelChoice, globalApiKeys]);
-
   const handleKeysChange = (nextKeys: string[]) => {
-    setApiKeys(nextKeys);
     if (modelChoice !== 'local_heuristic') {
-      const provider = modelChoice === 'groq' ? 'groq' : modelChoice === 'gemini' ? 'gemini' : 'openai';
-      saveGlobalApiKeys(provider, nextKeys);
+      saveGlobalApiKeys(activeProvider, nextKeys);
     }
   };
 
@@ -298,7 +281,9 @@ export const ScriptDirectorModal: React.FC<ScriptDirectorModalProps> = ({ isOpen
         curTime += dur;
       }
 
-      const words = (s.sentence || '').split(/\s+/).filter(Boolean);
+      const isCameraDirective = (t: string) => !t || t.trim().startsWith('[') || t.includes('ESTABLISHING') || t.includes('CLOSE-UP') || t.includes('PORTRAIT');
+      const safeSentence = (s.sentence && !isCameraDirective(s.sentence)) ? s.sentence : '';
+      const words = safeSentence.split(/\s+/).filter(Boolean);
       const wordDur = dur / (words.length || 1);
 
       return {
@@ -603,8 +588,9 @@ export const ScriptDirectorModal: React.FC<ScriptDirectorModalProps> = ({ isOpen
           {/* API Key Pool Manager (Multi-Key with Per-Key Test & Parallel Directing) */}
           {modelChoice !== 'local_heuristic' && (
             <ApiKeyPoolManager
-              provider={modelChoice as any}
-              keys={apiKeys}
+              key={activeProvider}
+              provider={activeProvider}
+              keys={activeKeys}
               onChange={handleKeysChange}
             />
           )}

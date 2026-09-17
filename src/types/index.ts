@@ -9,6 +9,24 @@ export type MotionType =
   | 'handheld_drift'
   | 'static';
 
+export type MotionRhythmPreset = 
+  | 'dynamic_alternating' // Shorts / Reels / Fast YouTube (1 Zoom, 1 Pan)
+  | 'cinematic_documentary' // Documentary / Storytelling / Deep Dives (Cluster: 2-3 Zooms -> Pan)
+  | 'all_zoom'
+  | 'all_pan';
+
+export const MOTION_RHYTHM_CYCLES: Record<MotionRhythmPreset, MotionType[]> = {
+  dynamic_alternating: ['zoom_in', 'pan_right', 'zoom_out', 'pan_left'],
+  cinematic_documentary: ['zoom_in', 'zoom_out', 'pan_right', 'zoom_in', 'zoom_in', 'pan_left'],
+  all_zoom: ['zoom_in', 'zoom_out'],
+  all_pan: ['pan_right', 'pan_left'],
+};
+
+export function getMotionForIndex(index: number, rhythm: MotionRhythmPreset = 'dynamic_alternating'): MotionType {
+  const cycle = MOTION_RHYTHM_CYCLES[rhythm] || MOTION_RHYTHM_CYCLES.dynamic_alternating;
+  return cycle[Math.abs(index) % cycle.length];
+}
+
 export type TransitionType = 
   | 'none'
   | 'cross_dissolve'
@@ -267,6 +285,7 @@ export interface ProjectMetadata {
   audioEngineEpoch?: number; // Monotonically increasing epoch to force Remotion audio element remount
   aspectRatio: AspectRatio;
   captionStyle: CaptionStyle;
+  captionPosition?: { x: number; y: number }; // Offset percentage from bottom center (x: -50 to 50, y: -20 to 80)
   fps: number;
   width: number;
   height: number;
@@ -275,6 +294,7 @@ export interface ProjectMetadata {
   flowSettings?: FlowGenerationSettings; // Google Flow generation settings
   customOutputDir?: string; // User-selected custom destination for generated media
   autoEmojiEnabled?: boolean; // Auto-detect and display emoji icons above spoken keywords
+  motionRhythm?: MotionRhythmPreset; // Active camera motion rhythm cycle
 }
 
 export interface Project {
@@ -312,6 +332,8 @@ export interface FlowGenerationSettings {
 export interface BrowserInstanceInfo {
   port: number;
   connected: boolean;
+  hasProjectOpen?: boolean;
+  browserOpen?: boolean;
   activeJobs: number;
   lastChecked?: number;
   url?: string;
@@ -351,7 +373,17 @@ export interface RenderProgress {
   outputFilePath?: string;
 }
 
-export type TTSEngine = 'indic_f5' | 'chatterbox' | 'neural' | 'edge_tts' | 'elevenlabs' | 'openai' | 'google';
+export type TTSEngine = 
+  | 'kokoro' // Kokoro-82M (Open-source hyper-realistic, ElevenLabs quality)
+  | 'chat_tts' // ChatTTS (Conversational emotion, laughs, sighs, pauses)
+  | 'f5_tts' // F5-TTS (Flow-matching expressive voice clone)
+  | 'elevenlabs' // ElevenLabs (Cinematic documentary & broadcast)
+  | 'edge_tts' // Microsoft Edge Neural (Free clean studio narration)
+  | 'openai' // OpenAI HD Studio
+  | 'google' // Google Gemini 2.0 Audio
+  | 'indic_f5' // AI4Bharat IndicF5 (Bangla & Indic languages)
+  | 'chatterbox' 
+  | 'neural';
 
 export type VoiceWorkUseCase = 
   | 'all'
@@ -363,6 +395,48 @@ export type VoiceWorkUseCase =
   | 'commercial_promo'
   | 'cloned';
 
+export type VoiceArchetype = 
+  | 'baby' 
+  | 'monster' 
+  | 'wizard' 
+  | 'cyborg' 
+  | 'fairy' 
+  | 'radio' 
+  | 'trailer'
+  | 'documentary'
+  | 'podcast'
+  | 'storyteller'
+  | 'commercial'
+  | 'custom';
+
+export interface VoiceDesignConfig {
+  promptDescription: string;
+  archetype: VoiceArchetype;
+  pitchShift: number; // semitones (-20 to +20)
+  formantShift: number; // -50 to +50
+  speedModifier: number; // 0.5 to 2.0
+  reverbMix?: number; // 0 to 1.0
+  dspPreset?: string;
+  baseVoiceId: string;
+  targetGender?: 'male' | 'female' | 'neutral';
+  targetAge?: string;
+  targetAccent?: string;
+  targetEmotion?: string;
+  targetDspPreset?: AudioMasteringPreset;
+  targetProsodyPacing?: ProsodyPacingProfile;
+}
+
+export type ProsodyPacingProfile =
+  | 'documentary'
+  | 'commercial'
+  | 'motivational'
+  | 'trailer'
+  | 'podcast'
+  | 'story'
+  | 'shorts'
+  | 'sleep'
+  | 'meditation';
+
 export interface VoiceProfile {
   id: string;
   name: string;
@@ -370,11 +444,19 @@ export interface VoiceProfile {
   language: string; // 'bn', 'en', 'hi', 'ta', 'te', 'es', 'fr', etc.
   languageName: string; // 'Bengali (বাংলা)', 'English (US)', etc.
   gender: 'male' | 'female' | 'neutral';
-  category: 'preset' | 'custom_cloned';
+  category: 'preset' | 'custom_cloned' | 'custom_designed';
   workUseCase?: string; // e.g. 'horror_thriller' | 'motivational' | 'podcast_conversational' | 'news_documentary' | 'audiobook_story' | 'commercial_promo' | 'cloned'
   bestFor?: string; // e.g. 'Horror & Thrillers', 'Motivational Speeches', etc.
+  genreTag?: string; // e.g. 'Documentary', 'Commercial & Ads', 'Cinema Trailer', etc.
+  defaultSpeed?: number; // Pre-calibrated optimal tempo (e.g. 0.94, 1.10, 0.88)
+  prosodyPacing?: ProsodyPacingProfile; // Pause distribution curve
+  defaultMasteringPreset?: AudioMasteringPreset; // Tailored vocal DSP mastering strip
+  defaultPitch?: number; // Pre-calibrated pitch offset (e.g. -2 for deep baritone rumble)
+  defaultEmotion?: string; // Pre-calibrated emotional inflection (e.g. 'calm', 'dramatic', 'whisper')
   referenceAudioPath?: string;
   referenceText?: string;
+  sampleText?: string; // Curated showcase audition script text optimal for this voice
+  voiceDesign?: VoiceDesignConfig;
   description?: string;
   avatarColor?: string;
   previewAudioPath?: string;
@@ -384,10 +466,15 @@ export interface VoiceProfile {
 
 export type AudioMasteringPreset = 
   | 'none' 
+  | 'broadcast_studio'
   | 'podcast_warmth' 
   | 'cinema_trailer' 
   | 'crisp_youtube' 
-  | 'vintage_radio';
+  | 'vintage_radio'
+  | 'late_night_warmth'
+  | 'deep_sleep_master'
+  | 'cinematic_bass'
+  | 'deep_cinema_warmth';
 
 export interface TTSGenerationRequest {
   text: string;
@@ -397,9 +484,10 @@ export interface TTSGenerationRequest {
   gender?: 'male' | 'female' | 'neutral';
   referenceAudioPath?: string;
   referenceText?: string;
-  speed?: number; // 0.5 to 2.0 (default 1.0)
+  speed?: number; // 0.5 to 2.0 (default 1.0 or resolved from profile defaultSpeed)
   pitch?: number; // -100 to 100 (default 0)
   emotion?: string; // 'neutral' | 'happy' | 'sad' | 'angry' | 'excited' | 'whispering'
+  prosodyPacing?: ProsodyPacingProfile;
   masteringPreset?: AudioMasteringPreset;
   outputPath?: string;
   apiKey?: string;

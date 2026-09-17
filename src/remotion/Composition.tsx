@@ -79,9 +79,24 @@ export const MainComposition: React.FC<MainCompositionProps> = React.memo(({ pro
       )}
 
       {/* 3. Track V1: Render Base Scenes Sequentially with Transitions & Camera Motion */}
-      {scenes.map((scene) => {
-        const fromFrame = Math.round(scene.startInSeconds * fps);
-        const durationInFrames = Math.max(1, Math.round(scene.durationInSeconds * fps));
+      {scenes.map((scene, index) => {
+        let fromFrame = Math.round(scene.startInSeconds * fps);
+        let durationInFrames = Math.max(1, Math.round(scene.durationInSeconds * fps));
+
+        // If this is the first scene and it starts with a small gap (e.g. 0.17s speech pause), snap to frame 0
+        if (index === 0 && scene.startInSeconds > 0 && scene.startInSeconds <= 2.0) {
+          durationInFrames = Math.max(1, Math.round((scene.startInSeconds + scene.durationInSeconds) * fps));
+          fromFrame = 0;
+        } else if (index > 0) {
+          const prevScene = scenes[index - 1];
+          const prevEnd = prevScene.startInSeconds + prevScene.durationInSeconds;
+          const gap = scene.startInSeconds - prevEnd;
+          // If there is a tiny gap (< 0.3s) between scenes, bridge to prevent black flicker
+          if (gap > 0 && gap < 0.3) {
+            fromFrame = Math.round(prevEnd * fps);
+            durationInFrames = Math.max(1, Math.round((scene.startInSeconds + scene.durationInSeconds - prevEnd) * fps));
+          }
+        }
 
         return (
           <Sequence
@@ -98,6 +113,7 @@ export const MainComposition: React.FC<MainCompositionProps> = React.memo(({ pro
                 sceneStartTime={scene.startInSeconds} 
                 captionStyle={metadata.captionStyle} 
                 autoEmojiEnabled={metadata.autoEmojiEnabled !== false}
+                captionPosition={metadata.captionPosition}
               />
             )}
           </Sequence>
@@ -114,8 +130,8 @@ export const MainComposition: React.FC<MainCompositionProps> = React.memo(({ pro
 
         const fromFrame = Math.round(clip.startTime * fps);
         const durationInFrames = Math.max(1, Math.round(clip.duration * fps));
-        const clipUrl = normalizeMediaUrl(clip.filePath);
-        if (!clipUrl) return null;
+        const clipUrl = clip.filePath ? normalizeMediaUrl(clip.filePath) : '';
+        if (!clip.stickerId && !clipUrl) return null;
 
         // Layer stacking z-index: V2 = 25, V3 = 30, V4 = 35
         const trackZIndex = clip.track === 'V4' ? 35 : clip.track === 'V3' ? 30 : 25;

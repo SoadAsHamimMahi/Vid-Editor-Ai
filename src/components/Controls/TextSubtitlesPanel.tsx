@@ -11,7 +11,12 @@ import {
   AlignCenter, 
   Palette,
   Eye,
-  EyeOff
+  EyeOff,
+  Mic,
+  RefreshCw,
+  Trash2,
+  AlertCircle,
+  FileAudio
 } from 'lucide-react';
 import { CaptionStyle } from '../../types';
 
@@ -177,12 +182,55 @@ export const TextSubtitlesPanel: React.FC = () => {
     project, 
     updateMetadata,
     currentTime,
-    addOverlayClip
+    addOverlayClip,
+    autoGenerateSubtitlesFromVoiceover,
+    clearAllSubtitles,
+    isTranscribingSubtitles
   } = useProjectStore();
 
   const currentStyle = project.metadata.captionStyle || 'documentary';
   const [customTitleText, setCustomTitleText] = useState('');
   const [titleDuration, setTitleDuration] = useState('3.0');
+  const [localIsTranscribing, setLocalIsTranscribing] = useState(false);
+  const isTranscribing = localIsTranscribing || isTranscribingSubtitles;
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Audio track detection
+  const voiceoverPath =
+    project.metadata.audioPath ||
+    project.metadata.audioClips?.find((c) => c.track === 'A1' || c.category === 'voiceover')?.filePath ||
+    project.metadata.mediaAssets?.find((m) => m.type === 'voiceover')?.path;
+
+  const audioFileName = voiceoverPath ? voiceoverPath.split(/[\\/]/).pop() || 'Voiceover Audio' : null;
+  const totalSubtitleWords = project.scenes.reduce((acc, s) => acc + (s.subtitles?.length || 0), 0);
+  const scenesWithSubtitles = project.scenes.filter((s) => s.subtitles && s.subtitles.length > 0).length;
+
+  const handleTranscribeSpeech = async () => {
+    setLocalIsTranscribing(true);
+    setStatusMessage('Transcribing verbatim spoken voice speech across timeline...');
+    setErrorMessage(null);
+
+    try {
+      const res = await autoGenerateSubtitlesFromVoiceover();
+      if (res.success) {
+        setStatusMessage(`✓ Transcribed ${res.wordsCount} spoken words across ${project.scenes.length} scenes!`);
+      } else {
+        setErrorMessage(res.error || 'Failed to transcribe speech.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Transcription error occurred.');
+    } finally {
+      setLocalIsTranscribing(false);
+    }
+  };
+
+  const handleClearSubtitles = () => {
+    if (window.confirm('Clear all subtitle captions from all scenes on the timeline?')) {
+      clearAllSubtitles();
+      setStatusMessage('Subtitles cleared.');
+    }
+  };
 
   const handleApplyPreset = (styleId: CaptionStyle) => {
     updateMetadata({ captionStyle: styleId });
@@ -245,6 +293,85 @@ export const TextSubtitlesPanel: React.FC = () => {
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-4 custom-scrollbar">
+        {/* Voiceover Speech-to-Subtitles Card */}
+        <div className="p-3 rounded-xl bg-gradient-to-b from-[#191a26] to-[#12131d] border border-cyan-500/30 shadow-lg shadow-cyan-950/20 space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-6 h-6 rounded-md bg-cyan-500/20 text-cyan-400 flex items-center justify-center border border-cyan-500/40">
+                <Mic className="w-3.5 h-3.5" />
+              </div>
+              <div>
+                <h4 className="text-[11px] font-bold text-slate-200">Speech-to-Subtitles</h4>
+                <p className="text-[9px] text-slate-400">Verbatim Voice Transcription</p>
+              </div>
+            </div>
+
+            {totalSubtitleWords > 0 && (
+              <button
+                onClick={handleClearSubtitles}
+                title="Clear all captions from scenes"
+                className="p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-rose-950/30 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Voice Track Status */}
+          <div className="p-2 rounded-lg bg-[#0e0f16] border border-[#222332] space-y-1">
+            <div className="flex items-center justify-between text-[10px]">
+              <span className="text-slate-400 flex items-center gap-1">
+                <FileAudio className="w-3 h-3 text-cyan-400" />
+                <span>Voice Audio (A1):</span>
+              </span>
+              <span className="font-mono text-cyan-300 truncate max-w-[130px]" title={audioFileName || 'None'}>
+                {audioFileName || 'No audio on A1'}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between text-[10px]">
+              <span className="text-slate-400">Captions Active:</span>
+              <span className={`font-mono font-semibold ${totalSubtitleWords > 0 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {totalSubtitleWords > 0 ? `${totalSubtitleWords} words (${scenesWithSubtitles}/${project.scenes.length} scenes)` : 'None (No speech synced)'}
+              </span>
+            </div>
+          </div>
+
+          {/* Action Button */}
+          <button
+            onClick={handleTranscribeSpeech}
+            disabled={isTranscribing || !voiceoverPath}
+            className="w-full py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-40 text-white font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 shadow-md shadow-cyan-600/20 active:scale-95 transition-all cursor-pointer"
+          >
+            {isTranscribing ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>Transcribing Voiceover...</span>
+              </>
+            ) : (
+              <>
+                <Mic className="w-3.5 h-3.5" />
+                <span>{totalSubtitleWords > 0 ? 'Re-Sync Voice Speech Subtitles' : 'Generate Subtitles from Voice'}</span>
+              </>
+            )}
+          </button>
+
+          {/* Status Messages */}
+          {statusMessage && (
+            <div className="flex items-center gap-1.5 text-[10px] text-emerald-300 bg-emerald-950/50 border border-emerald-500/30 p-2 rounded-lg">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+              <span>{statusMessage}</span>
+            </div>
+          )}
+
+          {errorMessage && (
+            <div className="flex items-center gap-1.5 text-[10px] text-rose-300 bg-rose-950/50 border border-rose-500/30 p-2 rounded-lg">
+              <AlertCircle className="w-3.5 h-3.5 text-rose-400 flex-shrink-0" />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+        </div>
+
         {/* Caption Style Presets Grid */}
         <div className="space-y-2">
           <div className="flex items-center justify-between">

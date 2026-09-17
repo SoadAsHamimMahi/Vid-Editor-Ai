@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
 import { useProjectStore } from '../../store/useProjectStore';
-import { MotionType, TransitionType, ColorLUT } from '../../types';
+import { MotionType, TransitionType, ColorLUT, MotionRhythmPreset } from '../../types';
 import { 
   Sparkles, 
+  Zap,
   RefreshCw, 
   Upload, 
   Trash2, 
@@ -34,6 +35,10 @@ export const SceneInspector: React.FC = () => {
   const { 
     project, 
     selectedSceneId, 
+    selectedSceneIds,
+    deleteScenes,
+    clearSceneSelection,
+    setBatchSceneDeleteModalOpen,
     updateScene, 
     deleteScene, 
     updateSceneColorLUT, 
@@ -48,6 +53,7 @@ export const SceneInspector: React.FC = () => {
     regenerateScene,
     clearSceneImage,
     applyDynamicMotionToAllScenes,
+    applyMotionRhythmToAllScenes,
     animateSceneToVideo
   } = useProjectStore();
 
@@ -199,6 +205,39 @@ export const SceneInspector: React.FC = () => {
 
       {/* Main Inspector Scrollable Body */}
       <div className="flex-1 p-3 overflow-y-auto space-y-4">
+        {/* Multi-Selection Banner */}
+        {selectedSceneIds.length > 1 && (
+          <div className="p-3 bg-gradient-to-r from-cyan-950/50 to-blue-950/40 border border-cyan-500/40 rounded-xl space-y-2 shadow-md">
+            <div className="flex items-center justify-between">
+              <span className="text-cyan-300 font-bold text-xs flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                <span>{selectedSceneIds.length} Scenes Selected</span>
+              </span>
+              <button
+                onClick={() => clearSceneSelection()}
+                className="text-[10px] text-slate-400 hover:text-white underline cursor-pointer"
+              >
+                Deselect
+              </button>
+            </div>
+            <div className="flex items-center gap-2 pt-0.5">
+              <button
+                onClick={() => deleteScenes(selectedSceneIds)}
+                className="flex-1 py-1.5 px-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete ({selectedSceneIds.length})</span>
+              </button>
+              <button
+                onClick={() => setBatchSceneDeleteModalOpen(true)}
+                className="py-1.5 px-2.5 bg-[#1a1a24] hover:bg-[#252535] text-cyan-300 border border-cyan-500/30 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer"
+              >
+                <span>Batch Clean...</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* TAB 1: PROJECT DETAILS (Like CapCut Right Panel) */}
         {inspectorTab === 'details' && (
           <div className="space-y-3">
@@ -457,33 +496,82 @@ export const SceneInspector: React.FC = () => {
             </div>
 
             {/* 3D Camera Motion Dropdown */}
-            <div className="space-y-1.5 pt-2 border-t border-[#26262e]">
+            {/* Camera Motion Rhythm & Ken Burns Presets */}
+            <div className="space-y-2 pt-2 border-t border-[#26262e]">
               <div className="flex items-center justify-between">
                 <label className="text-[11px] font-semibold text-slate-400 flex items-center gap-1">
                   <Compass className="w-3.5 h-3.5 text-purple-400" />
-                  <span>Ken Burns Camera Motion</span>
+                  <span>Camera Motion Rhythm</span>
                 </label>
                 <button
                   type="button"
-                  onClick={() => applyDynamicMotionToAllScenes(true)}
-                  title="Apply dynamic cinematic motion cycle (Zoom in, Pan right, Zoom out, Pan left) across all eligible scenes"
+                  onClick={() => applyMotionRhythmToAllScenes(project.metadata?.motionRhythm || 'dynamic_alternating', true)}
+                  title="Apply selected motion rhythm across all eligible clips on timeline"
                   className="text-[10px] text-purple-400 hover:text-purple-300 hover:underline flex items-center gap-1 font-medium cursor-pointer"
                 >
                   <Sparkles className="w-3 h-3" />
                   <span>Apply to All</span>
                 </button>
               </div>
-              <select
-                value={selectedScene.motionType}
-                onChange={(e) => updateScene(selectedScene.id, { motionType: e.target.value as MotionType })}
-                className="w-full bg-[#1e1e24] border border-[#2e2e38] rounded p-1.5 text-slate-200 outline-none focus:border-cyan-500 cursor-pointer"
-              >
-                {motionOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+
+              {/* Rhythm Combo Presets */}
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => applyMotionRhythmToAllScenes('dynamic_alternating', true)}
+                  className={`p-2 rounded-lg border text-left transition-all cursor-pointer ${
+                    (project.metadata?.motionRhythm || 'dynamic_alternating') === 'dynamic_alternating'
+                      ? 'bg-purple-950/50 border-purple-500/80 text-purple-200 shadow-sm shadow-purple-500/10'
+                      : 'bg-[#181722] hover:bg-[#201f2e] border-[#29263a] text-slate-400'
+                  }`}
+                  title="Shorts / Reels / Fast YouTube: Alternates Zoom In ➔ Pan Right (L to R) ➔ Zoom Out ➔ Pan Left (R to L)"
+                >
+                  <div className="flex items-center gap-1.5 font-bold text-[11px] mb-0.5">
+                    <Zap className="w-3 h-3 text-purple-400" />
+                    <span>Shorts / YouTube</span>
+                  </div>
+                  <div className="text-[9px] text-slate-400 leading-tight">
+                    1:1 Alternating: Zoom ⇄ Pan
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => applyMotionRhythmToAllScenes('cinematic_documentary', true)}
+                  className={`p-2 rounded-lg border text-left transition-all cursor-pointer ${
+                    project.metadata?.motionRhythm === 'cinematic_documentary'
+                      ? 'bg-amber-950/50 border-amber-500/80 text-amber-200 shadow-sm shadow-amber-500/10'
+                      : 'bg-[#181722] hover:bg-[#201f2e] border-[#29263a] text-slate-400'
+                  }`}
+                  title="Documentary / Storytelling: 2-3 Zooms focus on subjects, followed by a wide lateral Pan"
+                >
+                  <div className="flex items-center gap-1.5 font-bold text-[11px] mb-0.5">
+                    <Film className="w-3 h-3 text-amber-400" />
+                    <span>Documentary</span>
+                  </div>
+                  <div className="text-[9px] text-slate-400 leading-tight">
+                    Cluster: 2-3 Zooms ➔ Pan
+                  </div>
+                </button>
+              </div>
+
+              {/* Per-Clip Fine Tune Dropdown */}
+              <div className="pt-0.5">
+                <div className="text-[10px] text-slate-400 mb-1">
+                  Selected Clip Motion:
+                </div>
+                <select
+                  value={selectedScene.motionType}
+                  onChange={(e) => updateScene(selectedScene.id, { motionType: e.target.value as MotionType })}
+                  className="w-full bg-[#1e1e24] border border-[#2e2e38] rounded p-1.5 text-slate-200 outline-none focus:border-cyan-500 cursor-pointer text-xs"
+                >
+                  {motionOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             {/* Scene Entrance Transition */}

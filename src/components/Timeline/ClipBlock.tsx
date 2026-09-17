@@ -24,7 +24,9 @@ import {
   Plus,
   RotateCcw,
   Film,
-  PlaySquare
+  PlaySquare,
+  Layers,
+  CheckSquare
 } from 'lucide-react';
 
 interface ClipBlockProps {
@@ -35,7 +37,13 @@ interface ClipBlockProps {
 const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }) => {
   const { 
     selectedSceneId, 
+    selectedSceneIds,
     setSelectedSceneId, 
+    setSelectedSceneIds,
+    toggleSelectScene,
+    deleteScenes,
+    setBatchSceneDeleteModalOpen,
+    clearSceneSelection,
     setCurrentTime,
     updateScene,
     updateSceneDuration, 
@@ -50,9 +58,14 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
     clearSceneImage,
     toggleSceneMediaType,
     animateSceneToVideo,
+    revertSceneToImage,
+    colabRenderProgress,
   } = useProjectStore();
 
-  const isSelected = selectedSceneId === scene.id;
+  const isSelected = selectedSceneIds.length > 0 
+    ? selectedSceneIds.includes(scene.id) 
+    : selectedSceneId === scene.id;
+  const isMultiSelected = selectedSceneIds.length > 1 && selectedSceneIds.includes(scene.id);
   const width = Math.max(2, scene.durationInSeconds * pixelsPerSecond);
   const isUltraCompact = width < 38;
   const isCompact = width < 75;
@@ -140,12 +153,19 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
     }
 
     switch (scene.status) {
-      case 'generating':
+      case 'generating': {
+        const colabProg = colabRenderProgress[scene.id];
+        const label = colabProg?.percent 
+          ? `${colabProg.percent}%` 
+          : isVideo 
+          ? 'Rendering' 
+          : 'Flow Gen';
         return (
           <span className="flex items-center gap-1 text-[9px] text-amber-400 bg-amber-950/80 border border-amber-800/80 px-1 py-0.2 rounded font-mono">
-            <Loader2 className="w-2.5 h-2.5 animate-spin" /> {!isCompact && 'Flow Gen'}
+            <Loader2 className="w-2.5 h-2.5 animate-spin" /> {!isCompact && label}
           </span>
         );
+      }
       case 'ready':
         return (
           <span className="flex items-center gap-1 text-[9px] text-emerald-400 bg-emerald-950/80 border border-emerald-800/80 px-1 py-0.2 rounded font-mono">
@@ -291,21 +311,31 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
           const clickOffsetSec = Math.max(0, (e.clientX - rect.left) / pixelsPerSecond);
           const targetTime = Math.min(scene.startInSeconds + scene.durationInSeconds, scene.startInSeconds + clickOffsetSec);
           setCurrentTime(targetTime);
-          setSelectedSceneId(scene.id);
+
+          const isMulti = e.ctrlKey || e.metaKey;
+          const isRange = e.shiftKey;
+          if (isMulti || isRange) {
+            e.preventDefault();
+            toggleSelectScene(scene.id, isMulti, isRange);
+          } else if (!selectedSceneIds.includes(scene.id) || selectedSceneIds.length <= 1) {
+            toggleSelectScene(scene.id, false, false);
+          }
         }}
         onClick={(e) => {
           const target = e.target as HTMLElement;
           if (target.closest('button') || target.dataset.role === 'trim-handle') return;
-          const rect = e.currentTarget.getBoundingClientRect();
-          const clickOffsetSec = Math.max(0, (e.clientX - rect.left) / pixelsPerSecond);
-          const targetTime = Math.min(scene.startInSeconds + scene.durationInSeconds, scene.startInSeconds + clickOffsetSec);
-          setCurrentTime(targetTime);
-          setSelectedSceneId(scene.id);
+          const isMulti = e.ctrlKey || e.metaKey;
+          const isRange = e.shiftKey;
+          if (!isMulti && !isRange && selectedSceneIds.length > 1) {
+            toggleSelectScene(scene.id, false, false);
+          }
         }}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          setSelectedSceneId(scene.id);
+          if (!selectedSceneIds.includes(scene.id)) {
+            toggleSelectScene(scene.id, false, false);
+          }
           setContextMenu({ x: e.clientX, y: e.clientY });
         }}
         style={{ width: `${width}px`, minWidth: `${width}px`, maxWidth: `${width}px` }}
@@ -313,7 +343,7 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
           isTrimming
             ? 'border-cyan-400 ring-2 ring-cyan-400/70 bg-[#202028] shadow-[0_0_20px_rgba(0,229,255,0.4)] z-30'
             : isSelected
-            ? 'border-[#00e5ff] ring-2 ring-[#00e5ff]/50 bg-[#202028] shadow-[0_0_15px_rgba(0,229,255,0.25)] z-20'
+            ? 'border-[#00e5ff] ring-2 ring-[#00e5ff]/70 bg-[#16232e] shadow-[0_0_18px_rgba(0,229,255,0.35)] z-20'
             : scene.hasMismatchWarning
             ? 'border-amber-500/80 ring-1 ring-amber-500/40 bg-[#221c1a] shadow-[0_0_10px_rgba(245,158,11,0.2)] z-10'
             : scene.status === 'error'
@@ -383,9 +413,14 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
         {/* Top Header inside clip */}
         <div className="relative z-10 p-1 flex items-center justify-between text-xs bg-black/60 backdrop-blur-xs border-b border-white/5 overflow-hidden">
           <div className="flex items-center gap-1 truncate">
-            <span className="px-1 py-0.2 bg-[#202026] text-slate-300 font-mono text-[9px] rounded font-semibold">
+            <span className={`px-1 py-0.2 font-mono text-[9px] rounded font-semibold transition-colors ${
+              isSelected ? 'bg-cyan-400 text-black font-bold shadow-xs' : 'bg-[#202026] text-slate-300'
+            }`}>
               #{scene.order + 1}
             </span>
+            {isSelected && (
+              <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-[0_0_6px_#00e5ff] animate-pulse shrink-0" />
+            )}
             {isVideo ? (
               <button
                 type="button"
@@ -465,14 +500,24 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
               >
                 <Sparkles className="w-2.5 h-2.5" />
               </button>
-              {/* Animate to Video */}
-              {!isVideo && imgSrc && (
+              {/* Animate / Re-generate AI Video */}
+              {imgSrc && (
                 <button
                   onClick={(e) => { e.stopPropagation(); animateSceneToVideo(scene.id); }}
                   className="p-1 hover:bg-purple-950/80 rounded text-purple-400 hover:text-cyan-300 transition-colors"
-                  title="Animate Scene into Moving Video (Veo Video)"
+                  title={isVideo ? "Re-generate AI Video Motion on Cloud GPU" : "Animate Scene into Moving Video (Cloud AI GPU)"}
                 >
                   <PlaySquare className="w-2.5 h-2.5 text-cyan-400" />
+                </button>
+              )}
+              {/* Revert Video to Image */}
+              {isVideo && (scene.localImagePath || scene.imageUrl) && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); revertSceneToImage(scene.id); }}
+                  className="p-1 hover:bg-amber-950/80 rounded text-amber-400 hover:text-amber-300 transition-colors"
+                  title="Revert Video Back to Still Image"
+                >
+                  <ImageIcon className="w-2.5 h-2.5 text-amber-400" />
                 </button>
               )}
               {/* Clear Image */}
@@ -511,9 +556,16 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
               </button>
               {/* Delete */}
               <button
-                onClick={(e) => { e.stopPropagation(); deleteScene(scene.id); }}
+                onClick={(e) => { 
+                  e.stopPropagation(); 
+                  if (isMultiSelected) {
+                    deleteScenes(selectedSceneIds);
+                  } else {
+                    deleteScene(scene.id);
+                  }
+                }}
                 className="p-1 hover:bg-rose-950 rounded text-slate-300 hover:text-rose-400"
-                title="Delete Scene (Del)"
+                title={isMultiSelected ? `Delete All ${selectedSceneIds.length} Selected Scenes (Del)` : "Delete Scene (Del)"}
               >
                 <Trash2 className="w-2.5 h-2.5" />
               </button>
@@ -539,9 +591,21 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
           className="fixed z-50 bg-[#16161c] border border-[#2c2c38] rounded-lg shadow-2xl p-1 w-56 text-xs text-slate-300 font-sans backdrop-blur-md animate-in fade-in zoom-in-95 duration-100"
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="px-2 py-1 border-b border-white/5 text-[10px] font-mono text-slate-500 font-semibold truncate">
-            Scene #{scene.order + 1} Options
-          </div>
+          {isMultiSelected ? (
+            <div className="px-2 py-1.5 bg-cyan-950/70 border-b border-cyan-500/30 rounded-t flex items-center justify-between text-[11px] text-cyan-300 font-semibold">
+              <span>{selectedSceneIds.length} Scenes Selected</span>
+              <button
+                onClick={() => { clearSceneSelection(); setContextMenu(null); }}
+                className="text-[10px] text-slate-400 hover:text-white underline cursor-pointer"
+              >
+                Clear
+              </button>
+            </div>
+          ) : (
+            <div className="px-2 py-1 border-b border-white/5 text-[10px] font-mono text-slate-500 font-semibold truncate">
+              Scene #{scene.order + 1} Options
+            </div>
+          )}
 
           <div className="py-1">
             <button
@@ -608,10 +672,24 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
               >
                 <span className="flex items-center gap-2">
                   <PlaySquare className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
-                  <span>Animate Scene (Veo Video)</span>
+                  <span>Animate Scene to Video</span>
                 </span>
-                <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-mono">
-                  ✨ Veo
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono">
+                  🎬 Cloud AI
+                </span>
+              </button>
+            )}
+            {isVideo && (scene.localImagePath || scene.imageUrl) && (
+              <button
+                onClick={() => { revertSceneToImage(scene.id); setContextMenu(null); }}
+                className="w-full text-left px-2 py-1.5 rounded hover:bg-amber-950/60 hover:text-amber-300 flex items-center justify-between text-amber-400 font-medium cursor-pointer"
+              >
+                <span className="flex items-center gap-2">
+                  <ImageIcon className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Revert to Original Still Image</span>
+                </span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono">
+                  🖼️ Still
                 </span>
               </button>
             )}
@@ -680,16 +758,47 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
               </span>
               <span className="text-[10px] font-mono text-slate-500">S</span>
             </button>
-            <button
-              onClick={() => { deleteScene(scene.id); setContextMenu(null); }}
-              className="w-full text-left px-2 py-1.5 rounded hover:bg-rose-950/60 text-rose-400 flex items-center justify-between"
-            >
-              <span className="flex items-center gap-2">
-                <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-                <span>Delete Scene</span>
-              </span>
-              <span className="text-[10px] font-mono text-slate-500">Del</span>
-            </button>
+            {isMultiSelected ? (
+              <>
+                <button
+                  onClick={() => { deleteScenes(selectedSceneIds); setContextMenu(null); }}
+                  className="w-full text-left px-2 py-2 rounded bg-rose-950/80 hover:bg-rose-900 border border-rose-600/60 text-rose-200 font-semibold flex items-center justify-between cursor-pointer shadow-sm"
+                >
+                  <span className="flex items-center gap-2">
+                    <Trash2 className="w-3.5 h-3.5 text-rose-300" />
+                    <span>Delete All {selectedSceneIds.length} Selected Scenes</span>
+                  </span>
+                  <span className="text-[10px] font-mono text-rose-300">Del</span>
+                </button>
+                <button
+                  onClick={() => { setBatchSceneDeleteModalOpen(true); setContextMenu(null); }}
+                  className="w-full text-left px-2 py-1.5 rounded hover:bg-cyan-950/50 text-cyan-300 flex items-center gap-2 cursor-pointer mt-1"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Batch Clean & Range Manager...</span>
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => { deleteScene(scene.id); setContextMenu(null); }}
+                  className="w-full text-left px-2 py-1.5 rounded hover:bg-rose-950/60 text-rose-400 flex items-center justify-between cursor-pointer"
+                >
+                  <span className="flex items-center gap-2">
+                    <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Delete Scene</span>
+                  </span>
+                  <span className="text-[10px] font-mono text-slate-500">Del</span>
+                </button>
+                <button
+                  onClick={() => { setBatchSceneDeleteModalOpen(true); setContextMenu(null); }}
+                  className="w-full text-left px-2 py-1.5 rounded hover:bg-cyan-950/50 text-cyan-300 flex items-center gap-2 cursor-pointer"
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>Batch Delete & Clean Scenes...</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}

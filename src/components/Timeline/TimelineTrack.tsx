@@ -9,6 +9,7 @@ import { getExactAudioDuration } from '../../utils/audioDuration';
 import { detectTimestampedFiles } from '../../utils/timecodeArranger';
 import { auditTimelineGaps, extractTimecode } from '../../utils/timelineGapDetector';
 import { getFilePath } from '../../utils/fileUtils';
+import { getMotionForIndex } from '../../types';
 import { 
   Scissors, 
   ZoomIn, 
@@ -33,8 +34,13 @@ import {
   CheckCircle2,
   RotateCcw,
   Loader2,
-  ChevronDown
+  ChevronDown,
+  Compass,
+  Zap,
+  Film
 } from 'lucide-react';
+
+const EMPTY_ARRAY: any[] = [];
 
 export const TimelineTrack: React.FC = () => {
   const {
@@ -48,7 +54,14 @@ export const TimelineTrack: React.FC = () => {
     splitSceneAtTime,
     duplicateScene,
     deleteScene,
+    deleteScenes,
     selectedSceneId,
+    selectedSceneIds,
+    setSelectedSceneId,
+    isTranscribingSubtitles,
+    autoGenerateSubtitlesFromVoiceover,
+    selectAllScenes,
+    clearSceneSelection,
     setAudioStudioModalOpen,
     sfxLibraryModalOpen,
     setSfxLibraryModalOpen,
@@ -75,6 +88,11 @@ export const TimelineTrack: React.FC = () => {
     autoAlignScenesToBeats,
     toggleTrackMute,
     setGapCheckerModalOpen,
+    setBatchSceneDeleteModalOpen,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
   } = useProjectStore();
 
   const timelineAudit = useMemo(() => {
@@ -97,9 +115,25 @@ export const TimelineTrack: React.FC = () => {
   }, [project.scenes]);
 
   const [arrangeSuccessToast, setArrangeSuccessToast] = useState<string | null>(null);
+  const [subtitleToast, setSubtitleToast] = useState<string | null>(null);
   const [isVoiceSyncing, setIsVoiceSyncing] = useState(false);
   const [isSmartMenuOpen, setIsSmartMenuOpen] = useState(false);
   const [isTrackMenuOpen, setIsTrackMenuOpen] = useState(false);
+
+  const handleStartSubtitleSync = async () => {
+    setManualTracks((m) => ({ ...m, t1: true }));
+    if (project.metadata.captionStyle === 'none') {
+      useProjectStore.getState().setCaptionStyle('documentary');
+    }
+    const res = await autoGenerateSubtitlesFromVoiceover();
+    if (res.success) {
+      setSubtitleToast(`✓ Auto-synced ${res.wordsCount} words across ${project.scenes.length} scenes!`);
+      setTimeout(() => setSubtitleToast(null), 4500);
+    } else {
+      setSubtitleToast(`⚠️ ${res.error || 'Speech transcription failed'}`);
+      setTimeout(() => setSubtitleToast(null), 4500);
+    }
+  };
 
   const smartMenuRef = useRef<HTMLDivElement>(null);
   const trackMenuRef = useRef<HTMLDivElement>(null);
@@ -135,7 +169,7 @@ export const TimelineTrack: React.FC = () => {
   const isMutedA3 = !!trackMutes.a3;
   
   // Track visibility toggles (Overlay V3, V2, Music, SFX, and Subtitles)
-  const overlayClips = project.metadata.overlayClips || [];
+  const overlayClips = project.metadata.overlayClips || EMPTY_ARRAY;
   const v3OverlayClips = useMemo(() => overlayClips.filter((c) => c.track === 'V3'), [overlayClips]);
   const v2OverlayClips = useMemo(() => overlayClips.filter((c) => c.track !== 'V3'), [overlayClips]);
 
@@ -152,7 +186,7 @@ export const TimelineTrack: React.FC = () => {
   const [isScrubbing, setIsScrubbing] = useState(false);
 
   // Group audio clips by track
-  const allClips = project.metadata.audioClips || [];
+  const allClips = project.metadata.audioClips || EMPTY_ARRAY;
   const a1VoiceClips = useMemo(() => {
     const fromArray = allClips.filter((c) => c.track === 'A1' || c.category === 'voiceover');
     if (fromArray.length === 0 && project.metadata.audioPath) {
@@ -351,7 +385,7 @@ export const TimelineTrack: React.FC = () => {
             startInSeconds: curEnd,
             durationInSeconds: 4.0,
             prompt: fileName,
-            motionType: 'zoom_in' as const,
+            motionType: getMotionForIndex(project.scenes.length, project.metadata?.motionRhythm),
             transitionType: 'cross_dissolve' as const,
             transitionDuration: 0.5,
             colorLUT: 'none' as const,
@@ -529,7 +563,7 @@ export const TimelineTrack: React.FC = () => {
               startInSeconds: dropTime,
               durationInSeconds: 4.0,
               prompt: fileName,
-              motionType: 'zoom_in' as const,
+              motionType: getMotionForIndex(project.scenes.length + i, project.metadata?.motionRhythm),
               transitionType: 'cross_dissolve' as const,
               transitionDuration: 0.5,
               colorLUT: 'none' as const,
@@ -719,6 +753,41 @@ export const TimelineTrack: React.FC = () => {
     });
   };
 
+  // Split Scene or Audio Clip at Playhead
+  const handleSplit = useCallback(() => {
+    if (selectedAudioClipId) {
+      splitAudioClipAtTime(selectedAudioClipId, currentTime);
+      return;
+    }
+    splitSceneAtTime(currentTime);
+  }, [selectedAudioClipId, splitAudioClipAtTime, currentTime, splitSceneAtTime]);
+
+  // Delete Selected Element (Scene, Audio Clip, or Audio Track)
+  const handleDelete = useCallback(() => {
+    if (selectedAudioClipId) {
+      deleteAudioClip(selectedAudioClipId);
+      setSelectedAudioClipId(null);
+      return;
+    }
+    if (selectedAudioTrack === 'voiceover') {
+      setAudioTrack('', 0);
+      setSelectedAudioTrack(null);
+      return;
+    }
+    if (selectedAudioTrack === 'bgmusic') {
+      setBgMusic('', 0.25, false);
+      setSelectedAudioTrack(null);
+      return;
+    }
+    if (selectedSceneIds.length > 0) {
+      deleteScenes(selectedSceneIds);
+      return;
+    }
+    if (selectedSceneId) {
+      deleteScene(selectedSceneId);
+    }
+  }, [selectedAudioClipId, deleteAudioClip, setSelectedAudioClipId, selectedAudioTrack, setAudioTrack, setSelectedAudioTrack, setBgMusic, selectedSceneIds, deleteScenes, selectedSceneId, deleteScene]);
+
   // -------------------------------------------------------------
   // Professional NLE Keyboard Shortcuts
   // -------------------------------------------------------------
@@ -751,9 +820,34 @@ export const TimelineTrack: React.FC = () => {
       }
       // Delete / Backspace
       else if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedSceneId || selectedAudioClipId || selectedAudioTrack) {
+        if (selectedSceneIds.length > 0 || selectedSceneId || selectedAudioClipId || selectedAudioTrack) {
           e.preventDefault();
           handleDelete();
+        }
+      }
+      // Ctrl+Z: Undo / Ctrl+Y or Ctrl+Shift+Z: Redo
+      else if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        if (e.shiftKey) {
+          if (canRedo) redo();
+        } else {
+          if (canUndo) undo();
+        }
+      }
+      else if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault();
+        if (canRedo) redo();
+      }
+      // Ctrl+A / Cmd+A: Select all scenes
+      else if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault();
+        selectAllScenes();
+      }
+      // Escape: Clear scene selection
+      else if (e.key === 'Escape') {
+        if (selectedSceneIds.length > 0 || selectedSceneId) {
+          e.preventDefault();
+          clearSceneSelection();
         }
       }
       // Ctrl+D: Duplicate Scene
@@ -804,7 +898,7 @@ export const TimelineTrack: React.FC = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isPlaying, currentTime, selectedSceneId, selectedAudioClipId, selectedAudioTrack, totalDuration, project.metadata.fps, snapPoints, setIsPlaying, setCurrentTime]);
+  }, [isPlaying, currentTime, selectedSceneId, selectedSceneIds, selectedAudioClipId, selectedAudioTrack, totalDuration, project.metadata.fps, snapPoints, setIsPlaying, setCurrentTime, selectAllScenes, clearSceneSelection, handleDelete, handleSplit, duplicateScene, undo, redo, canUndo, canRedo]);
 
   // Auto-analyze beats when background music changes
   useEffect(() => {
@@ -813,48 +907,17 @@ export const TimelineTrack: React.FC = () => {
     }
   }, [project.metadata.bgMusicPath, hasA2Content, analyzeProjectBeats]);
 
-  // Split Scene or Audio Clip at Playhead
-  const handleSplit = () => {
-    if (selectedAudioClipId) {
-      splitAudioClipAtTime(selectedAudioClipId, currentTime);
-      return;
-    }
-    splitSceneAtTime(currentTime);
-  };
-
-  // Delete Selected Element (Scene, Audio Clip, or Audio Track)
-  const handleDelete = () => {
-    if (selectedAudioClipId) {
-      deleteAudioClip(selectedAudioClipId);
-      setSelectedAudioClipId(null);
-      return;
-    }
-    if (selectedAudioTrack === 'voiceover') {
-      setAudioTrack('', 0);
-      setSelectedAudioTrack(null);
-      return;
-    }
-    if (selectedAudioTrack === 'bgmusic') {
-      setBgMusic('', 0.25, false);
-      setSelectedAudioTrack(null);
-      return;
-    }
-    if (selectedSceneId) {
-      deleteScene(selectedSceneId);
-    }
-  };
-
   return (
-    <div className="flex flex-col h-72 bg-[#0c0c0e] border-t border-[#26262e] select-none text-xs">
+    <div className="flex flex-col h-72 bg-surface-canvas border-t border-border-subtle select-none text-xs">
       {/* Top Toolbar */}
-      <div className="h-10 px-3 bg-[#141418] border-b border-[#26262e] flex items-center justify-between z-30">
-        {/* Left Actions (Standard Editing Tools + Smart AI Dropdown + Add Track Dropdown) */}
+      <div className="h-10 px-3 bg-surface-panel border-b border-border-subtle flex items-center justify-between z-30">
+        {/* Left Actions (Standard Editing Tools + Smart AI Dropdown + 1-Click Fixers) */}
         <div className="flex items-center gap-2">
           {/* 1. Core Edit Actions */}
-          <div className="flex items-center gap-1 bg-[#1a1a22] p-0.5 rounded-lg border border-[#2c2c38]">
+          <div className="flex items-center gap-1 bg-surface-card p-0.5 rounded-lg border border-border-subtle">
             <button
               onClick={handleSplit}
-              className="px-2.5 py-1 rounded-md hover:bg-[#252532] text-slate-200 hover:text-cyan-300 font-semibold text-xs flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer"
+              className="px-2.5 py-1 rounded-md hover:bg-surface-elevated text-slate-200 hover:text-cyan-300 font-semibold text-xs flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer"
               title="Split selected scene or audio clip at playhead [S]"
             >
               <Scissors className="w-3.5 h-3.5 text-cyan-400" />
@@ -863,17 +926,34 @@ export const TimelineTrack: React.FC = () => {
 
             <button
               onClick={handleDelete}
-              disabled={!selectedSceneId && !selectedAudioClipId && !selectedAudioTrack}
+              disabled={selectedSceneIds.length === 0 && !selectedSceneId && !selectedAudioClipId && !selectedAudioTrack}
               className={`px-2 py-1 rounded-md font-semibold text-xs flex items-center gap-1.5 transition-all active:scale-95 ${
-                selectedSceneId || selectedAudioClipId || selectedAudioTrack
+                selectedSceneIds.length > 1
+                  ? 'bg-rose-950/80 hover:bg-rose-900 border border-rose-600/70 text-rose-200 cursor-pointer shadow-xs'
+                  : selectedSceneIds.length === 1 || selectedSceneId || selectedAudioClipId || selectedAudioTrack
                   ? 'hover:bg-rose-950/50 text-rose-300 cursor-pointer'
                   : 'text-slate-600 cursor-not-allowed opacity-40'
               }`}
-              title="Delete selected scene, clip or audio [Del]"
+              title={
+                selectedSceneIds.length > 1
+                  ? `Delete ${selectedSceneIds.length} selected scenes [Del / Backspace]`
+                  : "Delete selected scene, clip or audio [Del]"
+              }
             >
               <Trash2 className="w-3.5 h-3.5" />
-              <span>Delete</span>
+              <span>{selectedSceneIds.length > 1 ? `Delete (${selectedSceneIds.length})` : 'Delete'}</span>
             </button>
+
+            {selectedSceneIds.length > 1 && (
+              <button
+                onClick={() => clearSceneSelection()}
+                className="px-1.5 py-1 rounded-md hover:bg-surface-elevated text-slate-400 hover:text-slate-200 text-xs flex items-center gap-0.5 transition-all cursor-pointer"
+                title="Clear selection [Esc]"
+              >
+                <X className="w-3 h-3" />
+                <span>Clear</span>
+              </button>
+            )}
 
             <button
               onClick={() => setIsBeatSnapEnabled(!isBeatSnapEnabled)}
@@ -889,14 +969,53 @@ export const TimelineTrack: React.FC = () => {
             </button>
           </div>
 
+          {/* Batch Scene Cleaner Button */}
+          <button
+            onClick={() => setBatchSceneDeleteModalOpen(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-card hover:bg-surface-elevated border border-border-subtle hover:border-cyan-500/50 text-slate-300 hover:text-cyan-300 text-xs font-semibold transition-all cursor-pointer shadow-xs"
+            title="Batch select, clean duplicate fragments, and delete scene ranges"
+          >
+            <Layers className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Batch Clean...</span>
+          </button>
+
+          {/* 1-Click Timeline Fixers for Non-Technical Users */}
+          {timelineAudit.gaps.length > 0 && (
+            <button
+              onClick={() => setGapCheckerModalOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-950/60 hover:bg-amber-900/80 border border-amber-500/50 text-amber-300 text-xs font-semibold animate-pulse transition-all cursor-pointer shadow-sm"
+              title="Timeline gaps detected between scenes. Click to auto-repair."
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+              <span>{timelineAudit.gaps.length} Gap{timelineAudit.gaps.length > 1 ? 's' : ''} (Fix in 1 Click)</span>
+            </button>
+          )}
+
+          {isOutOfOrder && (
+            <button
+              onClick={() => {
+                const res = useProjectStore.getState().autoArrangeExistingScenes();
+                if (res && res.count > 0) {
+                  setArrangeSuccessToast(`✓ Sorted ${res.count} scenes chronologically by timecode!`);
+                  setTimeout(() => setArrangeSuccessToast(null), 4500);
+                }
+              }}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-950/60 hover:bg-indigo-900/80 border border-indigo-500/50 text-indigo-300 text-xs font-semibold transition-all cursor-pointer shadow-sm"
+              title="Scenes are out of chronological order. Click to auto-arrange."
+            >
+              <Clock className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Auto-Arrange Order</span>
+            </button>
+          )}
+
           {/* 2. Unified Smart AI Tools Dropdown */}
           <div className="relative" ref={smartMenuRef}>
             <button
               onClick={() => setIsSmartMenuOpen(!isSmartMenuOpen)}
               className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer shadow-xs ${
                 isOutOfOrder || timelineAudit.gaps.length > 0
-                  ? 'bg-gradient-to-r from-amber-950/60 to-purple-950/60 border-amber-500/50 text-amber-200 animate-pulse'
-                  : 'bg-[#1b1b26] hover:bg-[#242433] border-[#2f2f42] text-purple-300 hover:border-purple-400/50'
+                  ? 'bg-gradient-to-r from-amber-950/60 to-purple-950/60 border-amber-500/50 text-amber-200'
+                  : 'bg-surface-card hover:bg-surface-elevated border-border-subtle text-purple-300 hover:border-purple-400/50'
               }`}
               title="Smart Timeline Automation Tools (Auto-Arrange, Voice Sync, Gap Checker)"
             >
@@ -992,6 +1111,25 @@ export const TimelineTrack: React.FC = () => {
                   </div>
                 </button>
 
+                {/* Batch Scene Cleaner */}
+                <button
+                  onClick={() => {
+                    setIsSmartMenuOpen(false);
+                    setBatchSceneDeleteModalOpen(true);
+                  }}
+                  className="w-full flex items-center gap-2.5 p-2 rounded-lg hover:bg-rose-950/40 text-slate-200 hover:text-rose-300 transition-all text-left cursor-pointer group"
+                >
+                  <div className="w-6 h-6 rounded-md bg-rose-500/20 text-rose-400 flex items-center justify-center">
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-100 group-hover:text-rose-300">
+                      Batch Delete & Clean Scenes
+                    </div>
+                    <div className="text-[10px] text-slate-400">Select range, remove short fragments & error clips</div>
+                  </div>
+                </button>
+
                 {/* Music Beat Sync */}
                 <button
                   onClick={async () => {
@@ -1036,6 +1174,50 @@ export const TimelineTrack: React.FC = () => {
                   <div>
                     <div className="font-semibold text-slate-100 group-hover:text-cyan-300">Auto-Place SFX on Track A3</div>
                     <div className="text-[10px] text-slate-400">Generate whooshes & impacts for transitions</div>
+                  </div>
+                </button>
+
+                {/* Mixed Motion Rhythm: Shorts / Fast YouTube (Alternate Zoom & Pan) */}
+                <button
+                  onClick={() => {
+                    setIsSmartMenuOpen(false);
+                    useProjectStore.getState().applyMotionRhythmToAllScenes('dynamic_alternating', true);
+                    setArrangeSuccessToast('⚡ Applied Mixed Motion (Shorts/YouTube): Alternates Zoom & Left/Right Pan across all clips!');
+                    setTimeout(() => setArrangeSuccessToast(null), 4500);
+                  }}
+                  className="w-full flex items-center gap-2.5 p-2 rounded-lg hover:bg-purple-950/40 text-slate-200 hover:text-purple-300 transition-all text-left cursor-pointer group border-t border-[#262638] pt-2"
+                >
+                  <div className="w-6 h-6 rounded-md bg-purple-500/20 text-purple-400 flex items-center justify-center">
+                    <Zap className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-100 group-hover:text-purple-300 flex items-center gap-1.5">
+                      <span>Mix Motion: Shorts / YouTube</span>
+                      <span className="text-[9px] px-1 py-0.2 rounded bg-purple-500/20 text-purple-300 font-mono">1:1 Alternating</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400">Zoom In ➔ Pan L-to-R ➔ Zoom Out ➔ Pan R-to-L</div>
+                  </div>
+                </button>
+
+                {/* Mixed Motion Rhythm: Documentary / Storytelling Cluster */}
+                <button
+                  onClick={() => {
+                    setIsSmartMenuOpen(false);
+                    useProjectStore.getState().applyMotionRhythmToAllScenes('cinematic_documentary', true);
+                    setArrangeSuccessToast('🎬 Applied Mixed Motion (Documentary Cluster): 2-3 Zooms then Pan across all clips!');
+                    setTimeout(() => setArrangeSuccessToast(null), 4500);
+                  }}
+                  className="w-full flex items-center gap-2.5 p-2 rounded-lg hover:bg-amber-950/40 text-slate-200 hover:text-amber-300 transition-all text-left cursor-pointer group"
+                >
+                  <div className="w-6 h-6 rounded-md bg-amber-500/20 text-amber-400 flex items-center justify-center">
+                    <Film className="w-3.5 h-3.5" />
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-100 group-hover:text-amber-300 flex items-center gap-1.5">
+                      <span>Mix Motion: Documentary</span>
+                      <span className="text-[9px] px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 font-mono">Cluster</span>
+                    </div>
+                    <div className="text-[10px] text-slate-400">2-3 Zooms focus, then wide lateral Pan</div>
                   </div>
                 </button>
 
@@ -1109,6 +1291,18 @@ export const TimelineTrack: React.FC = () => {
                 <button
                   onClick={() => {
                     setIsTrackMenuOpen(false);
+                    setManualTracks((m) => ({ ...m, v2: true }));
+                    useProjectStore.getState().setActiveRibbonTab('stickers');
+                  }}
+                  className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-purple-950/40 text-slate-200 hover:text-purple-300 transition-all text-left cursor-pointer"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                  <span>Animated Stickers & Voice Waves</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setIsTrackMenuOpen(false);
                     if (!isA2Visible) {
                       setManualTracks((m) => ({ ...m, a2: true }));
                     } else {
@@ -1139,12 +1333,18 @@ export const TimelineTrack: React.FC = () => {
                 <button
                   onClick={() => {
                     setIsTrackMenuOpen(false);
-                    setManualTracks((m) => ({ ...m, t1: !m.t1 }));
+                    handleStartSubtitleSync();
                   }}
-                  className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-cyan-950/40 text-slate-200 hover:text-cyan-300 transition-all text-left cursor-pointer"
+                  className="w-full flex items-center justify-between p-2 rounded-lg hover:bg-cyan-950/40 text-slate-200 hover:text-cyan-300 transition-all text-left cursor-pointer group"
                 >
-                  <Type className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Subtitles & Captions Track</span>
+                  <div className="flex items-center gap-2">
+                    <Type className="w-3.5 h-3.5 text-cyan-400 group-hover:scale-110 transition-transform" />
+                    <div>
+                      <div className="text-xs font-semibold">Subtitles & Captions Track</div>
+                      <div className="text-[10px] text-slate-400 group-hover:text-cyan-300">Auto-syncs voice speech to captions</div>
+                    </div>
+                  </div>
+                  <Sparkles className="w-3.5 h-3.5 text-cyan-400 animate-pulse shrink-0" />
                 </button>
 
                 <button
@@ -1197,6 +1397,25 @@ export const TimelineTrack: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Toast Notification Banner (Arrange / Reset / Subtitles Sync) */}
+      {(arrangeSuccessToast || subtitleToast) && (
+        <div className="mx-3 mt-1.5 px-3 py-1.5 rounded-lg bg-cyan-950/95 border border-cyan-500/60 text-cyan-200 text-xs flex items-center justify-between shadow-xl backdrop-blur-md animate-in fade-in slide-in-from-top-1 duration-200 z-40">
+          <div className="flex items-center gap-2 font-medium">
+            <Sparkles className="w-3.5 h-3.5 text-cyan-400 shrink-0 animate-pulse" />
+            <span>{arrangeSuccessToast || subtitleToast}</span>
+          </div>
+          <button 
+            onClick={() => {
+              setArrangeSuccessToast(null);
+              setSubtitleToast(null);
+            }} 
+            className="text-cyan-400 hover:text-white p-0.5 rounded cursor-pointer transition-colors"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Out-of-Order Visual Sequence Alert Banner */}
       {isOutOfOrder && (
@@ -1347,11 +1566,14 @@ export const TimelineTrack: React.FC = () => {
           <div className="flex flex-col gap-1.5 mt-1.5 pb-8 relative">
             {/* TRACK T: Captions / Subtitles (Top Layer) */}
             {isT1Visible && (
-              <div className="flex items-center animate-in fade-in duration-200">
-                <div className="w-20 flex-shrink-0 flex items-center justify-between px-2 text-[10px] font-semibold text-slate-400 sticky left-0 z-20 bg-[#141418] py-1 border-r border-[#26262e]">
+              <div className="flex items-center animate-in fade-in duration-300">
+                <div className="w-20 flex-shrink-0 flex items-center justify-between px-2 text-[10px] font-semibold text-slate-400 sticky left-0 z-20 bg-[#141418] py-1.5 border-r border-[#26262e]">
                   <div className="flex items-center gap-1.5 text-cyan-400 font-bold">
                     <span className="w-4 h-4 rounded bg-cyan-950/90 border border-cyan-500/40 text-[9px] flex items-center justify-center text-cyan-300 font-mono shadow-xs">T</span>
                     <span>Subs</span>
+                    {isTranscribingSubtitles && (
+                      <Loader2 className="w-2.5 h-2.5 text-cyan-400 animate-spin" />
+                    )}
                   </div>
                   <div className="flex items-center gap-0.5">
                     <button
@@ -1360,12 +1582,12 @@ export const TimelineTrack: React.FC = () => {
                         useProjectStore.getState().setCaptionStyle(current === 'none' ? 'documentary' : 'none');
                       }}
                       title={project.metadata.captionStyle === 'none' ? 'Show Subtitles' : 'Hide Subtitles'}
-                      className="p-0.5 rounded text-slate-500 hover:text-cyan-300 hover:bg-[#202028]"
+                      className="p-0.5 rounded text-slate-500 hover:text-cyan-300 hover:bg-[#202028] cursor-pointer"
                     >
                       {project.metadata.captionStyle === 'none' ? (
-                        <EyeOff className="w-2.5 h-2.5 text-slate-500 cursor-pointer" />
+                        <EyeOff className="w-2.5 h-2.5 text-slate-500" />
                       ) : (
-                        <Eye className="w-2.5 h-2.5 text-cyan-400 cursor-pointer" />
+                        <Eye className="w-2.5 h-2.5 text-cyan-400" />
                       )}
                     </button>
                     <button
@@ -1374,34 +1596,152 @@ export const TimelineTrack: React.FC = () => {
                         setManualTracks((m) => ({ ...m, t1: false }));
                       }}
                       title="Disable / Delete Subtitle Track"
-                      className="p-0.5 rounded text-slate-500 hover:text-rose-400 hover:bg-[#202028]"
+                      className="p-0.5 rounded text-slate-500 hover:text-rose-400 hover:bg-[#202028] cursor-pointer"
                     >
                       <Trash2 className="w-2.5 h-2.5" />
                     </button>
                   </div>
                 </div>
 
-                <div 
-                  onClick={() => useProjectStore.getState().setInspectorTab('captions')}
-                  className="flex items-center px-1.5 relative z-10 w-full cursor-pointer group"
-                >
-                  <div
-                    style={{ width: `${totalDuration * timelineZoom}px` }}
-                    className={`h-5 rounded flex items-center justify-between px-2 relative overflow-hidden transition-all ${
-                      project.metadata.captionStyle === 'none'
-                        ? 'bg-slate-900/40 border border-slate-800/40 opacity-50'
-                        : 'bg-cyan-950/40 border border-cyan-800/30 group-hover:border-cyan-500/50'
-                    }`}
-                  >
-                    <span className="text-[9px] text-cyan-300 font-mono truncate">
-                      {project.metadata.captionStyle === 'none'
-                        ? 'SUBTITLES HIDDEN / MUTED'
-                        : `${project.metadata.captionStyle?.toUpperCase() || 'DOCUMENTARY'} Subtitle Sync Track`}
-                    </span>
-                    <span className="text-[8px] font-semibold text-slate-400 group-hover:text-cyan-300">
-                      Click to Edit Styles
-                    </span>
-                  </div>
+                <div className="flex items-center px-1.5 relative z-10 w-full">
+                  {/* STATE 1: ANIMATING / TRANSCRIBING & SYNCING VOICE */}
+                  {isTranscribingSubtitles ? (
+                    <div
+                      style={{ width: `${totalDuration * timelineZoom}px` }}
+                      className="h-6 rounded-md relative overflow-hidden bg-gradient-to-r from-cyan-950/90 via-cyan-900/60 to-cyan-950/90 border border-cyan-500/60 shadow-[0_0_15px_rgba(6,182,212,0.35)] animate-track-glow flex items-center justify-between px-3"
+                    >
+                      {/* Laser scanning beam sweeps across */}
+                      <div className="absolute inset-0 bg-gradient-to-r from-transparent via-cyan-300/40 to-transparent animate-laser-scan pointer-events-none w-1/4 h-full" />
+
+                      {/* Left: Loading spinner + Animated audio wave bars + label */}
+                      <div className="flex items-center gap-2.5 relative z-10">
+                        <Loader2 className="w-3 h-3 text-cyan-300 animate-spin shrink-0" />
+                        
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-bold tracking-wider uppercase text-cyan-200">
+                            Auto-Syncing Subtitles
+                          </span>
+                          <span className="text-[9px] text-cyan-400/90 font-mono hidden sm:inline">
+                            — Acoustic forced-alignment with voiceover in progress...
+                          </span>
+                        </div>
+
+                        {/* Equalizer animation */}
+                        <div className="flex items-end gap-0.5 h-3 ml-1.5">
+                          <span className="w-0.5 bg-cyan-400 rounded-full" style={{ animation: 'eqBar1 0.7s ease-in-out infinite' }} />
+                          <span className="w-0.5 bg-cyan-300 rounded-full" style={{ animation: 'eqBar2 0.5s ease-in-out infinite' }} />
+                          <span className="w-0.5 bg-cyan-400 rounded-full" style={{ animation: 'eqBar3 0.8s ease-in-out infinite' }} />
+                          <span className="w-0.5 bg-cyan-200 rounded-full" style={{ animation: 'eqBar1 0.6s ease-in-out infinite 0.2s' }} />
+                        </div>
+                      </div>
+
+                      <span className="text-[9px] font-mono font-bold text-cyan-300 animate-pulse relative z-10">
+                        Analyzing Audio...
+                      </span>
+                    </div>
+                  ) : hasSubtitles ? (
+                    /* STATE 2: SUBTITLES EXIST — Render individual cues per scene along timeline */
+                    <div
+                      style={{ width: `${totalDuration * timelineZoom}px` }}
+                      className="h-6 relative flex items-center"
+                    >
+                      {/* Baseline track container */}
+                      <div className="absolute inset-0 h-6 rounded-md bg-[#0e121d]/70 border border-[#1e2538]" />
+
+                      {/* Scene Subtitle blocks */}
+                      {project.scenes.map((scene, sIdx) => {
+                        const hasSubs = scene.subtitles && scene.subtitles.length > 0;
+                        const leftPx = scene.startInSeconds * timelineZoom;
+                        const widthPx = Math.max(20, scene.durationInSeconds * timelineZoom);
+                        const subText = hasSubs ? scene.subtitles.map((w) => w.word).join(' ') : '';
+                        const isSelected = selectedSceneId === scene.id;
+
+                        return (
+                          <div
+                            key={`sub-cue-${scene.id || sIdx}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedSceneId(scene.id);
+                              useProjectStore.getState().setInspectorTab('captions');
+                            }}
+                            style={{
+                              left: `${leftPx}px`,
+                              width: `${widthPx}px`,
+                            }}
+                            title={hasSubs ? `"${subText}" (${scene.subtitles.length} words)` : `Scene #${sIdx + 1} (No captions)`}
+                            className={`absolute top-0.5 bottom-0.5 rounded px-1.5 flex items-center justify-between text-[9px] font-medium border transition-all cursor-pointer group/sub overflow-hidden ${
+                              hasSubs
+                                ? isSelected
+                                  ? 'bg-gradient-to-r from-cyan-900/90 to-sky-900/90 border-cyan-400 shadow-[0_0_8px_rgba(6,182,212,0.4)] text-white ring-1 ring-cyan-400'
+                                  : 'bg-gradient-to-r from-cyan-950/80 via-sky-950/70 to-cyan-950/80 border-cyan-700/40 hover:border-cyan-400/80 hover:bg-cyan-900/60 text-cyan-200'
+                                : 'bg-slate-900/20 border-dashed border-slate-800/40 hover:border-slate-700 text-slate-600'
+                            }`}
+                          >
+                            {hasSubs ? (
+                              <>
+                                <div className="flex items-center gap-1 min-w-0 overflow-hidden">
+                                  <Type className="w-2.5 h-2.5 text-cyan-400 shrink-0" />
+                                  <span className="truncate font-sans font-normal text-cyan-100 group-hover/sub:text-white">
+                                    {subText}
+                                  </span>
+                                </div>
+                                <span className="text-[8px] font-mono text-cyan-400/90 shrink-0 ml-1 bg-cyan-950/90 px-1 py-0.2 rounded border border-cyan-800/40">
+                                  {scene.subtitles.length}w
+                                </span>
+                              </>
+                            ) : (
+                              <span className="text-[8px] italic text-slate-600 truncate">
+                                (silent)
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                      {/* Quick Re-Sync Button */}
+                      <div className="absolute right-2 top-0.5 z-20 flex items-center gap-1.5 pointer-events-auto">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleStartSubtitleSync();
+                          }}
+                          title="Re-run voice speech transcription and acoustic alignment"
+                          className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-900/90 hover:bg-cyan-700 text-cyan-200 text-[8px] font-bold border border-cyan-400/50 cursor-pointer shadow-xs active:scale-90 transition-all hover:scale-105"
+                        >
+                          <Mic className="w-2.5 h-2.5" />
+                          <span>Re-Sync Voice</span>
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    /* STATE 3: NO SUBTITLES YET — Interactive Click to Auto-Sync Banner */
+                    <div
+                      style={{ width: `${totalDuration * timelineZoom}px` }}
+                      onClick={() => handleStartSubtitleSync()}
+                      className="h-6 rounded-md relative overflow-hidden bg-cyan-950/20 border border-dashed border-cyan-500/40 hover:border-cyan-400 hover:bg-cyan-950/40 transition-all cursor-pointer flex items-center justify-between px-3 group/empty"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="w-3 h-3 text-cyan-400 group-hover/empty:scale-110 transition-transform" />
+                        <span className="text-[9px] font-semibold text-cyan-300 group-hover/empty:text-cyan-200">
+                          Click to Auto-Sync Subtitles from Voiceover
+                        </span>
+                        <span className="text-[8px] text-slate-400 font-mono">
+                          (AI Acoustic Alignment)
+                        </span>
+                      </div>
+
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleStartSubtitleSync();
+                        }}
+                        className="flex items-center gap-1 px-2 py-0.5 rounded bg-cyan-900/80 hover:bg-cyan-600 text-cyan-100 text-[8px] font-bold border border-cyan-400/50 cursor-pointer shadow-xs active:scale-90 transition-all group-hover/empty:bg-cyan-600"
+                      >
+                        <Mic className="w-2.5 h-2.5" />
+                        <span>Auto Sync Now</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}

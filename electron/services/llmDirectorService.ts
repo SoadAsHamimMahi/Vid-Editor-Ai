@@ -575,7 +575,7 @@ Return ONLY valid JSON matching this schema:
         }
       }
     } else if (model === 'gemini') {
-      const geminiModels = ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-2.5-pro', 'gemini-flash-latest'];
+      const geminiModels = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
       for (const m of geminiModels) {
         try {
           const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey.trim()}`;
@@ -583,21 +583,40 @@ Return ONLY valid JSON matching this schema:
             url,
             {
               contents: [{ role: 'user', parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
-              generationConfig: { responseMimeType: 'application/json', temperature: 0.3 },
+              // NOTE: Do NOT use responseMimeType:'application/json' — it triggers Gemini safety
+              // blocks that return empty candidates with "model output must contain either output
+              // text or tool calls" errors. Plain text mode with manual JSON parsing is stable.
+              generationConfig: { temperature: 0.3, maxOutputTokens: 3000 },
             },
             { timeout: 45000 }
           );
 
-          const raw = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          const candidate = res.data?.candidates?.[0];
+          const finishReason = candidate?.finishReason;
+          if (finishReason && finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
+            console.warn(`[LLMDirectorService] Gemini ${m} blocked: finishReason=${finishReason}`);
+            continue;
+          }
+          const raw = candidate?.content?.parts?.[0]?.text;
           if (raw) {
             const cleanJson = raw.replace(/^```json\s*/im, '').replace(/^```\s*/im, '').replace(/\s*```$/im, '').trim();
-            const parsed = JSON.parse(cleanJson);
-            if (parsed?.scenes && Array.isArray(parsed.scenes)) {
-              return parsed.scenes;
+            try {
+              const parsed = JSON.parse(cleanJson);
+              if (parsed?.scenes && Array.isArray(parsed.scenes) && parsed.scenes.length > 0) {
+                return parsed.scenes;
+              }
+            } catch {
+              const match = cleanJson.match(/\{[\s\S]*\}/);
+              if (match) {
+                const parsed = JSON.parse(match[0]);
+                if (parsed?.scenes && Array.isArray(parsed.scenes) && parsed.scenes.length > 0) {
+                  return parsed.scenes;
+                }
+              }
             }
           }
         } catch (err: any) {
-          console.warn(`[LLMDirectorService] Gemini model ${m} error:`, err.message);
+          console.warn(`[LLMDirectorService] Gemini model ${m} error:`, err.response?.data?.error?.message || err.message);
         }
       }
     } else if (model === 'openai') {
@@ -686,7 +705,7 @@ Return ONLY valid JSON matching this schema:
     }
 
     if (model === 'gemini') {
-      const geminiModels = ['gemini-2.5-flash', 'gemini-3.5-flash', 'gemini-2.5-pro', 'gemini-flash-latest'];
+      const geminiModels = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-2.0-flash-lite', 'gemini-1.5-flash'];
       let lastError: any = null;
 
       for (const m of geminiModels) {
@@ -697,11 +716,19 @@ Return ONLY valid JSON matching this schema:
             url,
             {
               contents: session,
-              generationConfig: { responseMimeType: 'application/json', temperature: 0.3 },
+              // NOTE: Do NOT use responseMimeType:'application/json' — it causes empty-output
+              // errors from Gemini safety filters. Plain text + manual JSON parse is reliable.
+              generationConfig: { temperature: 0.3, maxOutputTokens: 4000 },
             },
             { timeout: 60000 }
           );
-          const raw = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          const candidate = res.data?.candidates?.[0];
+          const finishReason = candidate?.finishReason;
+          if (finishReason && finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
+            console.warn(`[LLMDirectorService] Gemini Stage1 ${m} blocked: finishReason=${finishReason}`);
+            continue;
+          }
+          const raw = candidate?.content?.parts?.[0]?.text;
           if (raw) {
             const bible = this.parseBibleJson(raw, script);
             session.push({ role: 'model', parts: [{ text: raw }] });
@@ -709,6 +736,7 @@ Return ONLY valid JSON matching this schema:
           }
         } catch (err: any) {
           lastError = err;
+          console.warn(`[LLMDirectorService] Gemini Stage1 ${m} error:`, err.response?.data?.error?.message || err.message);
         }
       }
       throw lastError || new Error('Stage 1 failed with Gemini');
@@ -1134,8 +1162,14 @@ Rules:
           },
           { timeout: 25000 }
         );
-        const directed = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (directed && directed.trim()) return directed.trim().replace(/^```[a-z]*\n/i, '').replace(/\n```$/i, '');
+        const candidate = res.data?.candidates?.[0];
+        const finishReason = candidate?.finishReason;
+        if (finishReason && finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
+          console.warn(`[LLMDirectorService] Vocal Director Gemini blocked: finishReason=${finishReason}`);
+        } else {
+          const directed = candidate?.content?.parts?.[0]?.text;
+          if (directed && directed.trim()) return directed.trim().replace(/^```[a-z]*\n/i, '').replace(/\n```$/i, '');
+        }
       } else if (model === 'groq') {
         const url = 'https://api.groq.com/openai/v1/chat/completions';
         const res = await axios.post(

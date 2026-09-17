@@ -31,4 +31,8 @@ __pycache__/
 *.njsproj
 *.sln
 *.sw?
-
+# Temporary & scratch test files & native sync bins
+.cache/
+scratch/
+test-results.json
+bin/

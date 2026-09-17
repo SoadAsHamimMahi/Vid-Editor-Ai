@@ -31,6 +31,7 @@ const electronAPI = {
   enqueueGeneration: (sceneId, prompt, projectId, settings) => ipcRenderer.invoke('cdp:enqueue-generation', sceneId, prompt, projectId, settings),
   batchGenerate: (scenes, projectId, settings) => ipcRenderer.invoke('cdp:batch-generate', scenes, projectId, settings),
   batchGenerateVideos: (scenes, projectId, settings) => ipcRenderer.invoke('cdp:batch-generate-videos', scenes, projectId, settings),
+  batchGenerateWithAgent: (scenes, projectId, settings) => ipcRenderer.invoke('cdp:batch-generate-agent', scenes, projectId, settings),
   applyFlowSettings: (settings) => ipcRenderer.invoke('cdp:apply-settings', settings),
   pullFromCanvas: (scenes, options) => ipcRenderer.invoke('cdp:pull-from-canvas', scenes, options),
   pullVideosFromCanvas: (scenes, options) => ipcRenderer.invoke('cdp:pull-videos-from-canvas', scenes, options),
@@ -38,6 +39,11 @@ const electronAPI = {
   autoRemapCanvasPlacements: (scenes, projectId) => ipcRenderer.invoke('cdp:auto-remap-placements', scenes, projectId),
   setCdpConcurrency: (concurrency) => ipcRenderer.invoke('cdp:set-concurrency', concurrency),
   resetConsumedUrls: (specificUrls) => ipcRenderer.invoke('cdp:reset-consumed', specificUrls),
+  pauseGeneration: () => ipcRenderer.invoke('cdp:pause-generation'),
+  resumeGeneration: () => ipcRenderer.invoke('cdp:resume-generation'),
+  stopGeneration: () => ipcRenderer.invoke('cdp:stop-generation'),
+  isGenerationPaused: () => ipcRenderer.invoke('cdp:is-generation-paused'),
+  batchGenerateProjects: (projectsData) => ipcRenderer.invoke('cdp:batch-generate-projects', projectsData),
   onJobProgress: (callback) => {
     const handler = (_event, data) => callback(data);
     ipcRenderer.on('flow:job-progress', handler);
@@ -70,6 +76,8 @@ const electronAPI = {
   extractDocumentText: (filePath) => ipcRenderer.invoke('doc:extract-text', filePath),
   pickDirectory: () => ipcRenderer.invoke('dialog:pick-directory'),
   readFolderImages: (folderPath) => ipcRenderer.invoke('fs:read-folder-images', folderPath),
+  checkFilesExist: (filePaths) => ipcRenderer.invoke('fs:check-files-exist', filePaths),
+  relinkMediaFolder: (missingPaths, targetFolder) => ipcRenderer.invoke('fs:relink-media-folder', missingPaths, targetFolder),
   getDefaultExportPath: () => ipcRenderer.invoke('dialog:get-default-export-path'),
   getDefaultExportDir: () => ipcRenderer.invoke('dialog:get-default-export-dir'),
   openPath: (targetPath) => ipcRenderer.invoke('shell:open-path', targetPath),
@@ -80,7 +88,8 @@ const electronAPI = {
   getProject: (projectId) => ipcRenderer.invoke('projects:get', projectId),
   createProject: (title, aspectRatio) => ipcRenderer.invoke('projects:create', title, aspectRatio),
   duplicateProject: (projectId) => ipcRenderer.invoke('projects:duplicate', projectId),
-  deleteProject: (projectId) => ipcRenderer.invoke('projects:delete', projectId),
+  deleteProject: (projectId, options) => ipcRenderer.invoke('projects:delete', projectId, options),
+  getProjectStorageStats: (projectId) => ipcRenderer.invoke('projects:storage-stats', projectId),
   renameProject: (projectId, newTitle) => ipcRenderer.invoke('projects:rename', projectId, newTitle),
 
   // Settings Persistence & Key Testing
@@ -100,8 +109,34 @@ const electronAPI = {
   // AI Voice Studio & Text-to-Speech (IndicF5, Chatterbox, Voice Cloning, Neural)
   generateSpeech: (req) => ipcRenderer.invoke('tts:generate', req),
   getVoiceProfiles: () => ipcRenderer.invoke('tts:get-voices'),
+  getVoicePreview: (voiceId) => ipcRenderer.invoke('tts:get-preview', voiceId),
   saveCustomVoice: (profile) => ipcRenderer.invoke('tts:save-custom-voice', profile),
+  generateDesignedVoicePreview: (params) => ipcRenderer.invoke('tts:generate-designed-preview', params),
+  saveDesignedVoice: (profile) => ipcRenderer.invoke('tts:save-designed-voice', profile),
+  generateElevenLabsVoicePreviews: (params) => ipcRenderer.invoke('tts:elevenlabs-design-previews', params),
+  createElevenLabsDesignedVoice: (params) => ipcRenderer.invoke('tts:elevenlabs-create-voice', params),
   deleteCustomVoice: (id) => ipcRenderer.invoke('tts:delete-custom-voice', id),
+
+  // Cloud AI Video (Colab Wan 2.1 / LTX-Video)
+  colabSetTunnelUrl: (url) => ipcRenderer.invoke('colab:set-tunnel-url', url),
+  colabGetTunnelUrl: () => ipcRenderer.invoke('colab:get-tunnel-url'),
+  colabAutoDetectUrl: () => ipcRenderer.invoke('colab:auto-detect-url'),
+  colabTestConnection: (url) => ipcRenderer.invoke('colab:test-connection', url),
+  colabGenerateVideo: (job) => ipcRenderer.invoke('colab:generate-video', job),
+  colabCancelJob: (sceneId) => ipcRenderer.invoke('colab:cancel-job', sceneId),
+  onColabProgress: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('colab:job-progress', handler);
+    return () => ipcRenderer.removeListener('colab:job-progress', handler);
+  },
+
+  // MCP Server for ChatGPT / Claude Desktop
+  mcpGetStatus: () => ipcRenderer.invoke('mcp:get-status'),
+  onMcpProjectUpdated: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('mcp:project-updated', handler);
+    return () => ipcRenderer.removeListener('mcp:project-updated', handler);
+  },
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
@@ -110,9 +145,17 @@ module.exports = { electronAPI };
       try {
         fs.ensureDirSync(path.dirname(preloadCjsPath));
         fs.writeFileSync(preloadCjsPath, cjsCode, 'utf8');
-        console.log('[fix-preload-cjs] Generated 100% valid CommonJS dist-electron/preload.cjs');
+        // Ensure onnxruntime-node native binaries are always present in dist-electron/bin
+        const onnxBinSrc = path.resolve(__dirname, 'node_modules/onnxruntime-node/bin');
+        const onnxBinDist = path.resolve(__dirname, 'dist-electron/bin');
+        const onnxBinRoot = path.resolve(__dirname, 'bin');
+        if (fs.existsSync(onnxBinSrc)) {
+          fs.copySync(onnxBinSrc, onnxBinDist);
+          fs.copySync(onnxBinSrc, onnxBinRoot);
+          console.log('[fix-preload-cjs] Synced onnxruntime-node native binaries to dist-electron/bin and root/bin');
+        }
       } catch (err) {
-        console.error('[fix-preload-cjs] Failed to write preload.cjs:', err);
+        console.error('[fix-preload-cjs] Failed to write preload.cjs or copy onnx binaries:', err);
       }
     }
   };
@@ -143,7 +186,8 @@ export default defineConfig({
                 'ffmpeg-static',
                 'puppeteer-core',
                 'fs-extra',
-                'pdf-parse'
+                'pdf-parse',
+                'onnxruntime-node'
               ]
             }
           }

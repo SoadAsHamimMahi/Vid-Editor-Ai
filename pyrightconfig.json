@@ -1,0 +1,10 @@
+{
+  "exclude": [
+    "colab_video_worker.ipynb"
+  ],
+  "ignore": [
+    "colab_video_worker.ipynb"
+  ],
+  "reportMissingModuleSource": "none",
+  "reportMissingImports": "none"
+}

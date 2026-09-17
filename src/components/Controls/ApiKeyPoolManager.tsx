@@ -27,14 +27,29 @@ export const ApiKeyPoolManager: React.FC<ApiKeyPoolManagerProps> = ({
   const [statuses, setStatuses] = useState<Record<number, KeyStatus>>({});
   const [isTestingAll, setIsTestingAll] = useState<boolean>(false);
 
-  // Sync with prop changes on provider switch or initial load
+  // Sync with prop changes on provider switch or parent keys update
   React.useEffect(() => {
-    if (keys && keys.length > 0) {
-      setInternalKeys(keys);
-    } else {
-      setInternalKeys(['']);
+    setInternalKeys(keys && keys.length > 0 ? keys : ['']);
+    setStatuses({});
+  }, [keys, provider]);
+
+  const getKeyFormatWarning = (val: string) => {
+    const trimmed = val.trim();
+    if (!trimmed) return null;
+    if (provider === 'gemini' && trimmed.startsWith('gsk_')) {
+      return 'This is a Groq key (starts with "gsk_"). Google Gemini keys start with "AIzaSy".';
     }
-  }, [provider]);
+    if (provider === 'groq' && trimmed.startsWith('AIzaSy')) {
+      return 'This is a Google Gemini key (starts with "AIzaSy"). Groq keys start with "gsk_".';
+    }
+    if (provider === 'groq' && trimmed.startsWith('sk-') && !trimmed.startsWith('gsk_')) {
+      return 'This looks like an OpenAI key (starts with "sk-"). Groq keys start with "gsk_".';
+    }
+    if (provider === 'openai' && (trimmed.startsWith('gsk_') || trimmed.startsWith('AIzaSy'))) {
+      return 'OpenAI keys start with "sk-". This key is from another provider.';
+    }
+    return null;
+  };
 
   const updateKeys = (next: string[]) => {
     const safeNext = next.length > 0 ? next : [''];
@@ -363,6 +378,14 @@ export const ApiKeyPoolManager: React.FC<ApiKeyPoolManagerProps> = ({
                       {status.activeModels.slice(0, 2).join(', ')}
                     </span>
                   )}
+                </div>
+              )}
+
+              {/* Format Mismatch Warning */}
+              {getKeyFormatWarning(keyVal) && (
+                <div className="text-[10px] pl-8 pr-2 py-0.5 rounded flex items-center gap-1.5 text-amber-400">
+                  <AlertCircle className="w-3 h-3 flex-shrink-0 text-amber-400" />
+                  <span>{getKeyFormatWarning(keyVal)}</span>
                 </div>
               )}
             </div>

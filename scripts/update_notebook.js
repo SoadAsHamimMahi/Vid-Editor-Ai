@@ -1,0 +1,95 @@
+const fs = require('fs');
+const path = require('path');
+
+const nbPath = path.resolve(__dirname, '..', 'colab_video_worker.ipynb');
+const nb = JSON.parse(fs.readFileSync(nbPath, 'utf8'));
+
+// Update Cell 2
+nb.cells[2].source = [
+  '#@title 2. Install ComfyUI & Fast Dependencies\n',
+  'import os, subprocess, sys\n',
+  '\n',
+  '# Clone ComfyUI if not already in session\n',
+  'if not os.path.exists("/content/ComfyUI"):\n',
+  '    print("📦 Cloning ComfyUI...")\n',
+  '    !git clone --depth 1 https://github.com/comfyanonymous/ComfyUI /content/ComfyUI\n',
+  '\n',
+  '%cd /content/ComfyUI\n',
+  '\n',
+  '# Link models directories to persistent Google Drive so downloads never get lost\n',
+  'print("🔗 Linking model checkpoints, text encoders, and VAEs to your 5 TB Google Drive...")\n',
+  '!rm -rf /content/ComfyUI/models/checkpoints /content/ComfyUI/models/vae /content/ComfyUI/models/clip /content/ComfyUI/models/text_encoders\n',
+  '!ln -s "/content/drive/MyDrive/AiVideoWorker/models/checkpoints" /content/ComfyUI/models/checkpoints\n',
+  '!ln -s "/content/drive/MyDrive/AiVideoWorker/models/vae" /content/ComfyUI/models/vae\n',
+  '!ln -s "/content/drive/MyDrive/AiVideoWorker/models/clip" /content/ComfyUI/models/clip\n',
+  '!ln -s "/content/drive/MyDrive/AiVideoWorker/models/clip" /content/ComfyUI/models/text_encoders\n',
+  '\n',
+  '# Install ComfyUI requirements\n',
+  '!pip install -q torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121\n',
+  '!pip install -q -r requirements.txt\n',
+  '!pip install -q diffusers accelerate safetensors sentencepiece huggingface_hub\n',
+  '\n',
+  '# Install custom nodes for Wan2.1 and LTX-Video if not present\n',
+  '%cd /content/ComfyUI/custom_nodes\n',
+  'if not os.path.exists("ComfyUI-VideoHelperSuite"):\n',
+  '    !git clone --depth 1 https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite\n',
+  '\n',
+  'if not os.path.exists("ComfyUI-WanVideoWrapper"):\n',
+  '    !git clone --depth 1 https://github.com/kijai/ComfyUI-WanVideoWrapper\n',
+  '\n',
+  'if not os.path.exists("ComfyUI-LTXVideo"):\n',
+  '    !git clone --depth 1 https://github.com/city96/ComfyUI-LTXVideo || true\n',
+  '\n',
+  '%cd /content/ComfyUI\n',
+  'print("✅ ComfyUI environment and video extensions ready!")'
+];
+
+// Update Cell 3
+nb.cells[3].source = [
+  '#@title 3. Download AI Video Models (Only downloads ONCE into your 5 TB Drive)\n',
+  'import os\n',
+  '\n',
+  'CHECKPOINTS_DIR = "/content/drive/MyDrive/AiVideoWorker/models/checkpoints"\n',
+  'CLIP_DIR = "/content/drive/MyDrive/AiVideoWorker/models/clip"\n',
+  'VAE_DIR = "/content/drive/MyDrive/AiVideoWorker/models/vae"\n',
+  'os.makedirs(CHECKPOINTS_DIR, exist_ok=True)\n',
+  'os.makedirs(CLIP_DIR, exist_ok=True)\n',
+  'os.makedirs(VAE_DIR, exist_ok=True)\n',
+  '\n',
+  '# 1. Text Encoder: T5-XXL FP8 (Required for LTX-Video and Wan prompt conditioning)\n',
+  't5_path = os.path.join(CLIP_DIR, "t5xxl_fp8_e4m3fn.safetensors")\n',
+  'if not os.path.exists(t5_path):\n',
+  '    print("📥 Downloading T5-XXL FP8 text encoder to Google Drive (~4.8 GB, takes ~20s)...")\n',
+  '    !wget -c -P "{CLIP_DIR}" https://huggingface.co/comfyanonymous/flux_text_encoders/resolve/main/t5xxl_fp8_e4m3fn.safetensors || true\n',
+  'else:\n',
+  '    print("✅ T5-XXL text encoder ready in Google Drive!")\n',
+  '\n',
+  '# 2. Wan 2.1 VAE (Required for Wan 2.1 video decoding)\n',
+  'wan_vae_path = os.path.join(VAE_DIR, "Wan2_1_VAE_fp8.safetensors")\n',
+  'if not os.path.exists(wan_vae_path):\n',
+  '    print("📥 Downloading Wan 2.1 VAE to Google Drive (~330 MB, takes ~2s)...")\n',
+  '    !wget -c -P "{VAE_DIR}" https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan2_1_VAE_fp8.safetensors || true\n',
+  'else:\n',
+  '    print("✅ Wan 2.1 VAE ready in Google Drive!")\n',
+  '\n',
+  '# 3. LTX-Video Checkpoint (2B)\n',
+  'ltx_model_path = os.path.join(CHECKPOINTS_DIR, "ltx-video-2b-v0.9.1.safetensors")\n',
+  'if not os.path.exists(ltx_model_path):\n',
+  '    print("📥 Downloading LTX-Video 0.9.1 checkpoint to your Google Drive...")\n',
+  '    !wget -c -P "{CHECKPOINTS_DIR}" https://huggingface.co/Lightricks/LTX-Video/resolve/main/ltx-video-2b-v0.9.1.safetensors || true\n',
+  'else:\n',
+  '    print("✅ LTX-Video model found in your 5 TB Google Drive!")\n',
+  '\n',
+  '# 4. Wan 2.1 Checkpoint (1.3B)\n',
+  'wan_model_path = os.path.join(CHECKPOINTS_DIR, "wan2.1_i2v_1.3B_fp8.safetensors")\n',
+  'if not os.path.exists(wan_model_path):\n',
+  '    print("📥 Downloading Wan 2.1 1.3B FP8 model to your Google Drive...")\n',
+  '    !wget -c -P "{CHECKPOINTS_DIR}" https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors -O "{wan_model_path}" || true\n',
+  'else:\n',
+  '    print("✅ Wan 2.1 model found in your 5 TB Google Drive!")\n',
+  '\n',
+  'print("🎉 All video models, VAEs, and text encoders ready in your 5 TB Google Drive!")'
+];
+
+fs.writeFileSync(nbPath, JSON.stringify(nb, null, 1), 'utf8');
+console.log('Successfully updated colab_video_worker.ipynb!');

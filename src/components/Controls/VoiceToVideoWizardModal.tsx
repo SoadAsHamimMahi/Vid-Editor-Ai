@@ -53,8 +53,9 @@ export const VoiceToVideoWizardModal: React.FC<VoiceToVideoWizardModalProps> = (
   const [audioDuration, setAudioDuration] = useState<number>(0);
   const [provider, setProvider] = useState<'gemini' | 'groq' | 'openai' | 'local'>('gemini');
   
-  const activeKeyProvider = provider === 'gemini' ? 'gemini' : provider === 'groq' ? 'groq' : provider === 'openai' ? 'openai' : 'gemini';
-  const [apiKeys, setApiKeys] = useState<string[]>(() => globalApiKeys[activeKeyProvider] || ['']);
+  const activeKeyProvider: 'gemini' | 'groq' | 'openai' = 
+    provider === 'groq' ? 'groq' : provider === 'openai' ? 'openai' : 'gemini';
+  const activeKeys = globalApiKeys[activeKeyProvider] || [''];
   const [userScriptInput, setUserScriptInput] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -63,7 +64,7 @@ export const VoiceToVideoWizardModal: React.FC<VoiceToVideoWizardModalProps> = (
   const [generationProgress, setGenerationProgress] = useState<{ completed: number; total: number }>({ completed: 0, total: 0 });
   const [copiedType, setCopiedType] = useState<'timestamps' | 'gemini' | 'prompts' | null>(null);
 
-  const getCombinedApiKey = () => apiKeys.map((k) => k.trim()).filter(Boolean).join(', ');
+  const getCombinedApiKey = () => activeKeys.map((k) => k.trim()).filter(Boolean).join(', ');
 
   useEffect(() => {
     if (isOpen) {
@@ -71,25 +72,9 @@ export const VoiceToVideoWizardModal: React.FC<VoiceToVideoWizardModalProps> = (
     }
   }, [isOpen]);
 
-  // ─── Sync with Global API Key store on open / provider change ───
-  useEffect(() => {
-    if (!isOpen || provider === 'local') return;
-    const prov = provider === 'gemini' ? 'gemini' : provider === 'groq' ? 'groq' : 'openai';
-    const stored = globalApiKeys[prov];
-    if (stored && stored.length > 0) {
-      setApiKeys(stored);
-    } else {
-      loadGlobalApiKeys().then((loaded) => {
-        if (loaded[prov]) setApiKeys(loaded[prov]);
-      });
-    }
-  }, [isOpen, provider, globalApiKeys]);
-
   const handleKeysChange = (nextKeys: string[]) => {
-    setApiKeys(nextKeys);
     if (provider !== 'local') {
-      const prov = provider === 'gemini' ? 'gemini' : provider === 'groq' ? 'groq' : 'openai';
-      saveGlobalApiKeys(prov, nextKeys);
+      saveGlobalApiKeys(activeKeyProvider, nextKeys);
     }
   };
 
@@ -496,8 +481,9 @@ ${transcript}
                 {provider !== 'local' && (
                   <div className="pt-1">
                     <ApiKeyPoolManager
-                      provider={provider as any}
-                      keys={apiKeys}
+                      key={activeKeyProvider}
+                      provider={activeKeyProvider}
+                      keys={activeKeys}
                       onChange={handleKeysChange}
                     />
                   </div>

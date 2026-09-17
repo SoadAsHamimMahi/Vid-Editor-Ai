@@ -319,25 +319,21 @@ export function parsePastedBatch(rawText: string): { timecode: string; prompt: s
       // Strip trailing artifacts like "SCENE #2 (1.0s)PROMPT:" from end of chunk if present
       promptBody = promptBody.replace(/\s*SCENE\s*#?\d+\s*\([^)]*\)\s*PROMPT:\s*$/i, '').trim();
 
-      // Extract narrative sentence from SCENE: or VOICEOVER: or SPEECH:
+      // Extract narrative sentence ONLY from genuine spoken speech tags (VOICEOVER:, SPEECH:, NARRATION:, DIALOGUE:)
+      // Never treat visual description (SCENE:) or camera headers ([WIDE...]) as spoken dialogue!
       let sentence = '';
-      const sceneSentenceMatch =
-        promptBody.match(/SCENE:\s*(?:Visual depiction of:\s*)?([^\n\r]+)/i) ||
-        promptBody.match(/VOICEOVER:\s*([^\n\r]+)/i) ||
-        promptBody.match(/SPEECH:\s*([^\n\r]+)/i);
+      const speechMatch =
+        promptBody.match(/(?:###?\s*(?:[^\w\s#]*\s*)?(?:SPEECH|VOICEOVER|NARRATION|DIALOGUE)[\s\S]*?>\s*["“]?([^"”\n\r]+)["”]?)|\b(?:VOICEOVER|SPEECH|NARRATION|DIALOGUE):\s*["“]?([^"”\n\r]+)["”]?/i);
 
-      if (sceneSentenceMatch) {
-        sentence = sceneSentenceMatch[1].trim();
-      } else {
-        const firstLine = promptBody.split(/\r?\n/)[0].trim();
-        sentence = firstLine.length > 80 ? firstLine.slice(0, 77) + '...' : firstLine;
+      if (speechMatch) {
+        sentence = (speechMatch[1] || speechMatch[2] || '').trim();
       }
 
       const fullPrompt = `${current.timecode} ${promptBody}`;
       results.push({
         timecode: current.timecode,
         prompt: fullPrompt,
-        sentence: sentence || `Scene ${current.timecode}`,
+        sentence,
       });
     }
 
@@ -379,20 +375,54 @@ export function parsePastedBatch(rawText: string): { timecode: string; prompt: s
       results.push({
         timecode,
         prompt: fullPrompt,
-        sentence: sentence || `Scene ${timecode}`,
+        sentence,
       });
     }
 
     return results;
   }
 
-  // Generic block fallback
-  const rawChunks = trimmed.split(/(?:\n\s*---\s*\n)|\n\s*\n\s*\n/).map((c) => c.trim()).filter(Boolean);
-  return rawChunks.map((chunk, idx) => {
+  // 4. Priority 4: Check for numbered list / scenes format (e.g. "Scene 1: ...", "1. ...", "Beat 1 - ...")
+  const numberedSceneRegex = /(?:^|\n)\s*(?:(?:Scene|Beat|Shot)\s*(\d+)[:\-\.\s]+|(\d+)[\.\)]\s+)([^\n\r]+(?:\n(?!\s*(?:(?:Scene|Beat|Shot)\s*\d+|\d+[\.\)]|\n))[^\n\r]+)*)/gi;
+  const numberedMatches = Array.from(trimmed.matchAll(numberedSceneRegex));
+
+  if (numberedMatches.length >= 2) {
+    return numberedMatches.map((m, idx) => {
+      const sceneNum = parseInt(m[1] || m[2] || `${idx + 1}`, 10);
+      const content = (m[3] || '').trim();
+      const tcMatch = content.match(/#\d+[-_:]\d{2}/);
+      const timecode = tcMatch ? tcMatch[0].replace(/[:_]/g, '-') : formatSecondsToTimecode(idx * 3.5);
+
+      // Extract spoken speech portion if present
+      let sentence = '';
+      const speechMatch = content.match(/\b(?:VOICEOVER|SPEECH|NARRATION|DIALOGUE|LINE):\s*["“]?([^"”\n\r]+)["”]?/i);
+      if (speechMatch) {
+        sentence = speechMatch[1].trim();
+      } else {
+        const firstLine = content.split(/\r?\n/)[0].trim();
+        sentence = firstLine.length > 80 ? firstLine.slice(0, 77) + '...' : firstLine;
+      }
+
+      const fullPrompt = content.startsWith(timecode) ? content : `${timecode} ${content}`;
+      return {
+        timecode,
+        prompt: fullPrompt,
+        sentence: sentence || `Scene ${sceneNum}`,
+      };
+    });
+  }
+
+  // 5. Line-by-line or Paragraph-by-paragraph fallback
+  const rawParagraphs = trimmed.split(/(?:\n\s*---\s*\n)|\n\s*\n+/).map((c) => c.trim()).filter(Boolean);
+  const candidateChunks = rawParagraphs.length >= 2 
+    ? rawParagraphs 
+    : trimmed.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 15);
+
+  return candidateChunks.map((chunk, idx) => {
     const tcMatch = chunk.match(/#\d+[-_:]\d{2}/);
-    const timecode = tcMatch ? tcMatch[0].replace(/[:_]/g, '-') : formatSecondsToTimecode(idx * 4);
-    const lines = chunk.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const sentence = lines[0] || `Scene ${timecode}`;
+    const timecode = tcMatch ? tcMatch[0].replace(/[:_]/g, '-') : formatSecondsToTimecode(idx * 3.5);
+    const speechMatch = chunk.match(/\b(?:VOICEOVER|SPEECH|NARRATION|DIALOGUE):\s*["“]?([^"”\n\r]+)["”]?/i);
+    const sentence = speechMatch ? speechMatch[1].trim() : (chunk.length > 80 ? chunk.slice(0, 77) + '...' : chunk);
     const fullPrompt = chunk.startsWith(timecode) ? chunk : `${timecode} ${chunk}`;
 
     return {
@@ -401,6 +431,195 @@ export function parsePastedBatch(rawText: string): { timecode: string; prompt: s
       sentence,
     };
   });
+}
+
+export interface AuditedSceneItem {
+  index: number;
+  timecode: string;
+  startTime: number;
+  duration: number;
+  endTime: number;
+  sentence: string;
+  prompt: string;
+  status: 'valid' | 'gap_healed' | 'overlap_fixed' | 'duplicate';
+  statusMessage?: string;
+}
+
+export interface PromptAuditReport {
+  items: AuditedSceneItem[];
+  totalScenes: number;
+  totalDuration: number;
+  detectedFormat: 'hash_timecodes' | 'timestamp_ranges' | 'markdown_blocks' | 'numbered_list' | 'freeform_blocks';
+  gapsCount: number;
+  overlapsCount: number;
+  duplicatesCount: number;
+  isContinuous: boolean;
+}
+
+/**
+ * Performs a comprehensive pre-placement audit on a raw pasted prompt batch.
+ * Accurately models timeline slots, detects and heals sequence gaps, and resolves overlaps.
+ */
+export function auditPromptBatch(
+  rawText: string,
+  options?: {
+    totalAudioDuration?: number;
+    fps?: number;
+    defaultDuration?: number;
+    strategy?: 'timecodes' | 'sync_voiceover' | 'even_spread';
+  }
+): PromptAuditReport {
+  const defaultDuration = options?.defaultDuration || 3.5;
+  const parsed = parsePastedBatch(rawText);
+  if (parsed.length === 0) {
+    return {
+      items: [],
+      totalScenes: 0,
+      totalDuration: 0,
+      detectedFormat: 'freeform_blocks',
+      gapsCount: 0,
+      overlapsCount: 0,
+      duplicatesCount: 0,
+      isContinuous: true,
+    };
+  }
+
+  // Detect format
+  let detectedFormat: PromptAuditReport['detectedFormat'] = 'freeform_blocks';
+  if (/(?:^|\s)#\d+[-_:]\d{1,2}/.test(rawText)) {
+    detectedFormat = 'hash_timecodes';
+  } else if (/\[\s*\d+[-_:]\d{1,2}/.test(rawText)) {
+    detectedFormat = 'timestamp_ranges';
+  } else if (/##\s*(?:VISUAL|BEAT|SCENE)/i.test(rawText)) {
+    detectedFormat = 'markdown_blocks';
+  } else if (/(?:^|\n)\s*(?:Scene|Beat|Shot|\d+[\.\)])/i.test(rawText)) {
+    detectedFormat = 'numbered_list';
+  }
+
+  const strategy = options?.strategy || 'timecodes';
+  const audioDur = options?.totalAudioDuration && options.totalAudioDuration > 0 ? options.totalAudioDuration : undefined;
+
+  let gapsCount = 0;
+  let overlapsCount = 0;
+  let duplicatesCount = 0;
+  const items: AuditedSceneItem[] = [];
+
+  if (strategy === 'even_spread' && audioDur) {
+    // Strategy: Evenly spread across total audio duration
+    const perScene = +(audioDur / parsed.length).toFixed(3);
+    parsed.forEach((p, idx) => {
+      const startTime = +(idx * perScene).toFixed(3);
+      const isLast = idx === parsed.length - 1;
+      const duration = isLast ? +(audioDur - startTime).toFixed(3) : perScene;
+      items.push({
+        index: idx + 1,
+        timecode: formatSecondsToTimecode(startTime, true),
+        startTime,
+        duration: Math.max(0.5, duration),
+        endTime: +(startTime + Math.max(0.5, duration)).toFixed(3),
+        sentence: p.sentence || `Scene ${idx + 1}`,
+        prompt: p.prompt,
+        status: 'valid',
+        statusMessage: 'Evenly distributed across audio',
+      });
+    });
+  } else {
+    // Strategy: Timecode Sequence with auto-gap closure
+    const seenTimes = new Set<number>();
+
+    // Initial pass: extract raw timestamps
+    const rawItems = parsed.map((p, idx) => {
+      const rawSecs = parseTimecodeToSeconds(p.timecode);
+      return {
+        idx,
+        timecode: p.timecode,
+        rawSecs,
+        sentence: p.sentence || `Scene ${idx + 1}`,
+        prompt: p.prompt,
+      };
+    });
+
+    // Sort chronologically if timecoded, preserve order if untimed
+    if (detectedFormat === 'hash_timecodes' || detectedFormat === 'timestamp_ranges') {
+      rawItems.sort((a, b) => a.rawSecs - b.rawSecs);
+    }
+
+    let cursor = 0;
+    for (let i = 0; i < rawItems.length; i++) {
+      const cur = rawItems[i];
+      const next = rawItems[i + 1];
+
+      let startTime = cur.rawSecs;
+      let status: AuditedSceneItem['status'] = 'valid';
+      let statusMessage: string | undefined = undefined;
+
+      if (seenTimes.has(startTime)) {
+        duplicatesCount++;
+        status = 'duplicate';
+        startTime = cursor;
+        statusMessage = 'Duplicate timestamp adjusted to next slot';
+      }
+      seenTimes.add(startTime);
+
+      // Check gap from cursor
+      if (startTime > cursor + 0.5 && cursor > 0) {
+        gapsCount++;
+        status = 'gap_healed';
+        statusMessage = `Gap of ${(startTime - cursor).toFixed(1)}s auto-extended`;
+        // Extend previous scene to close gap
+        if (items.length > 0) {
+          const prev = items[items.length - 1];
+          prev.duration = +(startTime - prev.startTime).toFixed(3);
+          prev.endTime = startTime;
+        }
+      } else if (startTime < cursor && cursor > 0) {
+        overlapsCount++;
+        status = 'overlap_fixed';
+        statusMessage = `Overlap fixed; aligned to ${cursor.toFixed(2)}s`;
+        startTime = cursor;
+      }
+
+      // Calculate duration
+      let dur = defaultDuration;
+      if (next) {
+        const nextStart = next.rawSecs;
+        if (nextStart > startTime) {
+          dur = +(nextStart - startTime).toFixed(3);
+        }
+      } else if (audioDur && audioDur > startTime) {
+        dur = +(audioDur - startTime).toFixed(3);
+      }
+
+      const clampedDur = Math.max(1.0, dur);
+      const endTime = +(startTime + clampedDur).toFixed(3);
+      cursor = endTime;
+
+      items.push({
+        index: i + 1,
+        timecode: cur.timecode || formatSecondsToTimecode(startTime),
+        startTime,
+        duration: clampedDur,
+        endTime,
+        sentence: cur.sentence,
+        prompt: cur.prompt,
+        status,
+        statusMessage,
+      });
+    }
+  }
+
+  const totalDuration = items.length > 0 ? items[items.length - 1].endTime : 0;
+
+  return {
+    items,
+    totalScenes: items.length,
+    totalDuration,
+    detectedFormat,
+    gapsCount,
+    overlapsCount,
+    duplicatesCount,
+    isContinuous: gapsCount === 0 && overlapsCount === 0,
+  };
 }
 
 /**
@@ -565,11 +784,6 @@ export function manifestToTimelineScenes(
     }
 
     const snappedDuration = Math.max(0.3, Math.round(dur * fps) / fps);
-    const words = (entry.sentence || '').split(/\s+/).filter(Boolean);
-    const totalWords = words.length || 1;
-    
-    // Natural human reading cadence (0.24s to 0.45s per word)
-    const wordDur = Math.max(0.24, snappedDuration / totalWords);
     const cleanTc = entry.timecode.replace('#', '').replace(/[:\\/\*\?"<>\|]/g, '-');
     const defaultSceneId = `scene-manifest-${cleanTc}-${idx}`;
 
@@ -584,11 +798,13 @@ export function manifestToTimelineScenes(
 
     const isPromptUnchanged = Boolean(existing && existing.prompt.trim() === entry.prompt.trim());
 
-    // 2. Preserve matching image ONLY if the prompt text is unchanged
-    let matchedLocalPath = isPromptUnchanged ? existing?.localImagePath : undefined;
-    let matchedImageUrl = isPromptUnchanged ? existing?.imageUrl : undefined;
+    // 2. Preserve matching image/video even if prompt text was tweaked/updated
+    let matchedLocalPath = existing?.localImagePath;
+    let matchedImageUrl = existing?.imageUrl;
+    let matchedLocalVideoPath = existing?.localVideoPath;
+    let matchedVideoUrl = existing?.videoUrl;
 
-    if (!matchedLocalPath && isPromptUnchanged && mediaAssets.length > 0) {
+    if (!matchedLocalPath && mediaAssets.length > 0) {
       const matchedAsset = mediaAssets.find((a) => {
         const p = a.path || '';
         return (
@@ -606,12 +822,56 @@ export function manifestToTimelineScenes(
       }
     }
 
-    const hasGeneratedImage = Boolean(matchedLocalPath || matchedImageUrl);
+    const hasGeneratedImage = Boolean(matchedLocalPath || matchedImageUrl || matchedLocalVideoPath || matchedVideoUrl);
 
     const defaultMotion: MotionType = snappedDuration < 1.5 ? 'static' : motionCycle[idx % motionCycle.length];
     const resolvedMotion: MotionType = (snappedDuration >= 1.5 && existing?.motionType && existing.motionType !== 'dolly_zoom' && existing.motionType !== 'static' && existing.motionType !== 'handheld_drift')
       ? existing.motionType
       : defaultMotion;
+
+    // 3. Subtitles handling: NEVER generate subtitles from prompt names, camera headers, or brackets
+    const isCameraDirective = (text: string) => {
+      if (!text) return true;
+      const t = text.trim().toUpperCase();
+      return (
+        t.startsWith('[') ||
+        t.includes('ESTABLISHING') ||
+        t.includes('PORTRAIT') ||
+        t.includes('CLOSE-UP') ||
+        t.includes('WIDE SHOT') ||
+        t.includes('CINEMATIC') ||
+        t.includes('SCENE #') ||
+        t.startsWith('#')
+      );
+    };
+
+    const hasPoisonedSubtitles = Boolean(
+      existing?.subtitles &&
+      existing.subtitles.some((s) => isCameraDirective(s.word) || s.word.startsWith('['))
+    );
+
+    const validExistingSubtitles = (!hasPoisonedSubtitles && existing?.subtitles && existing.subtitles.length > 0)
+      ? existing.subtitles
+      : [];
+
+    let finalSubtitles = validExistingSubtitles;
+
+    if (finalSubtitles.length === 0 && entry.sentence && !isCameraDirective(entry.sentence)) {
+      const words = entry.sentence.split(/\s+/).filter(Boolean);
+      if (words.length > 0) {
+        const totalWords = words.length;
+        const wordDur = Math.max(0.24, snappedDuration / totalWords);
+        finalSubtitles = words.map((w, wIdx) => {
+          const wStart = Math.min(startTime + snappedDuration - 0.1, startTime + wIdx * wordDur);
+          const wEnd = Math.min(startTime + snappedDuration, wStart + wordDur * 0.95);
+          return {
+            word: w,
+            start: Math.round(wStart * fps) / fps,
+            end: Math.round(wEnd * fps) / fps,
+          };
+        });
+      }
+    }
 
     return {
       id: existing?.id || defaultSceneId,
@@ -621,7 +881,10 @@ export function manifestToTimelineScenes(
       prompt: entry.prompt,
       imageUrl: matchedImageUrl,
       localImagePath: matchedLocalPath,
-      status: (hasGeneratedImage && isPromptUnchanged) ? 'ready' : 'pending',
+      localVideoPath: matchedLocalVideoPath,
+      videoUrl: matchedVideoUrl,
+      mediaType: matchedLocalVideoPath || matchedVideoUrl ? 'video' : (existing?.mediaType || 'image'),
+      status: hasGeneratedImage ? 'ready' : (existing?.status || 'pending'),
       motionType: resolvedMotion,
       motionIntensity: existing?.motionIntensity ?? 1.0,
       transitionType: existing?.transitionType || 'cross_dissolve',
@@ -635,15 +898,7 @@ export function manifestToTimelineScenes(
         filmGrain: 0,
       },
       colorLUT: existing?.colorLUT,
-      subtitles: words.map((w, wIdx) => {
-        const wStart = Math.min(startTime + snappedDuration - 0.1, startTime + wIdx * wordDur);
-        const wEnd = Math.min(startTime + snappedDuration, wStart + wordDur * 0.95);
-        return {
-          word: w,
-          start: Math.round(wStart * fps) / fps,
-          end: Math.round(wEnd * fps) / fps,
-        };
-      }),
+      subtitles: finalSubtitles,
     };
   });
 }

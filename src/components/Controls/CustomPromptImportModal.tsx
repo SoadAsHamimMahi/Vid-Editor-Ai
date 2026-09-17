@@ -21,7 +21,15 @@ import {
   Copy
 } from 'lucide-react';
 import { useProjectStore } from '../../store/useProjectStore';
-import { getImportStatus, parseTimecodeToSeconds, analyzePromptTextStructure } from '../../utils/promptManifestManager';
+import { 
+  getImportStatus, 
+  parseTimecodeToSeconds, 
+  formatSecondsToTimecode,
+  analyzePromptTextStructure,
+  auditPromptBatch,
+  PromptAuditReport,
+  AuditedSceneItem
+} from '../../utils/promptManifestManager';
 import { PromptEntry } from '../../types';
 
 interface CustomPromptImportModalProps {
@@ -51,9 +59,21 @@ export const CustomPromptImportModal: React.FC<CustomPromptImportModalProps> = (
   const [isSendingToFlow, setIsSendingToFlow] = useState(false);
   const [selectedEntryTc, setSelectedEntryTc] = useState<string | null>(null);
   const [autoUpdateTimeline, setAutoUpdateTimeline] = useState<boolean>(true);
+  const [activeRightTab, setActiveRightTab] = useState<'manifest' | 'pre_placement_audit'>('pre_placement_audit');
+  const [auditStrategy, setAuditStrategy] = useState<'timecodes' | 'sync_voiceover' | 'even_spread'>('timecodes');
 
   const manifest = project.metadata.promptManifest;
   const status = useMemo(() => getImportStatus(manifest), [manifest]);
+
+  // Live pre-placement audit calculated whenever rawText or auditStrategy changes
+  const auditReport: PromptAuditReport = useMemo(() => {
+    return auditPromptBatch(rawText, {
+      totalAudioDuration: project.metadata.audioDuration || 0,
+      fps: project.metadata.fps || 30,
+      defaultDuration: 3.5,
+      strategy: auditStrategy,
+    });
+  }, [rawText, auditStrategy, project.metadata.audioDuration, project.metadata.fps]);
 
   if (!isOpen) return null;
 
@@ -249,146 +269,298 @@ export const CustomPromptImportModal: React.FC<CustomPromptImportModalProps> = (
             </div>
           </div>
 
-          {/* Right Column: Accumulated Manifest Viewer & Gap Detector */}
+          {/* Right Column: Pre-Placement Audit & Accumulated Manifest Hub */}
           <div className="w-full md:w-7/12 flex flex-col gap-3">
-            {/* Manifest Top Header Bar */}
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Layers className="w-4 h-4 text-cyan-400" />
-                <span className="text-xs font-bold text-slate-200">
-                  Accumulated Manifest Storyboard
-                </span>
+            {/* Top Navigation Tabs & Header */}
+            <div className="flex items-center justify-between border-b border-[#222234] pb-2">
+              <div className="flex items-center gap-1.5 p-0.5 bg-[#0e0e16] border border-[#26263a] rounded-lg">
+                <button
+                  type="button"
+                  onClick={() => setActiveRightTab('pre_placement_audit')}
+                  className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    activeRightTab === 'pre_placement_audit'
+                      ? 'bg-purple-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                  <span>Interactive Pre-Placement Audit</span>
+                  {auditReport.items.length > 0 && (
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/40 text-amber-200">
+                      {auditReport.items.length}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveRightTab('manifest')}
+                  className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                    activeRightTab === 'manifest'
+                      ? 'bg-purple-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Accumulated Manifest ({status.totalImported})</span>
+                </button>
               </div>
 
-              {status.totalImported > 0 && (
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-studio-900 text-slate-400 border border-studio-800">
-                    {status.totalImported} Total Prompts
-                  </span>
-                  <button
-                    onClick={clearPromptManifest}
-                    className="text-[11px] text-rose-400 hover:text-rose-300 p-1 hover:bg-rose-950/40 rounded transition-colors flex items-center gap-1"
-                    title="Clear All Manifest Prompts"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                    <span>Clear All</span>
-                  </button>
-                </div>
+              {activeRightTab === 'manifest' && status.totalImported > 0 && (
+                <button
+                  onClick={clearPromptManifest}
+                  className="text-[11px] text-rose-400 hover:text-rose-300 p-1 hover:bg-rose-950/40 rounded transition-colors flex items-center gap-1 cursor-pointer"
+                  title="Clear All Manifest Prompts"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>Clear All</span>
+                </button>
               )}
             </div>
 
-            {/* Sequence Gap Warnings Banner */}
-            {status.gaps.length > 0 && (
-              <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 space-y-2 animate-fadeIn shadow-md">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-amber-300 text-xs font-bold">
-                    <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
-                    <span>Sequence Gap Alert ({status.gaps.length} potential missing batches)</span>
+            {/* TAB 1: INTERACTIVE PRE-PLACEMENT AUDIT */}
+            {activeRightTab === 'pre_placement_audit' && (
+              <div className="flex-1 flex flex-col gap-2.5 overflow-hidden">
+                {/* Allocation Strategy Selector & Diagnostics */}
+                <div className="p-2.5 rounded-xl bg-[#12121e] border border-[#252538] flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-bold text-slate-300">Allocation Strategy:</span>
+                    <div className="inline-flex rounded-lg border border-[#2a2a40] bg-[#0c0c14] p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => setAuditStrategy('timecodes')}
+                        className={`px-2 py-1 rounded text-[11px] font-semibold transition-all cursor-pointer ${
+                          auditStrategy === 'timecodes' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Align clips precisely according to #M-SS timestamps with auto gap healing"
+                      >
+                        Timecode Sequence
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAuditStrategy('even_spread')}
+                        className={`px-2 py-1 rounded text-[11px] font-semibold transition-all cursor-pointer ${
+                          auditStrategy === 'even_spread' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                        title="Evenly distribute scene durations across total audio length"
+                      >
+                        Even Distribution
+                      </button>
+                    </div>
                   </div>
 
-                  <button
-                    onClick={() => {
-                      onClose();
-                      setGapCheckerModalOpen(true);
-                    }}
-                    className="px-2.5 py-1 bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/40 rounded text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1"
-                  >
-                    <span>Inspect & Fix Gaps</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </button>
+                  {/* Audit Diagnostic Badges */}
+                  <div className="flex items-center gap-1.5 font-mono text-[11px]">
+                    {auditReport.isContinuous ? (
+                      <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center gap-1 font-semibold">
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        <span>Continuous (No Gaps)</span>
+                      </span>
+                    ) : (
+                      <>
+                        {auditReport.gapsCount > 0 && (
+                          <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1">
+                            <span>⚠️ {auditReport.gapsCount} Gaps Auto-Closed</span>
+                          </span>
+                        )}
+                        {auditReport.overlapsCount > 0 && (
+                          <span className="px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/40 flex items-center gap-1">
+                            <span>⚡ {auditReport.overlapsCount} Overlaps Fixed</span>
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </div>
                 </div>
-                <div className="space-y-1 pl-6">
-                  {status.gaps.map((gap, gIdx) => (
-                    <div key={gIdx} className="text-[11px] text-amber-200/90 font-mono">
-                      {gap.message}
-                    </div>
-                  ))}
-                </div>
+
+                {/* Audit Items Table */}
+                {auditReport.items.length === 0 ? (
+                  <div className="flex-1 min-h-[300px] border border-dashed border-[#26263a] rounded-xl flex flex-col items-center justify-center p-8 text-center text-slate-500 gap-2 bg-[#0d0d14]">
+                    <Bot className="w-9 h-9 text-slate-600" />
+                    <p className="text-xs font-semibold text-slate-300">No Prompts Pasted for Audit</p>
+                    <p className="text-[11px] max-w-sm text-slate-500">
+                      Paste prompts into the box on the left. The live audit table will instantly verify start times, durations, gap health, and scene consistency.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex-1 min-h-[300px] overflow-y-auto bg-[#0e0e14] border border-[#232334] rounded-xl max-h-[440px] shadow-inner">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead className="sticky top-0 bg-[#161622] border-b border-[#252538] text-slate-400 font-mono text-[10px] uppercase tracking-wider z-10">
+                        <tr>
+                          <th className="py-2.5 px-3">#</th>
+                          <th className="py-2.5 px-3">Start Time</th>
+                          <th className="py-2.5 px-3">Duration</th>
+                          <th className="py-2.5 px-3">Narration / Sentence</th>
+                          <th className="py-2.5 px-3">Visual Prompt</th>
+                          <th className="py-2.5 px-3">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#1e1e2d] text-slate-300">
+                        {auditReport.items.map((item) => (
+                          <tr key={item.index} className="hover:bg-[#141420] transition-colors">
+                            <td className="py-2 px-3 font-mono font-bold text-slate-400">
+                              {item.index}
+                            </td>
+                            <td className="py-2 px-3 font-mono text-cyan-300 font-semibold whitespace-nowrap">
+                              {formatSecondsToTimecode(item.startTime, true)}
+                            </td>
+                            <td className="py-2 px-3 font-mono text-indigo-300 whitespace-nowrap">
+                              {item.duration.toFixed(2)}s
+                            </td>
+                            <td className="py-2 px-3 text-slate-300 max-w-[150px] truncate" title={item.sentence}>
+                              {item.sentence}
+                            </td>
+                            <td className="py-2 px-3 text-slate-400 max-w-[200px] truncate font-mono text-[11px]" title={item.prompt}>
+                              {item.prompt}
+                            </td>
+                            <td className="py-2 px-3 whitespace-nowrap">
+                              {item.status === 'valid' && (
+                                <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-semibold border border-emerald-500/40">
+                                  ✓ Valid
+                                </span>
+                              )}
+                              {item.status === 'gap_healed' && (
+                                <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-semibold border border-amber-500/40" title={item.statusMessage}>
+                                  ⚠️ Gap Closed
+                                </span>
+                              )}
+                              {item.status === 'overlap_fixed' && (
+                                <span className="px-2 py-0.5 rounded bg-sky-500/20 text-sky-300 text-[10px] font-semibold border border-sky-500/40" title={item.statusMessage}>
+                                  ⚡ Overlap Fixed
+                                </span>
+                              )}
+                              {item.status === 'duplicate' && (
+                                <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[10px] font-semibold border border-rose-500/40" title={item.statusMessage}>
+                                  Duplicate
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
             )}
 
-            {/* Manifest Entries List View */}
-            {status.totalImported === 0 ? (
-              <div className="flex-1 min-h-[300px] border border-dashed border-[#26263a] rounded-xl flex flex-col items-center justify-center p-8 text-center text-slate-500 gap-2 bg-[#0d0d14]">
-                <Bot className="w-9 h-9 text-slate-600" />
-                <p className="text-xs font-semibold text-slate-300">Manifest is Empty</p>
-                <p className="text-[11px] max-w-sm text-slate-500">
-                  Paste prompts on the left in batches of 20-30. All prompts accumulate chronologically here by their #0-00 timecode.
-                </p>
-              </div>
-            ) : (
-              <div className="flex-1 min-h-[300px] overflow-y-auto space-y-2 p-2 bg-[#0e0e14] border border-[#232334] rounded-xl max-h-[460px] shadow-inner">
-                {status.sortedEntries.map((entry, idx) => {
-                  const isSelected = selectedEntryTc === entry.timecode;
-                  return (
-                    <div
-                      key={entry.timecode}
-                      onClick={() => setSelectedEntryTc(isSelected ? null : entry.timecode)}
-                      className={`p-3 rounded-xl border transition-all cursor-pointer ${
-                        isSelected
-                          ? 'bg-[#181828] border-purple-500/70 shadow-md'
-                          : 'bg-[#14141e] border-[#222232] hover:border-[#35354a]'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between mb-1.5">
-                        <div className="flex items-center gap-2">
-                          <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-mono font-bold text-xs border border-cyan-500/40">
-                            {entry.timecode}
-                          </span>
-                          <span className="text-[10px] font-mono text-slate-400">
-                            #{idx + 1}
-                          </span>
-                          {entry.status === 'sent_to_flow' ? (
-                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono">
-                              ⚡ Sent to Flow
-                            </span>
-                          ) : entry.status === 'image_completed' ? (
-                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono">
-                              ✓ Image Ready
-                            </span>
-                          ) : (
-                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono">
-                              📥 Imported
-                            </span>
-                          )}
-                        </div>
-
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            removePromptFromManifest(entry.timecode);
-                          }}
-                          className="p-1 hover:bg-rose-950/60 text-slate-500 hover:text-rose-400 rounded transition-colors"
-                          title="Remove Entry"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+            {/* TAB 2: ACCUMULATED MANIFEST */}
+            {activeRightTab === 'manifest' && (
+              <div className="flex-1 flex flex-col gap-2.5 overflow-hidden">
+                {/* Sequence Gap Warnings Banner */}
+                {status.gaps.length > 0 && (
+                  <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 space-y-2 animate-fadeIn shadow-md">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-amber-300 text-xs font-bold">
+                        <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                        <span>Sequence Gap Alert ({status.gaps.length} potential missing batches)</span>
                       </div>
 
-                      {/* Sentence preview */}
-                      <p className="text-xs text-slate-200 font-medium line-clamp-1 mb-1">
-                        {entry.sentence || `Scene ${entry.timecode}`}
-                      </p>
-
-                      {/* Prompt preview */}
-                      <p className="text-[11px] text-slate-400 font-mono bg-[#0a0a0f] p-2 rounded-lg border border-[#1b1b26] line-clamp-2 leading-relaxed">
-                        {entry.prompt}
-                      </p>
-
-                      {/* Expanded View */}
-                      {isSelected && (
-                        <div className="mt-2.5 pt-2 border-t border-[#252538] text-xs space-y-1.5 text-slate-300">
-                          <span className="text-[10px] font-bold text-cyan-400 block uppercase tracking-wider">
-                            Full Generation Prompt:
-                          </span>
-                          <pre className="text-[11px] font-mono text-slate-300 whitespace-pre-wrap bg-black/40 p-2.5 rounded-lg border border-[#202030] leading-relaxed">
-                            {entry.prompt}
-                          </pre>
-                        </div>
-                      )}
+                      <button
+                        onClick={() => {
+                          onClose();
+                          setGapCheckerModalOpen(true);
+                        }}
+                        className="px-2.5 py-1 bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/40 rounded text-[11px] font-semibold transition-all cursor-pointer flex items-center gap-1"
+                      >
+                        <span>Inspect & Fix Gaps</span>
+                        <ArrowRight className="w-3 h-3" />
+                      </button>
                     </div>
-                  );
-                })}
+                    <div className="space-y-1 pl-6">
+                      {status.gaps.map((gap, gIdx) => (
+                        <div key={gIdx} className="text-[11px] text-amber-200/90 font-mono">
+                          {gap.message}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Manifest Entries List View */}
+                {status.totalImported === 0 ? (
+                  <div className="flex-1 min-h-[300px] border border-dashed border-[#26263a] rounded-xl flex flex-col items-center justify-center p-8 text-center text-slate-500 gap-2 bg-[#0d0d14]">
+                    <Bot className="w-9 h-9 text-slate-600" />
+                    <p className="text-xs font-semibold text-slate-300">Manifest is Empty</p>
+                    <p className="text-[11px] max-w-sm text-slate-500">
+                      Paste prompts on the left in batches of 20-30. All prompts accumulate chronologically here by their #0-00 timecode.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex-1 min-h-[300px] overflow-y-auto space-y-2 p-2 bg-[#0e0e14] border border-[#232334] rounded-xl max-h-[440px] shadow-inner">
+                    {status.sortedEntries.map((entry, idx) => {
+                      const isSelected = selectedEntryTc === entry.timecode;
+                      return (
+                        <div
+                          key={entry.timecode}
+                          onClick={() => setSelectedEntryTc(isSelected ? null : entry.timecode)}
+                          className={`p-3 rounded-xl border transition-all cursor-pointer ${
+                            isSelected
+                              ? 'bg-[#181828] border-purple-500/70 shadow-md'
+                              : 'bg-[#14141e] border-[#222232] hover:border-[#35354a]'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-1.5">
+                            <div className="flex items-center gap-2">
+                              <span className="px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-mono font-bold text-xs border border-cyan-500/40">
+                                {entry.timecode}
+                              </span>
+                              <span className="text-[10px] font-mono text-slate-400">
+                                #{idx + 1}
+                              </span>
+                              {entry.status === 'sent_to_flow' ? (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-mono">
+                                  ⚡ Sent to Flow
+                                </span>
+                              ) : entry.status === 'image_completed' ? (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono">
+                                  ✓ Image Ready
+                                </span>
+                              ) : (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono">
+                                  📥 Imported
+                                </span>
+                              )}
+                            </div>
+
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removePromptFromManifest(entry.timecode);
+                              }}
+                              className="p-1 hover:bg-rose-950/60 text-slate-500 hover:text-rose-400 rounded transition-colors"
+                              title="Remove Entry"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+
+                          {/* Sentence preview */}
+                          <p className="text-xs text-slate-200 font-medium line-clamp-1 mb-1">
+                            {entry.sentence || `Scene ${entry.timecode}`}
+                          </p>
+
+                          {/* Prompt preview */}
+                          <p className="text-[11px] text-slate-400 font-mono bg-[#0a0a0f] p-2 rounded-lg border border-[#1b1b26] line-clamp-2 leading-relaxed">
+                            {entry.prompt}
+                          </p>
+
+                          {/* Expanded View */}
+                          {isSelected && (
+                            <div className="mt-2.5 pt-2 border-t border-[#252538] text-xs space-y-1.5 text-slate-300">
+                              <span className="text-[10px] font-bold text-cyan-400 block uppercase tracking-wider">
+                                Full Generation Prompt:
+                              </span>
+                              <pre className="text-[11px] font-mono text-slate-300 whitespace-pre-wrap bg-black/40 p-2.5 rounded-lg border border-[#202030] leading-relaxed">
+                                {entry.prompt}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
           </div>

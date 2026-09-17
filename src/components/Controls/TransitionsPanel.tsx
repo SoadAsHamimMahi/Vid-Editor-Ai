@@ -8,9 +8,11 @@ import {
   Sliders, 
   Zap,
   Repeat,
-  Layers
+  Layers,
+  Compass,
+  Film
 } from 'lucide-react';
-import { TransitionType } from '../../types';
+import { TransitionType, MotionRhythmPreset } from '../../types';
 
 interface TransitionCard {
   id: TransitionType;
@@ -75,13 +77,15 @@ export const TransitionsPanel: React.FC = () => {
     project, 
     selectedSceneId, 
     updateScene, 
-    setProject 
+    setProject,
+    applyMotionRhythmToAllScenes
   } = useProjectStore();
 
   const selectedScene = project.scenes.find((s) => s.id === selectedSceneId) || project.scenes[0];
   const currentTransition = selectedScene?.transitionType || 'cross_dissolve';
   const [selectedTrans, setSelectedTrans] = useState<TransitionType>(currentTransition);
   const [transDuration, setTransDuration] = useState<number>(selectedScene?.transitionDuration || 0.5);
+  const [motionToast, setMotionToast] = useState<string | null>(null);
 
   const handleApplyToSelected = () => {
     if (!selectedScene) return;
@@ -104,6 +108,18 @@ export const TransitionsPanel: React.FC = () => {
     });
   };
 
+  const activeRhythm = project.metadata?.motionRhythm || 'dynamic_alternating';
+
+  const handleApplyRhythm = (rhythm: MotionRhythmPreset) => {
+    applyMotionRhythmToAllScenes(rhythm, true);
+    setMotionToast(
+      rhythm === 'dynamic_alternating'
+        ? '⚡ Mixed Motion (Shorts/YouTube) applied across all clips!'
+        : '🎬 Mixed Motion (Documentary Cluster) applied across all clips!'
+    );
+    setTimeout(() => setMotionToast(null), 3500);
+  };
+
   return (
     <aside className="w-80 h-full bg-[#14131a] border-r border-[#262333] flex flex-col select-none text-xs text-slate-300">
       {/* Header */}
@@ -113,8 +129,8 @@ export const TransitionsPanel: React.FC = () => {
             <SplitSquareVertical className="w-3.5 h-3.5" />
           </div>
           <div>
-            <h3 className="text-xs font-bold text-slate-200">Transitions Studio</h3>
-            <p className="text-[10px] text-slate-500">Scene Cut & Motion Blends</p>
+            <h3 className="text-xs font-bold text-slate-200">Transitions & Motion Studio</h3>
+            <p className="text-[10px] text-slate-500">Camera Rhythms & Scene Blends</p>
           </div>
         </div>
 
@@ -124,7 +140,74 @@ export const TransitionsPanel: React.FC = () => {
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 space-y-4 custom-scrollbar">
-        {/* Transitions Grid */}
+        {/* Section 1: Camera Motion Rhythm Combos (Ken Burns Mixed) */}
+        <div className="p-3 rounded-xl bg-[#191826] border border-[#2b273b] space-y-2.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5">
+              <Compass className="w-3.5 h-3.5 text-purple-400" />
+              <span className="text-xs font-bold text-slate-200">Camera Motion Combos</span>
+            </div>
+            <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 font-mono">Ken Burns Mix</span>
+          </div>
+
+          <p className="text-[10px] text-slate-400">
+            Automatically mixes slow zoom and slow lateral pan across clips:
+          </p>
+
+          <div className="space-y-1.5">
+            {/* Combo 1: Shorts / Fast YouTube */}
+            <div
+              onClick={() => handleApplyRhythm('dynamic_alternating')}
+              className={`p-2 rounded-lg border transition-all cursor-pointer ${
+                activeRhythm === 'dynamic_alternating'
+                  ? 'bg-purple-950/60 border-purple-500 shadow-md shadow-purple-500/10'
+                  : 'bg-[#15141e] hover:bg-[#1e1c2a] border-[#29263a]'
+              }`}
+            >
+              <div className="flex items-center justify-between mb-0.5">
+                <div className="flex items-center gap-1.5">
+                  <Zap className="w-3 h-3 text-purple-400" />
+                  <span className="font-bold text-xs text-slate-200">Shorts / Reels / YouTube</span>
+                </div>
+                {activeRhythm === 'dynamic_alternating' && (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-purple-400" />
+                )}
+              </div>
+              <div className="text-[10px] text-purple-300 font-medium">1:1 Alternating on every cut:</div>
+              <div className="text-[9px] text-slate-400">Zoom In ➔ Pan R (L to R) ➔ Zoom Out ➔ Pan L (R to L)</div>
+            </div>
+
+            {/* Combo 2: Documentary / Storytelling */}
+            <div
+              onClick={() => handleApplyRhythm('cinematic_documentary')}
+              className={`p-2 rounded-lg border transition-all cursor-pointer ${
+                activeRhythm === 'cinematic_documentary'
+                  ? 'bg-amber-950/60 border-amber-500 shadow-md shadow-amber-500/10'
+                  : 'bg-[#15141e] hover:bg-[#1e1c2a] border-[#29263a]'
+              }`}
+            >
+              <div className="flex items-center justify-between mb-0.5">
+                <div className="flex items-center gap-1.5">
+                  <Film className="w-3 h-3 text-amber-400" />
+                  <span className="font-bold text-xs text-slate-200">Documentary / Storytelling</span>
+                </div>
+                {activeRhythm === 'cinematic_documentary' && (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />
+                )}
+              </div>
+              <div className="text-[10px] text-amber-300 font-medium">Cinematic Cluster rhythm:</div>
+              <div className="text-[9px] text-slate-400">2-3 Zooms focus on subjects, then wide lateral Pan</div>
+            </div>
+          </div>
+
+          {motionToast && (
+            <div className="p-1.5 rounded-lg bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-[10px] font-medium animate-fadeIn text-center">
+              {motionToast}
+            </div>
+          )}
+        </div>
+
+        {/* Section 2: Transitions Grid */}
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold text-slate-200">Transition Blend Presets</span>

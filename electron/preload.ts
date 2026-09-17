@@ -33,7 +33,9 @@ const electronAPI = {
   resumeGeneration: () => ipcRenderer.invoke('cdp:resume-generation'),
   stopGeneration: () => ipcRenderer.invoke('cdp:stop-generation'),
   isGenerationPaused: () => ipcRenderer.invoke('cdp:is-generation-paused'),
-  onJobProgress: (callback: (data: { sceneId: string; status: 'generating' | 'ready' | 'error'; imagePath?: string; videoPath?: string; mediaType?: 'image' | 'video'; error?: string }) => void) => {
+  batchGenerateProjects: (projectsData: { projectId: string; sceneIds?: string[]; settings?: any }[]) =>
+    ipcRenderer.invoke('cdp:batch-generate-projects', projectsData),
+  onJobProgress: (callback: (data: { projectId?: string; sceneId: string; status: 'generating' | 'ready' | 'error'; imagePath?: string; videoPath?: string; mediaType?: 'image' | 'video'; error?: string }) => void) => {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on('flow:job-progress', handler);
     return () => ipcRenderer.removeListener('flow:job-progress', handler);
@@ -65,6 +67,9 @@ const electronAPI = {
   pickDirectory: () => ipcRenderer.invoke('dialog:select-output-dir'),
   selectOutputDir: (currentPath?: string) => ipcRenderer.invoke('dialog:select-output-dir', currentPath),
   readFolderImages: (folderPath: string) => ipcRenderer.invoke('fs:read-folder-images', folderPath),
+  checkFilesExist: (filePaths: string[]) => ipcRenderer.invoke('fs:check-files-exist', filePaths),
+  relinkMediaFolder: (missingPaths: string[], targetFolder: string) => ipcRenderer.invoke('fs:relink-media-folder', missingPaths, targetFolder),
+  readAudioBuffer: (filePath: string) => ipcRenderer.invoke('fs:read-audio-buffer', filePath),
   getDefaultExportPath: () => ipcRenderer.invoke('dialog:get-default-export-path'),
   getDefaultExportDir: () => ipcRenderer.invoke('dialog:get-default-export-dir'),
   openPath: (targetPath: string) => ipcRenderer.invoke('shell:open-path', targetPath),
@@ -75,7 +80,8 @@ const electronAPI = {
   getProject: (projectId: string) => ipcRenderer.invoke('projects:get', projectId),
   createProject: (title?: string, aspectRatio?: string) => ipcRenderer.invoke('projects:create', title, aspectRatio),
   duplicateProject: (projectId: string) => ipcRenderer.invoke('projects:duplicate', projectId),
-  deleteProject: (projectId: string) => ipcRenderer.invoke('projects:delete', projectId),
+  deleteProject: (projectId: string, options?: { deleteMedia?: boolean }) => ipcRenderer.invoke('projects:delete', projectId, options),
+  getProjectStorageStats: (projectId: string) => ipcRenderer.invoke('projects:storage-stats', projectId),
   renameProject: (projectId: string, newTitle: string) => ipcRenderer.invoke('projects:rename', projectId, newTitle),
 
   // Settings Persistence & Key Testing
@@ -101,12 +107,39 @@ const electronAPI = {
   directVocalScript: (script: string, apiKey?: string, model?: string, style?: string) =>
     ipcRenderer.invoke('llm:direct-vocal-script', script, apiKey, model, style),
   getVoiceProfiles: () => ipcRenderer.invoke('tts:get-voices'),
+  getVoicePreview: (voiceId: string) => ipcRenderer.invoke('tts:get-preview', voiceId),
   saveCustomVoice: (profile: any) => ipcRenderer.invoke('tts:save-custom-voice', profile),
+  generateDesignedVoicePreview: (params: any) => ipcRenderer.invoke('tts:generate-designed-preview', params),
+  generateDesignedVoiceCandidates: (params: any) => ipcRenderer.invoke('tts:generate-designed-candidates', params),
+  saveDesignedVoice: (profile: any) => ipcRenderer.invoke('tts:save-designed-voice', profile),
+  generateElevenLabsVoicePreviews: (params: any) => ipcRenderer.invoke('tts:elevenlabs-design-previews', params),
+  createElevenLabsDesignedVoice: (params: any) => ipcRenderer.invoke('tts:elevenlabs-create-voice', params),
   deleteCustomVoice: (id: string) => ipcRenderer.invoke('tts:delete-custom-voice', id),
   getVoiceHistory: () => ipcRenderer.invoke('tts:get-history'),
   saveVoiceRecord: (record: any) => ipcRenderer.invoke('tts:save-history', record),
   deleteVoiceRecord: (id: string) => ipcRenderer.invoke('tts:delete-history', id),
   clearVoiceHistory: () => ipcRenderer.invoke('tts:clear-history'),
+
+  // Cloud AI Video (Colab Wan 2.1 / LTX-Video)
+  colabSetTunnelUrl: (url: string) => ipcRenderer.invoke('colab:set-tunnel-url', url),
+  colabGetTunnelUrl: () => ipcRenderer.invoke('colab:get-tunnel-url'),
+  colabAutoDetectUrl: () => ipcRenderer.invoke('colab:auto-detect-url'),
+  colabTestConnection: (url?: string) => ipcRenderer.invoke('colab:test-connection', url),
+  colabGenerateVideo: (job: any) => ipcRenderer.invoke('colab:generate-video', job),
+  colabCancelJob: (sceneId: string) => ipcRenderer.invoke('colab:cancel-job', sceneId),
+  onColabProgress: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('colab:job-progress', handler);
+    return () => ipcRenderer.removeListener('colab:job-progress', handler);
+  },
+
+  // MCP (Model Context Protocol) Server for ChatGPT / Claude
+  mcpGetStatus: () => ipcRenderer.invoke('mcp:get-status'),
+  onMcpProjectUpdated: (callback: (project: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('mcp:project-updated', handler);
+    return () => ipcRenderer.removeListener('mcp:project-updated', handler);
+  },
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
