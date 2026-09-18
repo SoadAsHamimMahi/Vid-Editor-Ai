@@ -703,13 +703,13 @@ export class FFmpegService {
           // High-impact -12.0 LUFS YouTube commercial broadcast loudness normalization
           filterChain = [
             'highpass=f=80',
+            'afftdn=nf=-36:tn=1',
             'equalizer=f=120:width_type=q:width=1.2:g=2.2',
             'equalizer=f=400:width_type=q:width=1.5:g=-2.2',
-            'equalizer=f=3400:width_type=q:width=1.2:g=3.2',
-            'equalizer=f=7500:width_type=q:width=2.5:g=-1.8',
-            'equalizer=f=10500:width_type=q:width=1.0:g=2.2',
-            'acompressor=threshold=0.10:ratio=3.2:attack=10:release=120:makeup=2.0',
-            'loudnorm=I=-12.0:TP=-0.5:LRA=6'
+            'equalizer=f=3200:width_type=q:width=1.2:g=2.4',
+            'equalizer=f=7500:width_type=q:width=2.5:g=-2.0',
+            'acompressor=threshold=0.12:ratio=2.6:attack=15:release=140:makeup=1.6',
+            'loudnorm=I=-13.5:TP=-1.0:LRA=6'
           ].join(',');
         } else if (preset === 'podcast_warmth') {
           // 60Hz cut, 150Hz chest warmth (+2.5dB), 3.5kHz clarity (+2dB), 7.5kHz de-esser (-2.5dB), smooth compression, -14 LUFS
