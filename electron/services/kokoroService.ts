@@ -183,14 +183,14 @@ const PRESET_BLENDS: Record<string, VoiceBlendDef> = {
 };
 
 const BROADCAST_STUDIO_FILTER = [
-  'highpass=f=80:poles=2',
-  'equalizer=f=105:width_type=q:width=1.3:g=2.2',
-  'equalizer=f=480:width_type=q:width=1.8:g=-2.4',
+  'highpass=f=75:poles=2',
+  'equalizer=f=120:width_type=q:width=1.4:g=2.2',
+  'equalizer=f=480:width_type=q:width=1.8:g=-2.0',
   'equalizer=f=3400:width_type=q:width=1.3:g=2.2',
-  'equalizer=f=7200:width_type=q:width=2.2:g=-3.5',
-  'equalizer=f=11500:width_type=h:g=1.5',
+  'equalizer=f=7200:width_type=q:width=2.5:g=-1.8',
+  'equalizer=f=10500:width_type=h:g=2.2',
   'acompressor=threshold=0.12:ratio=2.5:attack=10:release=120:makeup=1.5',
-  'loudnorm=I=-16:TP=-1.0:LRA=7'
+  'loudnorm=I=-14.5:TP=-0.5:LRA=8'
 ].join(',');
 
 export class KokoroService {
@@ -597,12 +597,25 @@ export class KokoroService {
 
       await finalAudio.save(tempWavPath);
 
+      // Prepend natural subtle breath inhale for documentary & cinematic narratives if breath asset exists
+      const isCinematicPacing = req.prosodyPacing === 'documentary' ||
+        req.prosodyPacing === 'trailer' ||
+        req.prosodyPacing === 'story' ||
+        (Boolean(req.voiceId) && (
+          req.voiceId.includes('adam') ||
+          req.voiceId.includes('george') ||
+          req.voiceId.includes('onyx') ||
+          req.voiceId.includes('fenrir')
+        ));
+
+      const audioToMaster = tempWavPath;
+
       // Apply Studio Audio Mastering (defaults to broadcast_studio for transparent warmth and sheen)
       const masteringPreset = req.masteringPreset || 'broadcast_studio';
 
-      await this.exportWithMastering(tempWavPath, outputPath, masteringPreset);
+      await this.exportWithMastering(audioToMaster, outputPath, masteringPreset);
 
-      // Clean up temporary WAV
+      // Clean up temporary WAVs
       try {
         if (fs.existsSync(tempWavPath)) {
           await fs.unlink(tempWavPath);

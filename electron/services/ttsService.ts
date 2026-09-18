@@ -1389,39 +1389,48 @@ export class TTSService {
    */
   public getApiKey(provider: 'elevenlabs' | 'openai' | 'gemini'): string | undefined {
     try {
+      let settings: any = {};
       const settingsPath = path.join(process.cwd(), 'projects_data', 'settings.json');
       if (fs.existsSync(settingsPath)) {
-        const settings = fs.readJsonSync(settingsPath);
-        if (provider === 'elevenlabs') {
-          const k =
-            settings.elevenlabsApiKey ||
-            (Array.isArray(settings.elevenlabsApiKeys) ? settings.elevenlabsApiKeys[0] : null);
-          if (k && typeof k === 'string' && k.trim()) return k.trim();
+        settings = fs.readJsonSync(settingsPath);
+      }
+
+      if (provider === 'elevenlabs') {
+        const envKey = process.env.ELEVENLABS_API_KEY?.trim();
+        if (envKey) return envKey;
+        const k =
+          settings.elevenlabsApiKey ||
+          (Array.isArray(settings.elevenlabsApiKeys) ? settings.elevenlabsApiKeys[0] : null);
+        if (k && typeof k === 'string' && k.trim()) return k.trim();
+      }
+      if (provider === 'openai') {
+        const envKey = process.env.OPENAI_API_KEY?.trim();
+        if (envKey) return envKey;
+        const k =
+          settings.openaiApiKey ||
+          (Array.isArray(settings.openaiApiKeys) ? settings.openaiApiKeys[0] : null);
+        if (k && typeof k === 'string' && k.trim()) return k.trim();
+      }
+      if (provider === 'gemini') {
+        // Collect ALL gemini keys into a pool (newline-separated) for rotation
+        const keys: string[] = [];
+        if (process.env.GEMINI_API_KEY?.trim()) {
+          keys.push(process.env.GEMINI_API_KEY.trim());
         }
-        if (provider === 'openai') {
-          const k =
-            settings.openaiApiKey ||
-            (Array.isArray(settings.openaiApiKeys) ? settings.openaiApiKeys[0] : null);
-          if (k && typeof k === 'string' && k.trim()) return k.trim();
+        if (settings.geminiApiKey && typeof settings.geminiApiKey === 'string') {
+          // May itself be a newline/comma-separated multi-key string
+          keys.push(settings.geminiApiKey);
         }
-        if (provider === 'gemini') {
-          // Collect ALL gemini keys into a pool (newline-separated) for rotation
-          const keys: string[] = [];
-          if (settings.geminiApiKey && typeof settings.geminiApiKey === 'string') {
-            // May itself be a newline/comma-separated multi-key string
-            keys.push(settings.geminiApiKey);
+        if (Array.isArray(settings.geminiApiKeys)) {
+          for (const k of settings.geminiApiKeys) {
+            if (k && typeof k === 'string' && k.trim()) keys.push(k.trim());
           }
-          if (Array.isArray(settings.geminiApiKeys)) {
-            for (const k of settings.geminiApiKeys) {
-              if (k && typeof k === 'string' && k.trim()) keys.push(k.trim());
-            }
-          }
-          const raw = keys.join('\n').trim();
-          if (raw) return raw;
         }
+        const raw = keys.join('\n').trim();
+        if (raw) return raw;
       }
     } catch (err: any) {
-      console.warn(`[TTSService] Failed reading ${provider} apiKey from settings:`, err.message);
+      console.warn(`[TTSService] Failed reading ${provider} apiKey:`, err.message);
     }
     return undefined;
   }

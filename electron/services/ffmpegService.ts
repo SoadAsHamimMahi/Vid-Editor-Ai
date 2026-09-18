@@ -693,19 +693,23 @@ export class FFmpegService {
         let filterChain = '';
 
         if (preset === 'broadcast_studio') {
-          // 8-Stage Broadcast Channel Strip:
-          // 75Hz HPF rumble cut, 150Hz chest warmth (+2dB), 650Hz boxiness scoop (-1.5dB),
-          // 3.2kHz consonant clarity (+2.5dB), 6.8kHz sibilance de-esser (-3.0dB),
-          // 10.5kHz air & silky sheen (+1.8dB), 2.2:1 optical compression, -16 LUFS broadcast standard
+          // 8-Stage Award-Winning Documentary Channel Strip (Ken Burns & Modern Video Essay Standard):
+          // 80Hz HPF rumble cut, 120Hz sub-baritone chest resonance (+2.2dB),
+          // 400Hz boxiness & mud scoop (-2.2dB - clears cardboard throat resonance),
+          // 3400Hz consonant articulation & diction clarity (+3.2dB - crisp vocal intelligibility),
+          // 7500Hz surgical de-esser (-1.8dB - silky non-piercing high end),
+          // 10.5kHz condenser sheen & air (+2.2dB - pristine acoustic presence),
+          // Upfront leveling compressor (threshold 0.10, ratio 3.2, attack 10ms, release 120ms, makeup 2.0),
+          // High-impact -12.0 LUFS YouTube commercial broadcast loudness normalization
           filterChain = [
-            'highpass=f=75',
-            'equalizer=f=150:width_type=q:width=1.2:g=2.0',
-            'equalizer=f=650:width_type=q:width=1.8:g=-1.5',
-            'equalizer=f=3200:width_type=q:width=1.4:g=2.5',
-            'equalizer=f=6800:width_type=q:width=1.6:g=-3.0',
-            'equalizer=f=10500:width_type=q:width=0.9:g=1.8',
-            'acompressor=threshold=0.15:ratio=2.2:attack=15:release=140:makeup=1.4',
-            'loudnorm=I=-16:TP=-1.0:LRA=7'
+            'highpass=f=80',
+            'equalizer=f=120:width_type=q:width=1.2:g=2.2',
+            'equalizer=f=400:width_type=q:width=1.5:g=-2.2',
+            'equalizer=f=3400:width_type=q:width=1.2:g=3.2',
+            'equalizer=f=7500:width_type=q:width=2.5:g=-1.8',
+            'equalizer=f=10500:width_type=q:width=1.0:g=2.2',
+            'acompressor=threshold=0.10:ratio=3.2:attack=10:release=120:makeup=2.0',
+            'loudnorm=I=-12.0:TP=-0.5:LRA=6'
           ].join(',');
         } else if (preset === 'podcast_warmth') {
           // 60Hz cut, 150Hz chest warmth (+2.5dB), 3.5kHz clarity (+2dB), 7.5kHz de-esser (-2.5dB), smooth compression, -14 LUFS

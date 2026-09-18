@@ -279,8 +279,10 @@ export function cleanSpeechText(
   text = text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA70}-\u{1FAFF}]/gu, '');
   // Strip markdown bullet points and list numbering
   text = text.replace(/^[\s]*[•\-\*][\s]+/gm, '');
-  text = text.replace(/^[\s]*\d+[.)-][\s]+/gm, '');
-  // Normalize colon spacing to prevent awkward halting cadence
+  // Normalize colon spacing: convert in-sentence colon to rhetorical pause if preserving pauses
+  if (preservePauses) {
+    text = text.replace(/(?<=[A-Za-z0-9])\s*:\s+(?=[A-Za-z0-9])/g, ' — ');
+  }
   text = text.replace(/\s*:\s*/g, ' ');
 
   // 8. SpeakSay Automatic Newline Breathing Cadence:
@@ -500,214 +502,391 @@ export const EMOTION_SPEED_MODIFIERS: Record<string, number> = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Marcus Deep Soul Emotion Modulation Engine
 // ─────────────────────────────────────────────────────────────────────────────
-// Marcus Deep Soul Emotion Modulation Engine (ElevenLabs Calibrated)
-// Clause-level prosodic annotator for per-clause pitch, rate, volume dynamics,
-// and cinematic breath injection. Matches the Hidocast Ronaldo documentary
-// narrator profile (88Hz mean pitch, 21.8dB dynamic range, fluid co-articulation).
+// Category & Documentary Emotion Modulation Engine (ElevenLabs Calibrated)
+// ─────────────────────────────────────────────────────────────────────────────
+// Universal clause-level prosodic annotator for per-clause pitch, rate, volume dynamics,
+// natural pause cadence, and cinematic breath injection across all documentary,
+// true crime, movie trailer, and storytelling voices.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface MarcusEmotionSegment {
+export interface CategoryEmotionSegment {
   text: string;
   rateDeltaPct: number;   // Applied on top of base rate (e.g. -4 for -14% rate)
-  pitchDeltaHz: number;   // Applied on top of base pitch (e.g. -2 for -28Hz)
-  volumeDelta: string;    // e.g. "-14%", "+5%", "+0%"
+  pitchDeltaHz: number;   // Applied on top of base pitch (e.g. -2 for -2Hz)
+  volumeDelta: string;    // e.g. "-12%", "+5%", "+0%"
   pauseAfterSec: number;  // Explicit silence after this segment
   prependBreath: boolean; // Prepend soft natural inhale before this segment
 }
 
+export type MarcusEmotionSegment = CategoryEmotionSegment;
+
+export interface CategoryEmotionOptions {
+  pacing?: ProsodyPacingProfile;
+  isMarcus?: boolean;
+  enableBreaths?: boolean;
+}
+
 /**
- * Annotates text for Marcus Deep Soul emotion modulation.
- * Parses explicit [pause: X.Xs] tags, splits long sentences at narrative pivot
- * clauses to create compelling setup/landing arcs, applies volume dynamics,
- * and preserves natural co-articulation across all words.
+ * Universal Category Emotion & Prosody Modulation Engine (ElevenLabs Calibrated).
+ * Annotates text for Documentary, True Crime, Movie Trailer, and Storytelling narration.
+ * Parses pause tags and ellipses, splits long sentences at narrative pivot clauses
+ * to create compelling setup/landing arcs, applies volume dynamics, and manages cinematic breath cues.
  */
-export function applyMarcusEmotionAnnotation(
+export function applyCategoryEmotionAnnotation(
   text: string,
-  baseRatePct: number = -10
-): MarcusEmotionSegment[] {
+  baseRatePct: number = -6,
+  options?: CategoryEmotionOptions
+): CategoryEmotionSegment[] {
   if (!text || !text.trim()) return [];
 
-  // 1. Normalize all pause variants to a clean unique delimiter: @@PAUSE_X.XX@@
-  let workingText = text;
-  workingText = workingText.replace(
-    /[\[\(]\s*(?:pause|break|silence)(?:(?::|\s+|=|-)?\s*([\d.]+)\s*(s|ms|sec|seconds)?)?\s*[\]\)]/gi,
-    (_m, val, unit) => {
-      let sec = val ? parseFloat(val) : 0.75;
-      if (unit && unit.toLowerCase().includes('ms')) sec /= 1000.0;
-      return ` @@PAUSE_${sec.toFixed(2)}@@ `;
-    }
-  );
-  workingText = workingText.replace(
-    /[\[\(]\s*([\d.]+)\s*(s|ms|sec|seconds)?\s*(?:pause|break|silence|breath)\s*[\]\)]/gi,
-    (_m, val, unit) => {
-      let sec = parseFloat(val);
-      if (unit && unit.toLowerCase().includes('ms')) sec /= 1000.0;
-      return ` @@PAUSE_${sec.toFixed(2)}@@ `;
-    }
-  );
-  workingText = workingText.replace(
-    /<break\s+time=["']([\d.]+)(s|ms)["']\s*\/?>/gi,
-    (_m, val, unit) => {
-      let sec = parseFloat(val);
-      if (unit && unit.toLowerCase().includes('ms')) sec /= 1000.0;
-      return ` @@PAUSE_${sec.toFixed(2)}@@ `;
-    }
-  );
+  const pacing = options?.pacing || (options?.isMarcus ? 'story' : 'documentary');
+  const enableBreaths = options?.enableBreaths ?? true;
 
-  // Clean emotion and delivery tags
-  workingText = workingText.replace(
-    /\[\/?(?:dramatic|sad|whisper|reflective|emotional|warm|deep|intense|gentle|crying|joyful|angry)\]/gi,
-    ' '
-  );
-  workingText = workingText.replace(
-    /\(\s*(?:dramatic|sad|whisper|reflective|emotional|warm|deep|intense|gentle|crying|joyful|angry)\s*\)/gi,
-    ' '
-  );
-  workingText = workingText.replace(/\s+/g, ' ').trim();
-
-  // 2. Tokenize by @@PAUSE_X.XX@@ while tracking pauses
-  const parts = workingText.split(/(@@PAUSE_[\d.]+@@)/);
-  const rawUnits: Array<{ text: string; pause: number }> = [];
-
-  for (const p of parts) {
-    const trimmed = p.trim();
-    if (!trimmed) continue;
-    const pMatch = trimmed.match(/^@@PAUSE_([\d.]+)@@$/);
-    if (pMatch) {
-      const sec = parseFloat(pMatch[1]);
-      if (rawUnits.length > 0) {
-        rawUnits[rawUnits.length - 1].pause += sec;
-      }
-      continue;
-    }
-
-    // Split text into sentences
-    const sents = trimmed.split(/(?<=[.!?…])\s+/).map((s) => s.trim()).filter(Boolean);
-    for (const s of sents) {
-      rawUnits.push({ text: s, pause: 0.35 });
-    }
+  // Category-specific pause standards calibrated to 22%-26% documentary pacing (Attenborough / Ken Burns Standard)
+  let defaultSentencePause = 0.58;
+  let defaultClausePause = 0.22;
+  let defaultParagraphPause = 0.85;
+  if (pacing === 'trailer') {
+    defaultSentencePause = 0.85;
+    defaultClausePause = 0.30;
+    defaultParagraphPause = 1.20;
+  } else if (pacing === 'story') {
+    defaultSentencePause = 0.44;
+    defaultClausePause = 0.18;
+    defaultParagraphPause = 0.70;
+  } else if (pacing === 'sleep' || pacing === 'meditation') {
+    defaultSentencePause = 1.80;
+    defaultClausePause = 0.45;
+    defaultParagraphPause = 2.50;
   }
 
-  if (rawUnits.length === 0) return [];
+  const MASKED_ABBREVIATIONS = [
+    ...COMMON_ABBREVIATIONS,
+    'D.C', 'U.S', 'U.S.A', 'e.g', 'i.e', 'approx', 'dept', 'vol', 'no', 'Jan', 'Feb', 'Mar', 'Apr', 'Jun', 'Jul', 'Aug', 'Sep', 'Sept', 'Oct', 'Nov', 'Dec'
+  ];
 
-  // 3. Classify clauses and assign emotional parameters
-  const clauses: MarcusEmotionSegment[] = [];
-  const GRIEF_RE = /\b(cry(?:ing)?|cried|cries|sob(?:bed|bing|s)?|wept|weep(?:ing)?|mourn(?:ing)?|grief)\b/i;
-  const PAIN_RE = /\b(pain|anguish|agony|suffer(?:ed|ing)?|hurt(?:s)?|wound(?:ed|s)?|broke(?:n)?|shattered)\b/i;
-  const ANGER_RE = /\b(anger|angry|rage|furious|bitter)\b/i;
-  const JOY_RE = /\b(joy(?:ful)?|love[ds]?|loving|beautiful|blessed|dream[ds]?|hope(?:ful)?)\b/i;
+  const GRIEF_RE = /\b(cry(?:ing)?|cried|cries|sob(?:bed|bing|s)?|wept|weep(?:ing)?|mourn(?:ing)?|grief|loss|lost|dying|died|death|fatal|tragic|tears)\b/i;
+  const PAIN_RE = /\b(pain|anguish|agony|suffer(?:ed|ing)?|hurt(?:s)?|wound(?:ed|s)?|broke(?:n)?|shattered|bleeding|darkness)\b/i;
+  const ANGER_RE = /\b(anger|angry|rage|furious|bitter|war|battle|conflict|enemy|strike|destroyed)\b/i;
+  const JOY_WONDER_RE = /\b(joy(?:ful)?|love[ds]?|loving|beautiful|blessed|dream[ds]?|hope(?:ful)?|wonder|stars|cosmos|universe|galaxy|miracle|magnificent|splendor)\b/i;
+  const TRUE_CRIME_RE = /\b(murder(?:ed)?|killer|crime|victim[s]?|suspect[s]?|detective[s]?|evidence|blood|cold\s+case|unsolved|disappeared|investigat(?:ion|or|ed))\b/i;
+  const REVEAL_SETUP_RE = /\b(name[ds]?|was\s+called|his\s+name|her\s+name|the\s+truth|in\s+the\s+end|nobody\s+knew|little\s+did\s+they\s+know|and\s+then|cristiano|finally)\b/i;
+  const PUNCHLINE_RE = /\b(it\s+works|it\s+worked|built\s+to\s+do|the\s+truth|nobody\s+knew)\b/i;
 
-  for (let i = 0; i < rawUnits.length; i++) {
-    const u = rawUnits[i];
-    const text = u.text;
-    const pause = u.pause;
+  // Split into paragraphs / narrative blocks
+  const rawParagraphs = text.split(/\r?\n+/).map(p => p.trim()).filter(Boolean);
+  const clauses: CategoryEmotionSegment[] = [];
 
-    // Narrative pivot split for long sentences (>= 7 words) with emotional shift
-    if (text.split(/\s+/).length >= 7 && (GRIEF_RE.test(text) || PAIN_RE.test(text))) {
-      const splitMatch = text.match(/\b(about\s+a\s+boy|who\s+could|where|when)\b/i);
-      if (splitMatch && splitMatch.index !== undefined) {
-        const lead = text.slice(0, splitMatch.index).trim().replace(/,+$/, '');
-        const tail = text.slice(splitMatch.index).trim();
-        if (lead && tail) {
-          clauses.push({
-            text: lead + ',',
-            rateDeltaPct: 3,        // slightly faster, conversational setup
-            pitchDeltaHz: 2,        // setup pitch
-            volumeDelta: '+3%',
-            pauseAfterSec: 0.22,
-            prependBreath: i === 0,  // Soft inhale before story opening
-          });
-          clauses.push({
-            text: tail,
-            rateDeltaPct: -2,       // slow emotional landing
-            pitchDeltaHz: -2,       // deep vulnerable drop
-            volumeDelta: '-8%',     // intimate softness
-            pauseAfterSec: Math.min(pause, 1.05),
-            prependBreath: false,
-          });
-          continue;
-        }
+  for (let pIdx = 0; pIdx < rawParagraphs.length; pIdx++) {
+    const rawPara = rawParagraphs[pIdx];
+    const isFirstPara = (pIdx === 0 && clauses.length === 0);
+
+    // 1. Detect director cue / mood tag in this paragraph
+    let blockRateDelta = 0;
+    let blockPitchDelta = 0;
+    let blockVolDelta = '+0%';
+    let blockPauseBonus = 0;
+
+    const cueMatch = rawPara.match(/^\[\s*([^\]]+?)\s*\]/);
+    if (cueMatch) {
+      const cue = cueMatch[1].toLowerCase();
+      if (cue.includes('building') || cue.includes('rising') || cue.includes('intense')) {
+        blockRateDelta = 4;
+        blockPitchDelta = 2;
+        blockVolDelta = '+3%';
+      } else if (cue.includes('measured') || cue.includes('deliberate') || cue.includes('analytical')) {
+        blockRateDelta = -2;
+        blockPitchDelta = -1;
+        blockPauseBonus = 0.06;
+      } else if (cue.includes('quiet') || cue.includes('certain') || cue.includes('understated')) {
+        blockRateDelta = -3;
+        blockPitchDelta = -3;
+        blockVolDelta = '-4%';
+      } else if (cue.includes('narrat') || cue.includes('low') || cue.includes('authoritative')) {
+        blockRateDelta = -2;
+        blockPitchDelta = -3;
+        blockVolDelta = '-2%';
+      } else if (cue.includes('whisper') || cue.includes('intimate') || cue.includes('reflective')) {
+        blockRateDelta = -4;
+        blockPitchDelta = -2;
+        blockVolDelta = '-8%';
+      } else if (cue.includes('dramatic') || cue.includes('somber') || cue.includes('serious')) {
+        blockRateDelta = -3;
+        blockPitchDelta = -3;
+        blockVolDelta = '-4%';
+      } else if (cue.includes('wonder') || cue.includes('curious') || cue.includes('awe')) {
+        blockRateDelta = 2;
+        blockPitchDelta = 3;
+        blockVolDelta = '+2%';
       }
     }
 
-    // Tears of anger: firm, contained power
-    if (ANGER_RE.test(text)) {
-      clauses.push({
-        text,
-        rateDeltaPct: -1,
-        pitchDeltaHz: 0,
-        volumeDelta: '+5%',
-        pauseAfterSec: Math.min(pause, 0.75),
-        prependBreath: false,
-      });
+    // 2. Preprocess paragraph text
+    let workingText = rawPara;
+
+    // Convert ellipses to pauses
+    workingText = workingText.replace(/(?:\s*\.{3,}\s*|\s*…\s*)/g, ' @@PAUSE_0.60@@ ');
+
+    // Convert in-sentence colons and em-dashes into rhetorical pauses
+    workingText = workingText.replace(/(?<=[A-Za-z0-9])\s*:\s+(?=[A-Za-z0-9])/g, ' @@PAUSE_0.38@@ ');
+    workingText = workingText.replace(/\s*[—–]\s*/g, ' @@PAUSE_0.30@@ ');
+
+    // Normalize explicit pause tags
+    workingText = workingText.replace(
+      /[\[\(]\s*(?:pause|break|silence)(?:(?::|\s+|=|-)?\s*([\d.]+)\s*(s|ms|sec|seconds)?)?\s*[\]\)]/gi,
+      (_m, val, unit) => {
+        let sec = val ? parseFloat(val) : defaultSentencePause;
+        if (unit && unit.toLowerCase().includes('ms')) sec /= 1000.0;
+        return ` @@PAUSE_${sec.toFixed(2)}@@ `;
+      }
+    );
+    workingText = workingText.replace(
+      /[\[\(]\s*([\d.]+)\s*(s|ms|sec|seconds)?\s*(?:pause|break|silence|breath)\s*[\]\)]/gi,
+      (_m, val, unit) => {
+        let sec = parseFloat(val);
+        if (unit && unit.toLowerCase().includes('ms')) sec /= 1000.0;
+        return ` @@PAUSE_${sec.toFixed(2)}@@ `;
+      }
+    );
+    workingText = workingText.replace(
+      /<break\s+time=["']([\d.]+)(s|ms)["']\s*\/?>/gi,
+      (_m, val, unit) => {
+        let sec = parseFloat(val);
+        if (unit && unit.toLowerCase().includes('ms')) sec /= 1000.0;
+        return ` @@PAUSE_${sec.toFixed(2)}@@ `;
+      }
+    );
+
+    // 3. Strip ALL remaining bracket and parenthetical director cues so none leak into speech
+    workingText = workingText.replace(/\[\s*[^\]\n]{1,80}\s*\]/g, ' ');
+    workingText = workingText.replace(/\(\s*[^)\n]{1,80}\s*\)/g, ' ');
+    workingText = workingText.replace(/\s+/g, ' ').trim();
+
+    // 4. Tokenize by explicit pauses
+    const parts = workingText.split(/(@@PAUSE_[\d.]+@@)/);
+    const rawUnits: Array<{ text: string; pause: number }> = [];
+
+    for (const p of parts) {
+      const trimmed = p.trim();
+      if (!trimmed) continue;
+      const pMatch = trimmed.match(/^@@PAUSE_([\d.]+)@@$/);
+      if (pMatch) {
+        const sec = parseFloat(pMatch[1]);
+        if (rawUnits.length > 0) {
+          rawUnits[rawUnits.length - 1].pause = Math.max(0.42, Math.min(1.0, sec));
+        }
+        continue;
+      }
+
+      // Mask abbreviations and numbers so periods don't trigger false sentence breaks
+      let masked = trimmed;
+      for (const ab of MASKED_ABBREVIATIONS) {
+        if (ab === 'D.C') continue; // Handled specially below to allow dateline sentence splits
+        const escaped = ab.replace(/\./g, '\\.');
+        const reg = new RegExp(`\\b${escaped}\\.`, 'gi');
+        masked = masked.replace(reg, `${ab.replace(/\./g, '___DOT___')}___DOT___`);
+      }
+      masked = masked.replace(/\bU\.S\./gi, 'U___DOT___S___DOT___');
+      // For D.C., mask the internal dot always, but only mask terminal dot if followed by lowercase
+      masked = masked.replace(/\bD\.C\.(?=\s+[a-z])/gi, 'D___DOT___C___DOT___');
+      masked = masked.replace(/\bD\.C\./gi, 'D___DOT___C.');
+      masked = masked.replace(/(\d+)\.(\d+)/g, '$1___DOT___$2');
+      masked = masked.replace(/(?<!D___DOT___)\b([A-Z])\.(?=\s+[A-Za-z])/g, '$1___DOT___');
+
+      // Split text into sentences
+      const sents = masked.split(/(?<=[.!?…])\s+/).map((s) => s.trim()).filter(Boolean);
+      for (let sIdx = 0; sIdx < sents.length; sIdx++) {
+        const unmaskedSent = sents[sIdx].replace(/___DOT___/g, '.').trim();
+        if (!unmaskedSent) continue;
+        const isLastInPara = (sIdx === sents.length - 1);
+        const pauseTime = (isLastInPara && pIdx < rawParagraphs.length - 1)
+          ? defaultParagraphPause + blockPauseBonus
+          : defaultSentencePause + blockPauseBonus;
+        rawUnits.push({ text: unmaskedSent, pause: pauseTime });
+      }
     }
-    // Tears of pain: deepest vulnerability
-    else if (PAIN_RE.test(text)) {
-      clauses.push({
-        text,
-        rateDeltaPct: -4,
-        pitchDeltaHz: -2,
-        volumeDelta: '-14%',      // significant volume drop for acoustic vulnerability
-        pauseAfterSec: Math.min(pause, 0.95),
-        prependBreath: false,
-      });
-    }
-    // Tears of joy: warmer, lifted
-    else if (JOY_RE.test(text)) {
-      clauses.push({
-        text,
-        rateDeltaPct: 2,
-        pitchDeltaHz: 3,
-        volumeDelta: '+2%',
-        pauseAfterSec: Math.min(pause, 1.35),
-        prependBreath: false,
-      });
-    }
-    // Dramatic reveal / Climactic name:
-    else if (/\bcristiano\b/i.test(text)) {
-      clauses.push({
-        text,
-        rateDeltaPct: -4,
-        pitchDeltaHz: -1,
-        volumeDelta: '-10%',
-        pauseAfterSec: 0.0,
-        prependBreath: true,     // Dramatic breath before name reveal
-      });
-    }
-    // Island / Atlantic or biographical setting:
-    else if (/\b(island|atlantic)\b/i.test(text)) {
-      clauses.push({
-        text,
-        rateDeltaPct: 1,
-        pitchDeltaHz: 1,
-        volumeDelta: '+1%',
-        pauseAfterSec: Math.min(pause, 0.65),
-        prependBreath: false,
-      });
-    }
-    // Reveal setup ("And the boy's name..."):
-    else if (/\b(name[ds]?|was\s+called|his\s+name)\b/i.test(text)) {
-      clauses.push({
-        text,
-        rateDeltaPct: -1,
-        pitchDeltaHz: 0,
-        volumeDelta: '+0%',
-        pauseAfterSec: Math.min(pause, 0.85),
-        prependBreath: false,
-      });
-    }
-    // Standard documentary narrative clause:
-    else {
-      clauses.push({
-        text,
-        rateDeltaPct: 0,
-        pitchDeltaHz: 0,
-        volumeDelta: '+0%',
-        pauseAfterSec: pause,
-        prependBreath: i === 0,
-      });
+
+    if (rawUnits.length === 0) continue;
+
+    // 5. Process clauses with emotional / prosodic parameters
+    for (let uIdx = 0; uIdx < rawUnits.length; uIdx++) {
+      const u = rawUnits[uIdx];
+      const uText = u.text;
+      const pause = u.pause;
+      const isFirstClause = (isFirstPara && uIdx === 0 && clauses.length === 0);
+      const wordCount = uText.split(/\s+/).filter(Boolean).length;
+      const isShortFragment = wordCount >= 1 && wordCount <= 5;
+
+      // Dramatic punchlines (e.g. "It works.", "It does everything it was built to do.")
+      if (PUNCHLINE_RE.test(uText)) {
+        clauses.push({
+          text: uText,
+          rateDeltaPct: blockRateDelta - 4,
+          pitchDeltaHz: blockPitchDelta - 3,
+          volumeDelta: '-4%',
+          pauseAfterSec: Math.max(pause, 0.78),
+          prependBreath: enableBreaths,
+        });
+        continue;
+      }
+
+      // Short descriptive factual fragments (e.g. "Twenty feet long.", "Lined with sheet iron.")
+      if (isShortFragment && uText.endsWith('.')) {
+        clauses.push({
+          text: uText,
+          rateDeltaPct: blockRateDelta - 2,
+          pitchDeltaHz: blockPitchDelta - 2, // downward declarative pitch drop
+          volumeDelta: blockVolDelta !== '+0%' ? blockVolDelta : '-2%',
+          pauseAfterSec: Math.max(pause, 0.62),
+          prependBreath: isFirstClause && enableBreaths,
+        });
+        continue;
+      }
+
+      // Narrative pivot split for long sentences (>= 7 words)
+      // Splits long sentences into an engaging setup arc and an emotional landing arc
+      if (wordCount >= 7) {
+        const pivotMatch = uText.match(/,\s+(?:but|where|when|yet|while|and|who|which)\b|\b(?:about\s+a\s+boy|who\s+could|where\s+there\s+was|however|suddenly|without\s+warning|in\s+the\s+end)\b/i);
+        if (pivotMatch && pivotMatch.index !== undefined && pivotMatch.index > 10 && pivotMatch.index < uText.length - 10) {
+          const lead = uText.slice(0, pivotMatch.index).trim().replace(/,+$/, '');
+          const tail = uText.slice(pivotMatch.index).trim().replace(/^,\s*/, '');
+          if (lead && tail) {
+            clauses.push({
+              text: lead + ',',
+              rateDeltaPct: blockRateDelta + 2,     // engaging setup
+              pitchDeltaHz: blockPitchDelta + 3,     // setup pitch lift (+3Hz)
+              volumeDelta: '+2%',
+              pauseAfterSec: defaultClausePause,
+              prependBreath: isFirstClause && enableBreaths,
+            });
+            clauses.push({
+              text: tail,
+              rateDeltaPct: blockRateDelta - 3,     // slow emotional landing
+              pitchDeltaHz: blockPitchDelta - 3,     // deep resonant drop (-3Hz)
+              volumeDelta: '-5%',                   // intimate softness
+              pauseAfterSec: Math.min(pause, 0.85),
+              prependBreath: false,
+            });
+            continue;
+          }
+        }
+
+        // Comma splitting for descriptive participial phrases (e.g. ", soaked in...", ", melting, dripping...")
+        const commaMatch = uText.match(/,\s+([a-z]+(?:ing|ed)\b[^,.]+)/i);
+        if (commaMatch && commaMatch.index !== undefined && commaMatch.index > 8 && commaMatch.index < uText.length - 10) {
+          const lead = uText.slice(0, commaMatch.index).trim().replace(/,+$/, '');
+          const tail = uText.slice(commaMatch.index).trim().replace(/^,\s*/, '');
+          if (lead && tail) {
+            clauses.push({
+              text: lead + ',',
+              rateDeltaPct: blockRateDelta + 2,
+              pitchDeltaHz: blockPitchDelta + 2,
+              volumeDelta: blockVolDelta,
+              pauseAfterSec: defaultClausePause + 0.02,
+              prependBreath: isFirstClause && enableBreaths,
+            });
+            clauses.push({
+              text: tail,
+              rateDeltaPct: blockRateDelta - 1,
+              pitchDeltaHz: blockPitchDelta - 1,
+              volumeDelta: blockVolDelta,
+              pauseAfterSec: pause,
+              prependBreath: false,
+            });
+            continue;
+          }
+        }
+      }
+
+      // Tears / Dying / Grief: slowest pace, deepest drop, emotional vulnerability
+      if (GRIEF_RE.test(uText)) {
+        clauses.push({
+          text: uText,
+          rateDeltaPct: blockRateDelta - 4,
+          pitchDeltaHz: blockPitchDelta - 4,
+          volumeDelta: '-12%',
+          pauseAfterSec: Math.max(pause, 0.70),
+          prependBreath: isFirstClause && enableBreaths,
+        });
+      }
+      // Pain / Suffering / Wound / Darkness: vulnerable depth
+      else if (PAIN_RE.test(uText)) {
+        clauses.push({
+          text: uText,
+          rateDeltaPct: blockRateDelta - 4,
+          pitchDeltaHz: blockPitchDelta - 3,
+          volumeDelta: '-10%',
+          pauseAfterSec: Math.max(pause, 0.70),
+          prependBreath: isFirstClause && enableBreaths,
+        });
+      }
+      // Anger / War / Conflict: firm, contained power
+      else if (ANGER_RE.test(uText)) {
+        clauses.push({
+          text: uText,
+          rateDeltaPct: blockRateDelta - 1,
+          pitchDeltaHz: blockPitchDelta,
+          volumeDelta: '+5%',
+          pauseAfterSec: Math.max(pause, 0.55),
+          prependBreath: isFirstClause && enableBreaths,
+        });
+      }
+      // Joy / Wonder / Cosmic grandeur: lifted, warm
+      else if (JOY_WONDER_RE.test(uText)) {
+        clauses.push({
+          text: uText,
+          rateDeltaPct: blockRateDelta + 2,
+          pitchDeltaHz: blockPitchDelta + 3,
+          volumeDelta: '+3%',
+          pauseAfterSec: Math.max(pause, 0.70),
+          prependBreath: isFirstClause && enableBreaths,
+        });
+      }
+      // True crime / Investigative noir: cold, hushed tension
+      else if (TRUE_CRIME_RE.test(uText)) {
+        clauses.push({
+          text: uText,
+          rateDeltaPct: blockRateDelta - 2,
+          pitchDeltaHz: blockPitchDelta - 2,
+          volumeDelta: '-6%',
+          pauseAfterSec: Math.max(pause, 0.65),
+          prependBreath: isFirstClause && enableBreaths,
+        });
+      }
+      // Dramatic reveal / Climactic name:
+      else if (REVEAL_SETUP_RE.test(uText)) {
+        clauses.push({
+          text: uText,
+          rateDeltaPct: blockRateDelta - 2,
+          pitchDeltaHz: blockPitchDelta - 2,
+          volumeDelta: '-4%',
+          pauseAfterSec: Math.max(pause, 0.65),
+          prependBreath: enableBreaths,
+        });
+      }
+      // Geographical or environmental setting ("island", "mountains", "atlantic", "city", "room"):
+      else if (/\b(island|atlantic|ocean|mountain[s]?|desert|valley|country|empire|swamp)\b/i.test(uText)) {
+        clauses.push({
+          text: uText,
+          rateDeltaPct: blockRateDelta + 1,
+          pitchDeltaHz: blockPitchDelta + 1,
+          volumeDelta: '+1%',
+          pauseAfterSec: Math.max(pause, 0.65),
+          prependBreath: isFirstClause && enableBreaths,
+        });
+      }
+      // Standard narrative clause inheriting block director cue:
+      else {
+        clauses.push({
+          text: uText,
+          rateDeltaPct: blockRateDelta,
+          pitchDeltaHz: blockPitchDelta,
+          volumeDelta: blockVolDelta,
+          pauseAfterSec: pause,
+          prependBreath: isFirstClause && enableBreaths,
+        });
+      }
     }
   }
 
@@ -717,6 +896,19 @@ export function applyMarcusEmotionAnnotation(
   }
 
   return clauses;
+}
+
+/**
+ * Backwards-compatible wrapper for Marcus Deep Soul emotion modulation.
+ */
+export function applyMarcusEmotionAnnotation(
+  text: string,
+  baseRatePct: number = -10
+): MarcusEmotionSegment[] {
+  return applyCategoryEmotionAnnotation(text, baseRatePct, {
+    isMarcus: true,
+    pacing: 'story',
+  });
 }
 
 

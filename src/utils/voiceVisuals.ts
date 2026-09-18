@@ -81,7 +81,6 @@ export function getVoiceCardIdentity(voice: VoiceProfile): VoiceVisualIdentity {
   let displayName = name;
   let subtitle = voice.genreTag || 'Studio Voice';
 
-  // Dedicated clean naming for flagship narrator profiles
   if (id === 'f5-en-marcus-clone' || (name.toLowerCase().includes('marcus') && voice.engine === 'f5_tts')) {
     return {
       displayName: 'Marcus (F5-TTS)',
@@ -93,6 +92,34 @@ export function getVoiceCardIdentity(voice: VoiceProfile): VoiceVisualIdentity {
       timbre: 'Zero-Shot Flow Matching',
       flag,
       iconType: 'documentary',
+    };
+  }
+
+  if (id === 'f5-en-arthur-clone' || (name.toLowerCase().includes('arthur') && voice.engine === 'f5_tts')) {
+    return {
+      displayName: 'Arthur (F5-TTS)',
+      subtitle: 'Archaeology & History • Flow Matching',
+      gradient: 'from-amber-600 via-yellow-800 to-slate-950',
+      glowBorder: 'border-amber-500/50 shadow-amber-500/25',
+      badgeStyle: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+      badgeText: '🎙️ F5 Clone',
+      timbre: 'Zero-Shot Flow Matching',
+      flag,
+      iconType: 'documentary',
+    };
+  }
+
+  if (id === 'f5-en-carrier-clone' || (name.toLowerCase().includes('carrier') && voice.engine === 'f5_tts')) {
+    return {
+      displayName: 'Carrier (F5-TTS)',
+      subtitle: 'Competitor Video Essay • 160 WPM Baritone',
+      gradient: 'from-blue-600 via-indigo-800 to-slate-950',
+      glowBorder: 'border-blue-500/50 shadow-blue-500/25',
+      badgeStyle: 'bg-blue-500/15 text-blue-300 border-blue-500/30',
+      badgeText: '🎙️ Competitor Clone',
+      timbre: '112Hz Sub-Baritone Flow Matching',
+      flag,
+      iconType: 'tech',
     };
   }
 

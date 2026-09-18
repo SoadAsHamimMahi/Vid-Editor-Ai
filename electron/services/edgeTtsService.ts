@@ -5,7 +5,7 @@ import path from 'path';
 import os from 'os';
 import { spawn } from 'child_process';
 import ffmpegPath from 'ffmpeg-static';
-import { detectEmotionFromText, cleanSpeechText, applyPacingBreakTags, applyMarcusEmotionAnnotation, MarcusEmotionSegment, ProsodyPacingProfile } from './ttsTextSanitizer';
+import { detectEmotionFromText, cleanSpeechText, applyPacingBreakTags, applyCategoryEmotionAnnotation, CategoryEmotionSegment, ProsodyPacingProfile } from './ttsTextSanitizer';
 
 export interface EdgeTTSOptions {
   voice?: string;
@@ -304,15 +304,42 @@ export class EdgeTtsService {
 
     const voice = this.resolveVoice(options.voice, options.lang, options.gender, cleanPlainText);
 
-    // 3a. Detect Marcus voice — auto-set deep baritone pitch/rate and story pacing
+    // 3a. Detect Documentary / Cinematic / Storyteller voices:
     const isMarcus = options.voice === 'edge-en-marcus-deep' ||
       options.voice === 'edge-en-marcus' ||
       (Boolean(options.voice) && options.voice!.includes('marcus'));
+
+    const isBrian = options.voice === 'edge-en-brian' || (Boolean(options.voice) && options.voice!.includes('brian'));
+    const isRoger = options.voice === 'edge-en-roger' || (Boolean(options.voice) && options.voice!.includes('roger'));
+    const isDavis = options.voice === 'edge-en-davis' || (Boolean(options.voice) && options.voice!.includes('davis'));
+    const isChristopher = options.voice === 'edge-en-christopher' || (Boolean(options.voice) && options.voice!.includes('christopher'));
+    const isJulianMidnight = options.voice === 'edge-en-julian-midnight' || (Boolean(options.voice) && options.voice!.includes('midnight'));
+
+    // Calibrate defaults for premium documentary voices (118 - 126 WPM standard)
     if (isMarcus) {
-      // Clamp to Marcus's calibrated settings (Christopher at -26Hz = 88.9Hz ElevenLabs match)
       if (!options.pitch || options.pitch === 0) options.pitch = -26;
       if (!options.rate || options.rate === 1.0) options.rate = 0.90;
       if (!options.prosodyPacing) options.prosodyPacing = 'story';
+    } else if (isBrian) {
+      if (!options.pitch || options.pitch === 0) options.pitch = -1; // resonant baritone
+      if (!options.rate || options.rate === 1.0) options.rate = 0.88; // ~120 WPM award-winning documentary gravitas
+      if (!options.prosodyPacing) options.prosodyPacing = 'documentary';
+    } else if (isRoger) {
+      if (!options.pitch || options.pitch === 0) options.pitch = 0;
+      if (!options.rate || options.rate === 1.0) options.rate = 0.89; // measured investigative essayist
+      if (!options.prosodyPacing) options.prosodyPacing = 'documentary';
+    } else if (isDavis) {
+      if (!options.pitch || options.pitch === 0) options.pitch = -2; // authoritative anchor
+      if (!options.rate || options.rate === 1.0) options.rate = 0.88; // grave documentary gravitas
+      if (!options.prosodyPacing) options.prosodyPacing = 'documentary';
+    } else if (isChristopher) {
+      if (!options.pitch || options.pitch === 0) options.pitch = 0;
+      if (!options.rate || options.rate === 1.0) options.rate = 0.88; // British BBC / Ken Burns documentary
+      if (!options.prosodyPacing) options.prosodyPacing = 'documentary';
+    } else if (isJulianMidnight) {
+      if (!options.pitch || options.pitch === 0) options.pitch = -8; // late night chest warmth
+      if (!options.rate || options.rate === 1.0) options.rate = 0.90;
+      if (!options.prosodyPacing) options.prosodyPacing = 'documentary';
     }
 
     // 3b. Auto-apply Calm / Headspace standard silence pauses if voice is Julian Sleep or pacing is sleep/meditation
@@ -321,16 +348,21 @@ export class EdgeTtsService {
       options.voice === 'edge-en-julian-sleep' ||
       (Boolean(options.voice) && options.voice!.includes('julian-sleep'));
 
-    // 3c. Marcus uses story pacing with segment silence for natural cinematic pauses
-    const isMarcusMode = isMarcus && !isSleepMode;
+    // 3c. Check if voice qualifies for Category Emotion & Prosody Modulation (clause-level rate/pitch + breaths + pauses)
+    const isCategoryModulationMode = !isSleepMode && (
+      isMarcus || isBrian || isRoger || isDavis || isJulianMidnight ||
+      options.prosodyPacing === 'documentary' ||
+      options.prosodyPacing === 'story' ||
+      options.prosodyPacing === 'trailer'
+    );
 
     if (isSleepMode) {
       cleanPlainText = applyPacingBreakTags(
         cleanPlainText,
         options.prosodyPacing === 'meditation' ? 'meditation' : 'sleep'
       );
-    } else if (isMarcusMode) {
-      // Marcus emotion engine handles its own clause-level cinematic pause intervals internally
+    } else if (isCategoryModulationMode) {
+      // Category emotion engine handles its own clause-level cinematic pause intervals internally
     } else {
       cleanPlainText = cleanPlainText.replace(/\s*__PARA_BREAK__\s*/g, '\n\n');
     }
@@ -367,12 +399,11 @@ export class EdgeTtsService {
     }
 
     // Protect consonant intelligibility:
-    // 1. Never let neural vocoder drop below -2Hz (below -2Hz causes severe consonant slurring & vocoder phase-muffling)
-    // 2. For deep baritone voices like BrianNeural, clamp pitch to [-1Hz, +2Hz] so it remains crisp and resonant
-    // EXCEPTION: Marcus uses Christopher at -14Hz intentionally for sub-baritone 109Hz chest resonance — don't clamp
+    // 1. Never let neural vocoder drop below -2Hz for generic voices
+    // 2. EXCEPTION: Marcus (-26Hz) and Julian Midnight (-8Hz) use chest resonance
     const isDeepBaritone = voice.includes('BrianNeural') || voice.includes('ChristopherNeural');
-    const minPitch = (isMarcus || isDeepBaritone && Math.abs(basePitch) > 5) ? -50 : (isDeepBaritone ? -1 : -2);
-    basePitch = Math.max(minPitch, Math.min(isMarcus ? 4 : 4, basePitch));
+    const minPitch = (isMarcus || isJulianMidnight || (isDeepBaritone && Math.abs(basePitch) > 5)) ? -50 : (isDeepBaritone ? -3 : -2);
+    basePitch = Math.max(minPitch, Math.min(isMarcus ? 4 : 6, basePitch));
 
     // 3. Minimum rate 0.85x so words are articulate and natural (never dragged out or muddy)
     baseRate = Math.max(0.85, Math.min(1.25, baseRate));
@@ -381,10 +412,9 @@ export class EdgeTtsService {
     const rateStr = `${ratePercent >= 0 ? '+' : ''}${ratePercent}%`;
     const pitchStr = `${basePitch >= 0 ? '+' : ''}${Math.round(basePitch)}Hz`;
 
-    // 2. Route Marcus through emotion modulation engine (clause-level pitch/rate/volume variation)
-    // Route other modes through segment silence engine, plain modes through standard synthesis
+    // 2. Route qualified voices through Category Emotion & Prosody Modulation Engine
     const hasManualPauses = /\[\s*(?:pause|break|silence)/i.test(text);
-    if (isMarcusMode) {
+    if (isCategoryModulationMode) {
       try {
         const baseRatePct = Math.round((baseRate - 1.0) * 100);
         const emotionSuccess = await this.synthesizeWithEmotionModulation(
@@ -392,13 +422,15 @@ export class EdgeTtsService {
           voice,
           Math.round(basePitch),
           baseRatePct,
-          outputPath
+          outputPath,
+          options.prosodyPacing || 'documentary',
+          isMarcus
         );
         if (emotionSuccess && fs.existsSync(outputPath)) {
           return true;
         }
       } catch (emoErr: any) {
-        console.warn('[EdgeTtsService] Marcus emotion modulation warning, falling back to segment silence:', emoErr.message);
+        console.warn('[EdgeTtsService] Category emotion modulation warning, falling back to segment silence:', emoErr.message);
       }
     }
     if (isSleepMode || hasManualPauses) {
@@ -530,33 +562,39 @@ export class EdgeTtsService {
   }
 
   /**
-   * Marcus Deep Soul Emotion Modulation Engine.
+   * Category Emotion & Prosody Modulation Engine (ElevenLabs Calibrated).
    * Synthesizes text with clause-level pitch, rate, and volume variation to create genuine
-   * emotional vulnerability — slower + deeper on pain/tears/crying/death words,
-   * with breath inhales before key opening lines and dramatic revelations.
+   * emotional vulnerability & documentary gravitas — slower + deeper on pain/tears/crying/death words,
+   * with breath inhales before key opening lines and dramatic revelations across all documentary voices.
    */
   private async synthesizeWithEmotionModulation(
     text: string,
     voice: string,
-    basePitchHz: number,  // e.g. -26 for Marcus
+    basePitchHz: number,  // e.g. -26 for Marcus, -1 for Brian
     baseRatePct: number,  // e.g. -10 for 0.90x
-    outputPath: string
+    outputPath: string,
+    pacingProfile: ProsodyPacingProfile = 'documentary',
+    isMarcus: boolean = false
   ): Promise<boolean> {
     const ffmpegExe = ffmpegPath ? ffmpegPath.replace('app.asar', 'app.asar.unpacked') : 'ffmpeg';
 
-    // Locate the breath inhale asset (packed into resources in production)
+    // Locate the breath inhale asset (packed into resources/public in production)
     const breathCandidates = [
       path.resolve(process.cwd(), 'projects_data', 'audio', 'voice_test', 'breath_inhale.mp3'),
-      path.resolve(process.cwd(), 'resources', 'audio', 'breath_inhale.mp3'),
       path.resolve(process.cwd(), 'public', 'audio', 'breath_inhale.mp3'),
+      path.resolve(process.cwd(), 'resources', 'audio', 'breath_inhale.mp3'),
     ];
     const breathFile = breathCandidates.find((p) => fs.existsSync(p)) || null;
 
-    // Annotate text into emotion-modulated segments
-    const emotionSegments = applyMarcusEmotionAnnotation(text, baseRatePct);
+    // Annotate text into emotion-modulated segments (clean studio voiceover: zero synthetic breath artifacts)
+    const emotionSegments = applyCategoryEmotionAnnotation(text, baseRatePct, {
+      pacing: pacingProfile,
+      isMarcus,
+      enableBreaths: false,
+    });
     if (emotionSegments.length === 0) return false;
 
-    const tempDir = path.join(os.tmpdir(), `marcus_emo_${Date.now()}_${Math.random().toString(36).slice(2)}`);
+    const tempDir = path.join(os.tmpdir(), `edge_emo_${Date.now()}_${Math.random().toString(36).slice(2)}`);
     await fs.ensureDir(tempDir);
 
     try {
@@ -567,10 +605,12 @@ export class EdgeTtsService {
           const idx = i + bIdx;
           if (!seg.text.trim()) return;
 
-          // Clamp combined pitch: base Marcus (-26Hz) + delta = floor at -32Hz
-          const finalPitch = Math.max(-32, Math.min(4, basePitchHz + seg.pitchDeltaHz));
-          // Clamp combined rate: base (-10%) + delta = floor at -25%
-          const finalRatePct = Math.max(-25, Math.min(10, baseRatePct + seg.rateDeltaPct));
+          // Clamp combined pitch
+          const minPitchFloor = isMarcus ? -32 : -8;
+          const maxPitchCeil = isMarcus ? 4 : 6;
+          const finalPitch = Math.max(minPitchFloor, Math.min(maxPitchCeil, basePitchHz + seg.pitchDeltaHz));
+          // Clamp combined rate
+          const finalRatePct = Math.max(-25, Math.min(15, baseRatePct + seg.rateDeltaPct));
 
           const pitchStr = `${finalPitch >= 0 ? '+' : ''}${finalPitch}Hz`;
           const rateStr = `${finalRatePct >= 0 ? '+' : ''}${finalRatePct}%`;
@@ -581,7 +621,7 @@ export class EdgeTtsService {
 
           await this.synthesizeWithPythonInline(seg.text, voice, rateStr, pitchStr, rawFile, volumeStr);
 
-          // Trim trailing TTS silence so explicit pauses are accurate
+          // Trim both leading and trailing TTS silence so speech starts cleanly and explicit pauses are exact
           if (fs.existsSync(rawFile)) {
             try {
               await new Promise((res, rej) => {
@@ -600,27 +640,11 @@ export class EdgeTtsService {
         }));
       }
 
-      // Build concat list
+      // Build concat list (pure, pristine speech with mathematically exact pauses)
       const concatLines: string[] = [];
       for (let idx = 0; idx < emotionSegments.length; idx++) {
         const seg = emotionSegments[idx];
         if (!seg.text.trim()) continue;
-
-        // Prepend breath inhale if requested and available
-        if (seg.prependBreath && breathFile) {
-          concatLines.push(`file '${breathFile.replace(/\\/g, '/')}'`);
-          // Short gap after breath before speech (natural inhale → speak timing)
-          const breathGapFile = path.join(tempDir, 'breath_gap.mp3');
-          if (!fs.existsSync(breathGapFile)) {
-            await new Promise((res, rej) => {
-              const p = spawn(ffmpegExe, ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono', '-t', '0.08', '-b:a', '48k', breathGapFile]);
-              p.on('close', (c) => c === 0 ? res(true) : rej(new Error(`BreathGap exit ${c}`)));
-            });
-          }
-          if (fs.existsSync(breathGapFile)) {
-            concatLines.push(`file '${breathGapFile.replace(/\\/g, '/')}'`);
-          }
-        }
 
         const trimFile = path.join(tempDir, `emo_${idx}_trim.mp3`);
         const rawFile = path.join(tempDir, `emo_${idx}_raw.mp3`);

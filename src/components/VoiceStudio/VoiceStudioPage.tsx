@@ -926,16 +926,16 @@ export const VoiceStudioPage: React.FC = () => {
         if (aFav !== bFav) {
           return bFav - aFav; // Favorites on top!
         }
-        // Within non-favorites, place top featured presets like Marcus & Julian first
-        const aJulian = (a.id === 'f5-en-marcus-clone' || a.id === 'edge-en-marcus-deep' || a.id === 'edge-en-julian-sleep' || a.id === 'edge-en-julian-midnight') ? 1 : 0;
-        const bJulian = (b.id === 'f5-en-marcus-clone' || b.id === 'edge-en-marcus-deep' || b.id === 'edge-en-julian-sleep' || b.id === 'edge-en-julian-midnight') ? 1 : 0;
+        // Within non-favorites, place top featured presets like Marcus, Arthur & Julian first
+        const aJulian = (a.id === 'f5-en-marcus-clone' || a.id === 'f5-en-arthur-clone' || a.id === 'edge-en-marcus-deep' || a.id === 'edge-en-julian-sleep' || a.id === 'edge-en-julian-midnight') ? 1 : 0;
+        const bJulian = (b.id === 'f5-en-marcus-clone' || b.id === 'f5-en-arthur-clone' || b.id === 'edge-en-marcus-deep' || b.id === 'edge-en-julian-sleep' || b.id === 'edge-en-julian-midnight') ? 1 : 0;
         if (aJulian !== bJulian) return bJulian - aJulian;
         return 0;
       }
 
       if (voiceSortOption === 'default') {
-        const aJulian = (a.id === 'f5-en-marcus-clone' || a.id === 'edge-en-marcus-deep' || a.id === 'edge-en-julian-sleep' || a.id === 'edge-en-julian-midnight') ? 1 : 0;
-        const bJulian = (b.id === 'f5-en-marcus-clone' || b.id === 'edge-en-marcus-deep' || b.id === 'edge-en-julian-sleep' || b.id === 'edge-en-julian-midnight') ? 1 : 0;
+        const aJulian = (a.id === 'f5-en-marcus-clone' || a.id === 'f5-en-arthur-clone' || a.id === 'edge-en-marcus-deep' || a.id === 'edge-en-julian-sleep' || a.id === 'edge-en-julian-midnight') ? 1 : 0;
+        const bJulian = (b.id === 'f5-en-marcus-clone' || b.id === 'f5-en-arthur-clone' || b.id === 'edge-en-marcus-deep' || b.id === 'edge-en-julian-sleep' || b.id === 'edge-en-julian-midnight') ? 1 : 0;
         if (aJulian !== bJulian) return bJulian - aJulian;
       }
 

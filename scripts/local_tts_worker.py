@@ -141,9 +141,9 @@ def main():
         # Naturalization and flow matching tuning parameters
         naturalize = bool(req.get("naturalize", True))
         ode_steps = int(req.get("ode_steps", req.get("nfe_step", 32)))
-        ode_steps = max(32, ode_steps)  # Enforce >= 32 ODE steps for production
+        ode_steps = max(16, min(64, ode_steps))  # Standard 32 steps (2x faster, matches preview quality)
         cfg_strength = float(req.get("cfg_strength", 2.0))
-        cfg_strength = max(1.2, min(2.5, cfg_strength))  # Calibrate between 1.2 and 2.5
+        cfg_strength = max(1.5, min(3.0, cfg_strength))  # Calibrate between 1.5 and 3.0
         temperature = float(req.get("temperature", 0.75))  # SpeakSay human vocal variability
         exaggeration = float(req.get("exaggeration", 0.5))  # SpeakSay natural emotional cadence
         cfg_weight = float(req.get("cfg_weight", 0.5))
@@ -198,18 +198,108 @@ def main():
                     F5TTS = getattr(f5_api, "F5TTS")
                     f5_instance = F5TTS(device=device)
 
-                    res = f5_instance.infer(
-                        ref_file=clean_ref_audio,
-                        ref_text=reference_text or "",
-                        gen_text=gen_text,
-                        nfe_step=ode_steps,
-                        cfg_strength=cfg_strength,
-                        speed=speed
+                    import re
+                    import librosa
+
+                    # 1. Clean bracketed stage directions (e.g. [narrating, low], [building], [whisper]),
+                    # while preserving explicit pause tags like [pause: 0.8s]
+                    gen_text = re.sub(r'\[(?!pause:\s*[\d.]+s?\])[^\]]+\]', '', gen_text)
+                    gen_text = re.sub(r'[ \t]+', ' ', gen_text).strip()
+
+                    # Protect common abbreviations from false sentence splits
+                    protected_text = re.sub(
+                        r'\b(D\.C\.|U\.S\.|Mr\.|Mrs\.|Dr\.|St\.|i\.e\.|e\.g\.)',
+                        lambda m: m.group(1).replace('.', '@@DOT@@'),
+                        gen_text
                     )
-                    if isinstance(res, tuple) and len(res) > 0:
-                        w_data = res[0]
-                        w_sr = res[1] if len(res) > 1 else 24000
-                        sf.write(output_path, w_data, w_sr)
+
+                    # Split text into raw sentences on boundary punctuation or explicit newlines
+                    raw_segments = [s.strip().replace('@@DOT@@', '.') for s in re.split(r'(?<=[.!?\n])\s+', protected_text) if s.strip()]
+
+                    # Group short fragments into robust narrative units (target: at least 12 words or 65 characters)
+                    grouped_sentences = []
+                    curr_segment = ''
+                    for s in raw_segments:
+                        if not curr_segment:
+                            curr_segment = s
+                        else:
+                            if len(curr_segment.split()) < 12 or len(s.split()) < 6:
+                                curr_segment += ' ' + s
+                            else:
+                                grouped_sentences.append(curr_segment)
+                                curr_segment = s
+                    if curr_segment:
+                        grouped_sentences.append(curr_segment)
+
+                    clean_units = []
+                    for seg in grouped_sentences:
+                        # Check for embedded pause tags
+                        pause_match = re.search(r'\[pause:\s*([\d.]+)s?\]', seg)
+                        if pause_match:
+                            p_val = float(pause_match.group(1))
+                            clean_t = re.sub(r'\[pause:\s*[\d.]+s?\]', '', seg).strip()
+                            clean_units.append((clean_t, p_val))
+                            continue
+
+                        # Standard narrative pause between grouped units
+                        clean_units.append((seg, 0.75))
+
+                    # Sanitize reference text to ensure no trailing prompt leakage
+                    if reference_text and "cool a single human being" in reference_text:
+                        reference_text = "1902, a 25-year-old engineer in Brooklyn, New York, built a machine to stop ink from smudging on paper."
+
+                    if len(clean_units) > 1:
+                        audio_blocks = []
+                        w_sr = 24000
+                        CROSSFADE_MS = 20  # 20ms equal-power crossfade at segment junctions
+
+                        for idx, (unit_text, unit_pause) in enumerate(clean_units):
+                            if unit_text:
+                                res_u = f5_instance.infer(
+                                    ref_file=clean_ref_audio,
+                                    ref_text=reference_text or "",
+                                    gen_text=unit_text,
+                                    nfe_step=ode_steps,
+                                    cfg_strength=cfg_strength,
+                                    speed=speed
+                                )
+                                if isinstance(res_u, tuple) and len(res_u) > 0:
+                                    u_data = res_u[0]
+                                    w_sr = res_u[1] if len(res_u) > 1 else w_sr
+                                    # Trim neural noise/silence from edges
+                                    non_sil = librosa.effects.split(u_data, top_db=36)
+                                    if len(non_sil) > 0:
+                                        u_data = u_data[non_sil[0][0] : non_sil[-1][1]]
+
+                                    # Apply 20ms equal-power crossfade tail to smooth segment join
+                                    cf_samples = int(CROSSFADE_MS / 1000.0 * w_sr)
+                                    if len(u_data) > cf_samples * 2 and len(audio_blocks) > 0:
+                                        fade_out = np.cos(np.linspace(0, np.pi / 2, cf_samples)) ** 2
+                                        u_data[-cf_samples:] *= fade_out[::-1]  # tail fade
+
+                                    audio_blocks.append(u_data)
+
+                            # Add silence gap between units (not after the last one)
+                            if unit_pause > 0 and idx < len(clean_units) - 1:
+                                pause_samples = int(unit_pause * w_sr)
+                                audio_blocks.append(np.zeros(pause_samples, dtype=np.float32))
+
+                        if audio_blocks:
+                            w_data = np.concatenate(audio_blocks)
+                            sf.write(output_path, w_data, w_sr)
+                    else:
+                        res = f5_instance.infer(
+                            ref_file=clean_ref_audio,
+                            ref_text=reference_text or "",
+                            gen_text=gen_text,
+                            nfe_step=ode_steps,
+                            cfg_strength=cfg_strength,
+                            speed=speed
+                        )
+                        if isinstance(res, tuple) and len(res) > 0:
+                            w_data = res[0]
+                            w_sr = res[1] if len(res) > 1 else 24000
+                            sf.write(output_path, w_data, w_sr)
                 except (ImportError, AttributeError):
                     # Fallback to utils_infer
                     f5_infer = importlib.import_module("f5_tts.infer.utils_infer")

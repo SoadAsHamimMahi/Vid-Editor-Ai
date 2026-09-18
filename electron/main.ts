@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import { app, BrowserWindow, ipcMain, protocol, net, dialog, shell } from 'electron';
 import path from 'path';
 import fs from 'fs-extra';

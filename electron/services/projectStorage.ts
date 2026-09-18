@@ -545,14 +545,34 @@ export class ProjectStorage {
   }
 
   public async getSettings(): Promise<Record<string, any>> {
+    let settings: Record<string, any> = {};
     try {
       if (await fs.pathExists(this.settingsPath)) {
-        return await fs.readJSON(this.settingsPath);
+        settings = await fs.readJSON(this.settingsPath);
       }
     } catch (err) {
       console.warn('[ProjectStorage] Error reading settings:', err);
     }
-    return {};
+
+    // Merge environment variables from .env if available
+    const envGemini = process.env.GEMINI_API_KEY?.trim();
+    if (envGemini && !settings.geminiApiKey) {
+      settings.geminiApiKey = envGemini;
+    }
+    const envGroq = process.env.GROQ_API_KEY?.trim();
+    if (envGroq && !settings.groqApiKey) {
+      settings.groqApiKey = envGroq;
+    }
+    const envElevenLabs = process.env.ELEVENLABS_API_KEY?.trim();
+    if (envElevenLabs && !settings.elevenlabsApiKey) {
+      settings.elevenlabsApiKey = envElevenLabs;
+    }
+    const envOpenAI = process.env.OPENAI_API_KEY?.trim();
+    if (envOpenAI && !settings.openaiApiKey) {
+      settings.openaiApiKey = envOpenAI;
+    }
+
+    return settings;
   }
 
   public async saveSettings(settings: Record<string, any>): Promise<void> {

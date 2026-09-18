@@ -16,6 +16,11 @@ projects_data
 chrome_profile_*
 *.local
 
+# Environment variables & secrets (keep local, never commit)
+.env
+.env.*
+!.env.example
+
 # Python cache & models
 __pycache__/
 *.pyc
