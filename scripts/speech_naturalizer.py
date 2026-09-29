@@ -103,7 +103,8 @@ class SpeechNaturalizer:
         text = re.sub(r'\[\s*(?:pause|break|silence)(?:(?::|\s+|=|-)?\s*[\d.]+\s*(?:s|ms|sec|seconds)?)?\s*\]', ' , ', text, flags=re.IGNORECASE)
         text = re.sub(r'\[\s*[\d.]+\s*(?:s|ms|sec|seconds)?\s*(?:pause|break|silence)\s*\]', ' , ', text, flags=re.IGNORECASE)
         text = re.sub(r'\(\s*(?:pause|break|silence)(?:(?::|\s+|=|-)?\s*[\d.]+\s*(?:s|ms|sec|seconds)?)?\s*\)', ' , ', text, flags=re.IGNORECASE)
-        text = re.sub(r'\[\s*[^\]\n]{1,80}\s*\]', ' ', text)
+        # Only strip non-delivery bracket metadata, preserving delivery cues, pause tags, and tokens
+        text = re.sub(r'\[\s*(?!@@|pause|break|silence|breath|whisper|dramatic|building|quiet|steady|narrating|flat|grim|dry|softly|intimate|hushed|bold|calm|climax)[^\]\n]{1,80}\s*\]', ' ', text, flags=re.IGNORECASE)
         text = re.sub(r'\(\s*(?:speak|voice|tone|emotion|whisper|sigh|gasp|pause|sound|music|cue|delivery|style|acting|slowly|gentle|warm|soft|sad|smile|reflective|strong|deep|fade|building|dramatic)[^)\n]{0,60}\)', ' ', text, flags=re.IGNORECASE)
 
         # Clean up stray commas beside periods / exclamation marks / question marks
@@ -116,9 +117,47 @@ class SpeechNaturalizer:
         text = re.sub(r'\bII\b', 'the Second', text)
         text = re.sub(r'\bIV\b', 'the Fourth', text)
 
-        # Normalize hyphenated technical terms so TTS articulates them seamlessly
+        # Normalize hyphenated technical terms so TTS articulates them as single fluent concepts
+        text = re.sub(r'\bsteam[-\s_]+driven\b', 'steam driven', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bice[-\s_]+water\b', 'ice water', text, flags=re.IGNORECASE)
         text = re.sub(r'\b[Xx]-ray\b', 'exray', text)
         text = re.sub(r'\b[Xx]-rays\b', 'exrays', text)
+
+        # Phonetic respelling for proper names frequently mispronounced by English acoustic models
+        text = re.sub(r'\bLionel\s+Andr[eé]s\s+Messi\b', 'Leonel Andrés Messi', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bLionel\s+Andr[eé]s\b', 'Leonel Andrés', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bLionel\s+Messi\b', 'Leonel Messi', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bParan[áa]\s+River\b', 'Parana River', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bParan[áa]\b', 'Parana', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bRosario\b', 'Rosario', text, flags=re.IGNORECASE)
+
+        # London & Historical Sanitation Documentary Lexicon
+        text = re.sub(r'\bRiver\s+Thames\b', 'River Temz', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bThames\b', 'Temz', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bJoseph\s+(?:William\s+)?Bazalgette\b', 'Joseph Bazeljet', text, flags=re.IGNORECASE)
+        text = re.sub(r"\bBazalgette's\b", "Bazeljet's", text, flags=re.IGNORECASE)
+        text = re.sub(r'\bBazalgette\b', 'Bazeljet', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bCholera\b', 'Kolera', text)
+        text = re.sub(r'\bcholera\b', 'kolera', text)
+        text = re.sub(r'\bgardyloo\b', 'gardy-loo', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bprivies\b', 'prih-veez', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bprivy\b', 'prih-vee', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bSir\s+John\s+Harington\b', 'Sir John Harrington', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bHarington\b', 'Harrington', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bmiasma\s+theory\b', 'my-az-muh theory', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bmiasma\b', 'my-az-muh', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bchloride\s+of\s+lime\b', 'klor-ide of lime', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bcesspit\b', 'sess-pit', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bcesspools\b', 'sess-pools', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bcesspool\b', 'sess-pool', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bcisterns\b', 'sis-terns', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bcistern\b', 'sis-tern', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bcourtiers\b', 'kor-tee-erz', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bcourtier\b', 'kor-tee-er', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bEdinburgh\b', 'Edin-bur-uh', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bMPs\b', "M-P's", text)
+        text = re.sub(r'\bI\s+read\s+every\b', 'I reed every', text, flags=re.IGNORECASE)
+        text = re.sub(r'\bI\s+read\s+all\b', 'I reed all', text, flags=re.IGNORECASE)
 
         # Expand Currency: $45.50 -> forty-five dollars and fifty cents
         def expand_currency(match):
@@ -137,21 +176,54 @@ class SpeechNaturalizer:
         # Percentages: 50% -> fifty percent
         text = re.sub(r'(\d+)\s*%', lambda m: f"{self.number_to_words(m.group(1))} percent", text)
 
-        # Common Years: 1900 - 2099 (e.g., 2026 -> twenty twenty-six)
+        # Decades & Eras: 1300s, 1400s, 1500s, 1590s, 1840s, etc.
+        era_map = {
+            '1300s': 'thirteen hundreds',
+            '1400s': 'fourteen hundreds',
+            '1500s': 'fifteen hundreds',
+            '1590s': 'fifteen nineties',
+            '1600s': 'sixteen hundreds',
+            '1700s': 'seventeen hundreds',
+            '1800s': 'eighteen hundreds',
+            '1840s': 'eighteen forties',
+            '1850s': 'eighteen fifties',
+            '1860s': 'eighteen sixties',
+            '1870s': 'eighteen seventies',
+            '1880s': 'eighteen eighties',
+            '1890s': 'eighteen nineties',
+            '1900s': 'nineteen hundreds',
+            '1920s': 'nineteen twenties',
+            '1930s': 'nineteen thirties',
+            '1940s': 'nineteen forties',
+            '1950s': 'nineteen fifties',
+            '1960s': 'nineteen sixties',
+            '1970s': 'nineteen seventies',
+            '1980s': 'nineteen eighties',
+            '1990s': 'nineteen nineties',
+            '2000s': 'two thousands',
+            '2010s': 'twenty tens',
+            '2020s': 'twenty twenties',
+        }
+        for era_k, era_v in era_map.items():
+            text = re.sub(r'\b' + era_k + r'\b', era_v, text, flags=re.IGNORECASE)
+
+        # Universal 4-digit Historical Years: 1000 - 2099 (e.g., 1326 -> thirteen twenty-six, 1858 -> eighteen fifty-eight)
         def expand_year(match):
             val = int(match.group(0))
             if 2000 <= val <= 2009:
                 return f"two thousand {self.number_to_words(str(val - 2000)) if val > 2000 else ''}".strip()
             elif 2010 <= val <= 2099:
                 return f"twenty {self.number_to_words(str(val - 2000))}"
-            elif 1900 <= val <= 1999:
+            elif 1000 <= val <= 1999:
                 century = self.number_to_words(str(val // 100))
                 rem = val % 100
+                if rem == 0:
+                    return f"{century} hundred"
                 rem_str = f"oh {self.number_to_words(str(rem))}" if rem < 10 else self.number_to_words(str(rem))
                 return f"{century} {rem_str}"
             return match.group(0)
 
-        text = re.sub(r'\b(19\d{2}|20\d{2})\b', expand_year, text)
+        text = re.sub(r'\b(1\d{3}|20\d{2})\b', expand_year, text)
 
         # Expand common abbreviations
         abbreviations = {
@@ -235,15 +307,16 @@ class SpeechNaturalizer:
         self,
         audio_path: str,
         output_path: str | None = None,
-        min_duration: float = 6.0,
-        max_duration: float = 10.0,
+        min_duration: float = 3.0,
+        max_duration: float = 12.0,
         ffmpeg_bin: str = "ffmpeg"
     ) -> str:
         """
         Calibrates zero-shot reference audio:
         1. Ensures 24kHz mono 16-bit PCM WAV.
-        2. Clamps duration strictly between 6.0 and 10.0 seconds.
+        2. Clamps duration strictly between 3.0 and 12.0 seconds (acoustic sweet spot).
         3. Applies an 80Hz 4th-order high-pass filter to strip room rumble and HVAC hum.
+        4. True-peak ceiling normalization to -1.0 dBFS to ensure clean dynamic headroom.
         """
         if not audio_path or not os.path.exists(audio_path):
             raise FileNotFoundError(f"Reference audio not found: {audio_path}")
@@ -268,18 +341,23 @@ class SpeechNaturalizer:
 
             total_duration = len(data) / sr
 
-            # Clamp duration: strictly between 6.0 and 10.0 seconds
+            # Clamp duration: strictly between 3.0 and 12.0 seconds sweet spot
             if total_duration > max_duration:
                 data = data[:int(max_duration * sr)]
             elif total_duration < min_duration:
-                # Pad with silence or repeat speech segment if too short
+                # Pad with trailing silence if too short (do NOT repeat speech to avoid prompt leakage)
                 target_samples = int(min_duration * sr)
-                if len(data) > 0:
-                    repeats = math.ceil(target_samples / len(data))
-                    data = np.tile(data, repeats)[:target_samples]
+                pad_samples = target_samples - len(data)
+                if pad_samples > 0:
+                    data = np.pad(data, (0, pad_samples), mode='constant')
 
             # Apply 80 Hz High-Pass Filter to eliminate HVAC rumble & DC offset
             data = self.apply_highpass(data, cutoff=80.0)
+
+            # Peak normalize to -1.0 dBFS (0.8913) to ensure clean dynamic headroom without clipping
+            peak = np.max(np.abs(data))
+            if peak > 1e-4:
+                data = (data / peak) * 0.8913
 
             # Write clean 24kHz mono 16-bit PCM WAV
             pcm = (np.clip(data, -1.0, 1.0) * 32767).astype(np.int16)
@@ -317,8 +395,8 @@ class SpeechNaturalizer:
         self,
         audio_data: np.ndarray,
         freq_low: float = 5000.0,
-        freq_high: float = 8000.0,
-        attenuation_db: float = 3.5
+        freq_high: float = 10500.0,
+        attenuation_db: float = 4.5
     ) -> np.ndarray:
         """
         Dynamic de-essing: attenuates resonant high-frequency digital sibilance

@@ -842,8 +842,11 @@ export class TTSService {
   /**
    * Main TTS synthesis entrypoint.
    */
-  public async generateSpeech(req: TTSGenerationRequest): Promise<TTSGenerationResult> {
+  public async generateSpeech(req: TTSGenerationRequest, onProgress?: (progress: any) => void): Promise<TTSGenerationResult> {
     try {
+      if (onProgress) {
+        onProgress({ percent: 5, elapsedSec: 0, message: 'Preparing speech text & prosody calibration...' });
+      }
       // 1. Detect emotion from mood/mode tags if not explicitly set
       req.emotion = detectEmotionFromText(req.text, req.emotion);
 
@@ -950,29 +953,33 @@ export class TTSService {
       }
       // 3. F5-TTS (Flow-Matching Expressive Voice Clone)
       else if (req.engine === 'f5_tts') {
-        generated = await this.synthesizeWithLocalPython(req, outputPath);
+        generated = await this.synthesizeWithLocalPython(req, outputPath, onProgress);
       }
       // 4. ElevenLabs (Cinematic / Broadcast Documentary)
       else if (req.engine === 'elevenlabs') {
+        if (onProgress) onProgress({ percent: 15, elapsedSec: 0, etaSec: 5, message: 'Synthesizing with ElevenLabs HD Studio...' });
         generated = await this.synthesizeWithElevenLabs(req, outputPath);
       }
       // 2. OpenAI HD Studio Speech
       else if (req.engine === 'openai') {
+        if (onProgress) onProgress({ percent: 15, elapsedSec: 0, etaSec: 4, message: 'Synthesizing with OpenAI HD...' });
         generated = await this.synthesizeWithOpenAI(req, outputPath);
       }
       // 3. Google AI & Free Speech (Gemini 2.0 Flash Audio + Google Free Web TTS)
       else if (req.engine === 'google') {
+        if (onProgress) onProgress({ percent: 15, elapsedSec: 0, etaSec: 4, message: 'Synthesizing with Google AI Voice...' });
         const apiKey = req.apiKey || this.getApiKey('gemini');
         generated = await this.googleTtsService.synthesizeToFile(req, outputPath, apiKey);
       }
       // 4. Microsoft Edge Neural Engine (100% Free / Ultra-Realistic Studio Quality)
       else if (req.engine === 'edge_tts') {
+        if (onProgress) onProgress({ percent: 15, elapsedSec: 0, etaSec: 3, message: 'Synthesizing with Edge Neural Studio...' });
         generated = await this.synthesizeWithEdge(req, outputPath);
       }
       // 4. Local Python Models (IndicF5 or Chatterbox)
       else if (req.engine === 'indic_f5' || req.engine === 'chatterbox') {
         try {
-          generated = await this.synthesizeWithLocalPython(req, outputPath);
+          generated = await this.synthesizeWithLocalPython(req, outputPath, onProgress);
         } catch (localErr: any) {
           console.warn(`[TTSService] Local ${req.engine} engine unavailable (${localErr.message}). Falling back to Microsoft Edge Neural engine...`);
           generated = await this.synthesizeWithEdge(req, outputPath);
@@ -980,6 +987,7 @@ export class TTSService {
       }
       // 5. Default Fast Neural (routed to Microsoft Edge Neural for authentic studio realism)
       else {
+        if (onProgress) onProgress({ percent: 15, elapsedSec: 0, etaSec: 3, message: 'Synthesizing with Neural Voice...' });
         generated = await this.synthesizeWithEdge(req, outputPath);
       }
 
@@ -991,6 +999,9 @@ export class TTSService {
       const effectivePreset = req.masteringPreset !== undefined ? req.masteringPreset : 'broadcast_studio';
       // KokoroService applies mastering internally during export; for all other engines, master here
       if (effectivePreset && effectivePreset !== 'none' && req.engine !== 'kokoro') {
+        if (onProgress) {
+          onProgress({ percent: 98.5, elapsedSec: 0, etaSec: 1.5, message: 'Applying broadcast studio mastering & DSP strip...' });
+        }
         const masteredPath = outputPath.replace(/\.mp3$/i, `_${effectivePreset}.mp3`);
         await this.ffmpegService.masterAudio(outputPath, masteredPath, effectivePreset);
         if (fs.existsSync(masteredPath)) {
@@ -1034,6 +1045,10 @@ export class TTSService {
       };
 
       await this.saveVoiceRecord(record);
+
+      if (onProgress) {
+        onProgress({ percent: 100, elapsedSec: 0, etaSec: 0, message: 'Voiceover synthesis complete!' });
+      }
 
       return {
         success: true,
@@ -1610,7 +1625,7 @@ export class TTSService {
   /**
    * Local Python worker invocation for IndicF5 & Chatterbox Multilingual models.
    */
-  private async synthesizeWithLocalPython(req: TTSGenerationRequest, outputPath: string): Promise<boolean> {
+  private async synthesizeWithLocalPython(req: TTSGenerationRequest, outputPath: string, onProgress?: (data: any) => void): Promise<boolean> {
     return new Promise((resolve, reject) => {
       const appRoot = (app && typeof app.getAppPath === 'function') ? app.getAppPath() : process.cwd();
       const scriptCandidates = [
@@ -1625,7 +1640,7 @@ export class TTSService {
       }
 
       const rawStr = req.text || '';
-      const cleanText = cleanSpeechText(rawStr, { preservePauses: true });
+      const cleanText = cleanSpeechText(rawStr, { preservePauses: true, preservePauseTags: true });
 
       let refAudio = req.referenceAudioPath || null;
       if (refAudio && !path.isAbsolute(refAudio)) {
@@ -1643,6 +1658,11 @@ export class TTSService {
         }
       }
 
+      const calculatedOdeSteps = req.odeSteps || (
+        req.f5Quality === 'cinema_studio' ? 64 :
+        req.f5Quality === 'ultra_master' ? 48 : 32
+      );
+
       const payload = JSON.stringify({
         text: cleanText,
         engine: req.engine,
@@ -1653,9 +1673,11 @@ export class TTSService {
         reference_text: req.referenceText || null,
         speed: req.speed || 1.0,
         pitch: req.pitch || 0,
-        emotion: req.emotion || 'neutral',
-        ode_steps: 32, // Flow-matching ODE steps >= 32 for zero-synthetic-buzz
-        cfg_strength: 2.0, // Calibrated guidance scale (1.5 - 2.2)
+        seed: (req as any).seed || 42,
+        enable_pacing_dynamics: true,
+        ode_steps: calculatedOdeSteps, // 32 standard, 48 ultra master, 64 cinema studio
+        cfg_strength: req.cfgStrength ?? 1.90, // Guidance scale: 1.5 (stable) → 1.9 (natural default) → 2.5 (expressive)
+        enable_breaths: req.enableNaturalBreaths !== false, // Natural physiological micro-breaths
         temperature: (req as any).temperature || 0.75, // SpeakSay human vocal variability
         exaggeration: (req as any).exaggeration || 0.5, // SpeakSay natural emotional cadence
         cfg_weight: 0.5,
@@ -1673,7 +1695,22 @@ export class TTSService {
       let stderr = '';
 
       proc.stdout.on('data', (d) => (stdout += d.toString()));
-      proc.stderr.on('data', (d) => (stderr += d.toString()));
+      proc.stderr.on('data', (d) => {
+        const text = d.toString();
+        stderr += text;
+        if (text.includes('@@TTS_PROGRESS@@') && onProgress) {
+          const lines = text.split('\n');
+          for (const line of lines) {
+            if (line.includes('@@TTS_PROGRESS@@')) {
+              try {
+                const jsonStr = line.substring(line.indexOf('@@TTS_PROGRESS@@') + 16).trim();
+                const prog = JSON.parse(jsonStr);
+                onProgress({ ...prog, engine: req.engine });
+              } catch {}
+            }
+          }
+        }
+      });
 
       proc.on('close', (code) => {
         if (code === 0 && fs.existsSync(outputPath)) {

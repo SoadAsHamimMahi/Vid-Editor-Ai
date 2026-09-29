@@ -48,20 +48,42 @@ export interface PromptComparisonResult {
 export function extractTimecode(text: string): { timecode?: string; seconds?: number } {
   if (!text || typeof text !== 'string') return {};
 
-  // 1. Check decimal milliseconds/fractions: e.g. #4-03.17, #4:03.170, #04:03,17, [4:03.17]
-  const matchMs = text.match(/#?(\d+)[-_:](\d{1,2})[.:,](\d{1,3})/);
+  // 0. Check 4-part: HH:MM:SS.mmm, HH:MM:SS,mmm, HH-MM-SS.mmm (e.g. #00:00:13.700, #00:47:13.300)
+  const match4 = text.match(/#?(\d{1,2})[-_:](\d{1,2})[-_:](\d{1,2})[.,](\d{1,3})/);
+  if (match4) {
+    const hours = parseInt(match4[1], 10);
+    const mins = parseInt(match4[2], 10);
+    const secs = parseInt(match4[3], 10);
+    const frac = parseFloat('0.' + match4[4]);
+    const totalSecs = hours * 3600 + mins * 60 + secs + frac;
+    const timecode = `#${hours > 0 ? hours + '-' : ''}${mins}-${secs < 10 ? '0' : ''}${secs}`;
+    return { timecode, seconds: +totalSecs.toFixed(3) };
+  }
+
+  // 1. Check 3-part with colons: HH:MM:SS (e.g. #00:47:13, #01:23:45)
+  const match3Col = text.match(/#?(\d{1,2}):(\d{2}):(\d{2})\b/);
+  if (match3Col) {
+    const hours = parseInt(match3Col[1], 10);
+    const mins = parseInt(match3Col[2], 10);
+    const secs = parseInt(match3Col[3], 10);
+    const totalSecs = hours * 3600 + mins * 60 + secs;
+    const timecode = `#${hours > 0 ? hours + '-' : ''}${mins}-${secs < 10 ? '0' : ''}${secs}`;
+    return { timecode, seconds: totalSecs };
+  }
+
+  // 2. Check 2-part decimal milliseconds/fractions: e.g. #4-03.17, #4:03.170, #04:03,17, [4:03.17]
+  const matchMs = text.match(/#?(\d+)[-_:](\d{1,2})[.,](\d{1,3})/);
   if (matchMs && !isAspectRatioString(matchMs[0])) {
     const mins = parseInt(matchMs[1], 10);
     const secs = parseInt(matchMs[2], 10);
-    const msStr = matchMs[3];
-    const ms = msStr.length === 1 ? parseInt(msStr, 10) * 0.1 : msStr.length === 2 ? parseInt(msStr, 10) * 0.01 : parseInt(msStr, 10) * 0.001;
-    const seconds = mins * 60 + secs + ms;
+    const frac = parseFloat('0.' + matchMs[3]);
+    const seconds = mins * 60 + secs + frac;
     const timecode = `#${mins}-${secs < 10 ? '0' : ''}${secs}`;
     return { timecode, seconds: +seconds.toFixed(3) };
   }
 
-  // 2. Check 3-part: H-MM-SS or M-SS-ms (e.g. #1-02-15 or #4-03-17)
-  const match3 = text.match(/#?(\d+)[-_:](\d{1,2})[-_:](\d{1,2})/);
+  // 3. Check 3-part with hyphens: H-MM-SS or M-SS-ms (e.g. #1-02-15 or #4-03-17)
+  const match3 = text.match(/#?(\d+)[-_](\d{1,2})[-_](\d{1,2})/);
   if (match3 && !isAspectRatioString(match3[0])) {
     const p1 = parseInt(match3[1], 10);
     const p2 = parseInt(match3[2], 10);
@@ -83,7 +105,7 @@ export function extractTimecode(text: string): { timecode?: string; seconds?: nu
     }
   }
 
-  // 3. Check 2-part: M-SS or MM:SS or M_SS or M-S (excluding aspect ratios like 16:9)
+  // 4. Check 2-part: M-SS or MM:SS or M_SS or M-S (excluding aspect ratios like 16:9)
   const match2 = text.match(/(?:#|\[|\b)(\d+[-_:]\d{1,2})(?:\]|\b)/);
   if (match2 && !isAspectRatioString(match2[1])) {
     const parts = match2[1].split(/[-_:]/);

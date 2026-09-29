@@ -156,28 +156,28 @@ export const HomePage: React.FC = () => {
   };
 
   useEffect(() => {
-    if (projectToDelete) {
-      setDeleteMediaOption(true);
-      setIsLoadingStats(true);
-      getProjectStorageStats(projectToDelete.id)
-        .then((stats) => {
-          setProjectStorageStats(stats);
-        })
-        .catch(() => {
-          setProjectStorageStats(null);
-        })
-        .finally(() => {
-          setIsLoadingStats(false);
-        });
-    } else {
+    if (!projectToDelete) {
       setProjectStorageStats(null);
       setIsLoadingStats(false);
+      return;
     }
-  }, [projectToDelete, getProjectStorageStats]);
+    setDeleteMediaOption(true);
+    setIsLoadingStats(true);
+    getProjectStorageStats(projectToDelete.id)
+      .then((stats) => {
+        setProjectStorageStats(stats);
+      })
+      .catch(() => {
+        setProjectStorageStats(null);
+      })
+      .finally(() => {
+        setIsLoadingStats(false);
+      });
+  }, [projectToDelete?.id]);
 
   useEffect(() => {
     loadProjectSummaries();
-  }, [loadProjectSummaries]);
+  }, []);
 
   const filteredProjects = projectSummaries.filter((p) =>
     p.title.toLowerCase().includes(searchQuery.toLowerCase())

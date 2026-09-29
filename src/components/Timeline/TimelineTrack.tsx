@@ -74,6 +74,8 @@ export const TimelineTrack: React.FC = () => {
     updateOverlayClip,
     deleteOverlayClip,
     moveOverlayClip,
+    selectedOverlayClipId,
+    setSelectedOverlayClipId,
     addMediaAsset,
     addMediaToTimeline,
     autoArrangeImagesByTimestamp,
@@ -153,27 +155,34 @@ export const TimelineTrack: React.FC = () => {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [selectedAudioClipId, setSelectedAudioClipId] = useState<string | null>(null);
-  const [selectedOverlayClipId, setSelectedOverlayClipId] = useState<string | null>(null);
   const [selectedAudioTrack, setSelectedAudioTrack] = useState<'voiceover' | 'bgmusic' | null>(null);
   const [isLockedV1, setIsLockedV1] = useState(false);
   const [isLockedV2, setIsLockedV2] = useState(false);
   const [isLockedV3, setIsLockedV3] = useState(false);
+  const [isLockedV4, setIsLockedV4] = useState(false);
+  const [isLockedV5, setIsLockedV5] = useState(false);
 
   // Read persisted multi-track mute state from project metadata
   const trackMutes = project.metadata.trackMutes || {};
   const isMutedV1 = !!trackMutes.v1;
   const isMutedV2 = !!trackMutes.v2;
   const isMutedV3 = !!trackMutes.v3;
+  const isMutedV4 = !!trackMutes.v4;
+  const isMutedV5 = !!trackMutes.v5;
   const isMutedA1 = !!trackMutes.a1;
   const isMutedA2 = !!trackMutes.a2;
   const isMutedA3 = !!trackMutes.a3;
   
-  // Track visibility toggles (Overlay V3, V2, Music, SFX, and Subtitles)
+  // Track visibility toggles (Overlay V5, V4, V3, V2, Music, SFX, and Subtitles)
   const overlayClips = project.metadata.overlayClips || EMPTY_ARRAY;
+  const v5OverlayClips = useMemo(() => overlayClips.filter((c) => c.track === 'V5'), [overlayClips]);
+  const v4OverlayClips = useMemo(() => overlayClips.filter((c) => c.track === 'V4'), [overlayClips]);
   const v3OverlayClips = useMemo(() => overlayClips.filter((c) => c.track === 'V3'), [overlayClips]);
-  const v2OverlayClips = useMemo(() => overlayClips.filter((c) => c.track !== 'V3'), [overlayClips]);
+  const v2OverlayClips = useMemo(() => overlayClips.filter((c) => c.track === 'V2' || (!c.track || (c.track !== 'V3' && c.track !== 'V4' && c.track !== 'V5'))), [overlayClips]);
 
-  const [manualTracks, setManualTracks] = useState<{ v3: boolean; v2: boolean; a2: boolean; a3: boolean; t1: boolean }>({
+  const [manualTracks, setManualTracks] = useState<{ v5: boolean; v4: boolean; v3: boolean; v2: boolean; a2: boolean; a3: boolean; t1: boolean }>({
+    v5: v5OverlayClips.length > 0,
+    v4: v4OverlayClips.length > 0,
     v3: v3OverlayClips.length > 0,
     v2: v2OverlayClips.length > 0,
     a2: false,
@@ -181,6 +190,8 @@ export const TimelineTrack: React.FC = () => {
     t1: false,
   });
 
+  const isV5Visible = manualTracks.v5 || v5OverlayClips.length > 0;
+  const isV4Visible = manualTracks.v4 || v4OverlayClips.length > 0;
   const isV3Visible = manualTracks.v3 || v3OverlayClips.length > 0;
   const isV2Visible = manualTracks.v2 || v2OverlayClips.length > 0;
   const [isScrubbing, setIsScrubbing] = useState(false);
@@ -409,7 +420,7 @@ export const TimelineTrack: React.FC = () => {
     }
   };
 
-  const handleImportOverlayMedia = async (targetTrack: 'V2' | 'V3' = 'V2') => {
+  const handleImportOverlayMedia = async (targetTrack: 'V2' | 'V3' | 'V4' | 'V5' = 'V2') => {
     try {
       const picker = (window.electronAPI as any).pickMedia || (window.electronAPI as any).pickVideo || (window.electronAPI as any).pickImage;
       const filePath = await (picker ? picker() : null);
@@ -446,7 +457,7 @@ export const TimelineTrack: React.FC = () => {
   };
 
   // Drag & Drop Handler Across Timeline Tracks
-  const handleTrackDrop = async (e: React.DragEvent, track: 'V1' | 'V2' | 'V3' | 'A1' | 'A2' | 'A3') => {
+  const handleTrackDrop = async (e: React.DragEvent, track: 'V1' | 'V2' | 'V3' | 'V4' | 'V5' | 'A1' | 'A2' | 'A3') => {
     e.preventDefault();
     e.stopPropagation();
 
@@ -462,8 +473,10 @@ export const TimelineTrack: React.FC = () => {
       try {
         const data = JSON.parse(json);
         if (data.assetId) {
-          if (track === 'V2') setManualTracks((m) => ({ ...m, v2: true }));
+          if (track === 'V5') setManualTracks((m) => ({ ...m, v5: true }));
+          if (track === 'V4') setManualTracks((m) => ({ ...m, v4: true }));
           if (track === 'V3') setManualTracks((m) => ({ ...m, v3: true }));
+          if (track === 'V2') setManualTracks((m) => ({ ...m, v2: true }));
           if (track === 'A2') setManualTracks((m) => ({ ...m, a2: true }));
           if (track === 'A3') setManualTracks((m) => ({ ...m, a3: true }));
           addMediaToTimeline(data.assetId, track, dropTime);
@@ -762,8 +775,13 @@ export const TimelineTrack: React.FC = () => {
     splitSceneAtTime(currentTime);
   }, [selectedAudioClipId, splitAudioClipAtTime, currentTime, splitSceneAtTime]);
 
-  // Delete Selected Element (Scene, Audio Clip, or Audio Track)
+  // Delete Selected Element (Scene, Audio Clip, Overlay Clip, or Audio Track)
   const handleDelete = useCallback(() => {
+    if (selectedOverlayClipId) {
+      deleteOverlayClip(selectedOverlayClipId);
+      setSelectedOverlayClipId(null);
+      return;
+    }
     if (selectedAudioClipId) {
       deleteAudioClip(selectedAudioClipId);
       setSelectedAudioClipId(null);
@@ -786,7 +804,7 @@ export const TimelineTrack: React.FC = () => {
     if (selectedSceneId) {
       deleteScene(selectedSceneId);
     }
-  }, [selectedAudioClipId, deleteAudioClip, setSelectedAudioClipId, selectedAudioTrack, setAudioTrack, setSelectedAudioTrack, setBgMusic, selectedSceneIds, deleteScenes, selectedSceneId, deleteScene]);
+  }, [selectedOverlayClipId, deleteOverlayClip, setSelectedOverlayClipId, selectedAudioClipId, deleteAudioClip, setSelectedAudioClipId, selectedAudioTrack, setAudioTrack, setSelectedAudioTrack, setBgMusic, selectedSceneIds, deleteScenes, selectedSceneId, deleteScene]);
 
   // -------------------------------------------------------------
   // Professional NLE Keyboard Shortcuts
@@ -820,7 +838,7 @@ export const TimelineTrack: React.FC = () => {
       }
       // Delete / Backspace
       else if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selectedSceneIds.length > 0 || selectedSceneId || selectedAudioClipId || selectedAudioTrack) {
+        if (selectedSceneIds.length > 0 || selectedSceneId || selectedAudioClipId || selectedAudioTrack || selectedOverlayClipId) {
           e.preventDefault();
           handleDelete();
         }
@@ -1261,6 +1279,36 @@ export const TimelineTrack: React.FC = () => {
                 <button
                   onClick={() => {
                     setIsTrackMenuOpen(false);
+                    if (!isV5Visible) {
+                      setManualTracks((m) => ({ ...m, v5: true }));
+                    } else {
+                      handleImportOverlayMedia('V5');
+                    }
+                  }}
+                  className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-amber-950/40 text-slate-200 hover:text-amber-300 transition-all text-left cursor-pointer"
+                >
+                  <Layers className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Video Layer 5 (V5 Stickers / Overlays)</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setIsTrackMenuOpen(false);
+                    if (!isV4Visible) {
+                      setManualTracks((m) => ({ ...m, v4: true }));
+                    } else {
+                      handleImportOverlayMedia('V4');
+                    }
+                  }}
+                  className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-emerald-950/40 text-slate-200 hover:text-emerald-300 transition-all text-left cursor-pointer"
+                >
+                  <Layers className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Video Layer 4 (V4 Stickers / Overlays)</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setIsTrackMenuOpen(false);
                     if (!isV3Visible) {
                       setManualTracks((m) => ({ ...m, v3: true }));
                     } else {
@@ -1291,7 +1339,11 @@ export const TimelineTrack: React.FC = () => {
                 <button
                   onClick={() => {
                     setIsTrackMenuOpen(false);
-                    setManualTracks((m) => ({ ...m, v2: true }));
+                    // Activate next free track for stickers
+                    if (!isV2Visible) setManualTracks((m) => ({ ...m, v2: true }));
+                    else if (!isV3Visible) setManualTracks((m) => ({ ...m, v3: true }));
+                    else if (!isV4Visible) setManualTracks((m) => ({ ...m, v4: true }));
+                    else setManualTracks((m) => ({ ...m, v5: true }));
                     useProjectStore.getState().setActiveRibbonTab('stickers');
                   }}
                   className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-purple-950/40 text-slate-200 hover:text-purple-300 transition-all text-left cursor-pointer"
@@ -1700,6 +1752,19 @@ export const TimelineTrack: React.FC = () => {
 
                       {/* Quick Re-Sync Button */}
                       <div className="absolute right-2 top-0.5 z-20 flex items-center gap-1.5 pointer-events-auto">
+                        {project.scenes.some((s) => !s.subtitles || s.subtitles.length === 0) && (
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              await useProjectStore.getState().regenerateUntranscribedSubtitles();
+                            }}
+                            title="Regenerate untranscribed caption areas only"
+                            className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-900/90 hover:bg-amber-700 text-amber-200 text-[8px] font-bold border border-amber-400/50 cursor-pointer shadow-xs active:scale-90 transition-all hover:scale-105"
+                          >
+                            <Zap className="w-2.5 h-2.5" />
+                            <span>Fill Missing</span>
+                          </button>
+                        )}
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -1741,6 +1806,154 @@ export const TimelineTrack: React.FC = () => {
                         <span>Auto Sync Now</span>
                       </button>
                     </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* TRACK V5: Video Layer 5 (Stickers / Top Graphics) */}
+            {isV5Visible && (
+              <div className="flex items-center animate-in fade-in duration-200">
+                <div className="w-20 flex-shrink-0 flex items-center justify-between px-2 text-[10px] font-semibold text-slate-400 sticky left-0 z-20 bg-[#141418] py-2 border-r border-[#26262e]">
+                  <div className="flex items-center gap-1.5 text-amber-400 font-bold">
+                    <span className="w-4 h-4 rounded bg-amber-950/90 border border-amber-500/40 text-[9px] flex items-center justify-center text-amber-300 font-mono shadow-xs">5</span>
+                    <span>V5</span>
+                  </div>
+                  <div className="flex items-center gap-0.5">
+                    <button
+                      onClick={() => handleImportOverlayMedia('V5')}
+                      title="Add Sticker or Overlay Media to Layer 5"
+                      className="p-0.5 rounded text-amber-400 hover:text-amber-200 hover:bg-[#202028]"
+                    >
+                      <Plus className="w-2.5 h-2.5" />
+                    </button>
+                    <button
+                      onClick={() => toggleTrackMute('v5')}
+                      title={isMutedV5 ? 'Show Layer 5 (V5)' : 'Hide Layer 5 (V5)'}
+                      className="p-0.5 rounded hover:bg-[#202028]"
+                    >
+                      {isMutedV5 ? (
+                        <EyeOff className="w-2.5 h-2.5 text-slate-600 cursor-pointer" />
+                      ) : (
+                        <Eye className="w-2.5 h-2.5 text-slate-400 hover:text-amber-400 cursor-pointer" />
+                      )}
+                    </button>
+                    <button
+                      onClick={() => setIsLockedV5(!isLockedV5)}
+                      title={isLockedV5 ? 'Unlock Layer 5' : 'Lock Layer 5'}
+                      className="p-0.5 rounded hover:bg-[#202028]"
+                    >
+                      <Lock className={`w-2.5 h-2.5 cursor-pointer transition-colors ${isLockedV5 ? 'text-amber-400' : 'text-slate-500 hover:text-slate-300'}`} />
+                    </button>
+                  </div>
+                </div>
+
+                <div 
+                  onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }}
+                  onDrop={(e) => handleTrackDrop(e, 'V5')}
+                  className={`flex items-center gap-0 px-1.5 relative z-10 min-h-[3.25rem] w-full bg-amber-950/10 border-b border-amber-900/20 ${isMutedV5 ? 'opacity-30' : ''}`}
+                >
+                  {v5OverlayClips.length === 0 ? (
+                    <div
+                      onClick={() => handleImportOverlayMedia('V5')}
+                      className="h-9 w-96 rounded-md border-2 border-dashed border-amber-800/40 hover:border-amber-400 bg-amber-950/20 hover:bg-amber-950/40 text-amber-300/80 hover:text-amber-100 text-[11px] font-mono flex items-center justify-center gap-2 cursor-pointer transition-all shadow-xs my-1"
+                      title="Click or drop stickers / overlays on Video Layer 5 (V5)"
+                    >
+                      <Plus className="w-3.5 h-3.5 text-amber-400" />
+                      <span>+ Add / Drop Stickers or Overlay Media to Layer 5</span>
+                    </div>
+                  ) : (
+                    v5OverlayClips.map((clip) => (
+                      <OverlayClipItem
+                        key={clip.id}
+                        clip={clip}
+                        pixelsPerSecond={timelineZoom}
+                        isSelected={selectedOverlayClipId === clip.id}
+                        totalDuration={totalDuration}
+                        currentTime={currentTime}
+                        containerRef={containerRef}
+                        onSelect={() => {
+                          setSelectedOverlayClipId(clip.id);
+                          setSelectedAudioClipId(null);
+                        }}
+                        onMove={(t) => moveOverlayClip(clip.id, t, true)}
+                        onDelete={() => deleteOverlayClip(clip.id)}
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* TRACK V4: Video Layer 4 (Stickers / Secondary Overlays) */}
+            {isV4Visible && (
+              <div className="flex items-center animate-in fade-in duration-200">
+                <div className="w-20 flex-shrink-0 flex items-center justify-between px-2 text-[10px] font-semibold text-slate-400 sticky left-0 z-20 bg-[#141418] py-2 border-r border-[#26262e]">
+                  <div className="flex items-center gap-1.5 text-emerald-400 font-bold">
+                    <span className="w-4 h-4 rounded bg-emerald-950/90 border border-emerald-500/40 text-[9px] flex items-center justify-center text-emerald-300 font-mono shadow-xs">4</span>
+                    <span>V4</span>
+                  </div>
+                  <div className="flex items-center gap-0.5">
+                    <button
+                      onClick={() => handleImportOverlayMedia('V4')}
+                      title="Add Sticker or Overlay Media to Layer 4"
+                      className="p-0.5 rounded text-emerald-400 hover:text-emerald-200 hover:bg-[#202028]"
+                    >
+                      <Plus className="w-2.5 h-2.5" />
+                    </button>
+                    <button
+                      onClick={() => toggleTrackMute('v4')}
+                      title={isMutedV4 ? 'Show Layer 4 (V4)' : 'Hide Layer 4 (V4)'}
+                      className="p-0.5 rounded hover:bg-[#202028]"
+                    >
+                      {isMutedV4 ? (
+                        <EyeOff className="w-2.5 h-2.5 text-slate-600 cursor-pointer" />
+                      ) : (
+                        <Eye className="w-2.5 h-2.5 text-slate-400 hover:text-emerald-400 cursor-pointer" />
+                      )}
+                    </button>
+                    <button
+                      onClick={() => setIsLockedV4(!isLockedV4)}
+                      title={isLockedV4 ? 'Unlock Layer 4' : 'Lock Layer 4'}
+                      className="p-0.5 rounded hover:bg-[#202028]"
+                    >
+                      <Lock className={`w-2.5 h-2.5 cursor-pointer transition-colors ${isLockedV4 ? 'text-amber-400' : 'text-slate-500 hover:text-slate-300'}`} />
+                    </button>
+                  </div>
+                </div>
+
+                <div 
+                  onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }}
+                  onDrop={(e) => handleTrackDrop(e, 'V4')}
+                  className={`flex items-center gap-0 px-1.5 relative z-10 min-h-[3.25rem] w-full bg-emerald-950/10 border-b border-emerald-900/20 ${isMutedV4 ? 'opacity-30' : ''}`}
+                >
+                  {v4OverlayClips.length === 0 ? (
+                    <div
+                      onClick={() => handleImportOverlayMedia('V4')}
+                      className="h-9 w-96 rounded-md border-2 border-dashed border-emerald-800/40 hover:border-emerald-400 bg-emerald-950/20 hover:bg-emerald-950/40 text-emerald-300/80 hover:text-emerald-100 text-[11px] font-mono flex items-center justify-center gap-2 cursor-pointer transition-all shadow-xs my-1"
+                      title="Click or drop stickers / overlays on Video Layer 4 (V4)"
+                    >
+                      <Plus className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>+ Add / Drop Stickers or Overlay Media to Layer 4</span>
+                    </div>
+                  ) : (
+                    v4OverlayClips.map((clip) => (
+                      <OverlayClipItem
+                        key={clip.id}
+                        clip={clip}
+                        pixelsPerSecond={timelineZoom}
+                        isSelected={selectedOverlayClipId === clip.id}
+                        totalDuration={totalDuration}
+                        currentTime={currentTime}
+                        containerRef={containerRef}
+                        onSelect={() => {
+                          setSelectedOverlayClipId(clip.id);
+                          setSelectedAudioClipId(null);
+                        }}
+                        onMove={(t) => moveOverlayClip(clip.id, t, true)}
+                        onDelete={() => deleteOverlayClip(clip.id)}
+                      />
+                    ))
                   )}
                 </div>
               </div>
@@ -1804,11 +2017,14 @@ export const TimelineTrack: React.FC = () => {
                         clip={clip}
                         pixelsPerSecond={timelineZoom}
                         isSelected={selectedOverlayClipId === clip.id}
+                        totalDuration={totalDuration}
+                        currentTime={currentTime}
+                        containerRef={containerRef}
                         onSelect={() => {
                           setSelectedOverlayClipId(clip.id);
                           setSelectedAudioClipId(null);
                         }}
-                        onMove={(t) => moveOverlayClip(clip.id, t)}
+                        onMove={(t) => moveOverlayClip(clip.id, t, true)}
                         onDelete={() => deleteOverlayClip(clip.id)}
                       />
                     ))
@@ -1875,11 +2091,14 @@ export const TimelineTrack: React.FC = () => {
                         clip={clip}
                         pixelsPerSecond={timelineZoom}
                         isSelected={selectedOverlayClipId === clip.id}
+                        totalDuration={totalDuration}
+                        currentTime={currentTime}
+                        containerRef={containerRef}
                         onSelect={() => {
                           setSelectedOverlayClipId(clip.id);
                           setSelectedAudioClipId(null);
                         }}
-                        onMove={(t) => moveOverlayClip(clip.id, t)}
+                        onMove={(t) => moveOverlayClip(clip.id, t, true)}
                         onDelete={() => deleteOverlayClip(clip.id)}
                       />
                     ))

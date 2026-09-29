@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useProjectStore } from '../../store/useProjectStore';
 import { 
   ExportSettings, 
@@ -41,6 +41,9 @@ export const ExportModal: React.FC = () => {
   const [audioSectionOpen, setAudioSectionOpen] = useState<boolean>(false);
   const [exportAudioOnly, setExportAudioOnly] = useState<boolean>(false);
   const [completedFilePath, setCompletedFilePath] = useState<string | null>(null);
+  const renderStartTimeRef = useRef<number | null>(null);
+  const [etaDisplay, setEtaDisplay] = useState<{ elapsed: string; remaining: string | null } | null>(null);
+  const etaIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Initialize default folder and reset render state on modal open
   useEffect(() => {
@@ -83,18 +86,74 @@ export const ExportModal: React.FC = () => {
     };
   }, [exportModalOpen, project.metadata.title]);
 
+  // Format seconds as "Xm Ys" or "Xs"
+  const formatDuration = useCallback((sec: number): string => {
+    if (sec < 0 || !isFinite(sec)) return '—';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }, []);
+
+  // ETA ticker — updates elapsed every second while rendering
+  const startEtaTicker = useCallback(() => {
+    if (etaIntervalRef.current) clearInterval(etaIntervalRef.current);
+    renderStartTimeRef.current = Date.now();
+    etaIntervalRef.current = setInterval(() => {
+      const start = renderStartTimeRef.current;
+      if (!start) return;
+      const elapsed = (Date.now() - start) / 1000;
+      setEtaDisplay(prev => ({
+        elapsed: formatDuration(elapsed),
+        remaining: prev?.remaining ?? null,
+      }));
+    }, 1000);
+  }, [formatDuration]);
+
+  const stopEtaTicker = useCallback(() => {
+    if (etaIntervalRef.current) { clearInterval(etaIntervalRef.current); etaIntervalRef.current = null; }
+    renderStartTimeRef.current = null;
+  }, []);
+
   // Listen to render progress events from main process
   useEffect(() => {
     if (window.electronAPI?.onRenderProgress) {
       const unsub = window.electronAPI.onRenderProgress((prog: RenderProgress) => {
         setRenderProgress(prog);
+        if (prog.status === 'rendering') {
+          if (!renderStartTimeRef.current) startEtaTicker();
+          // Calculate ETA from elapsed time and current percent
+          const start = renderStartTimeRef.current;
+          if (start && prog.percent > 2) {
+            const elapsed = (Date.now() - start) / 1000;
+            const rate = elapsed / (prog.percent / 100); // total estimated seconds
+            const remaining = Math.max(0, rate - elapsed);
+            const elapsedStr = formatDuration(elapsed);
+            let remainingStr: string | null = null;
+            if (prog.percent >= 99) {
+              remainingStr = 'Wrapping up...';
+            } else if (remaining > 5) {
+              remainingStr = formatDuration(remaining);
+            }
+            setEtaDisplay({ elapsed: elapsedStr, remaining: remainingStr });
+          }
+        }
         if (prog.status === 'completed' && prog.outputFilePath) {
           setCompletedFilePath(prog.outputFilePath);
+          stopEtaTicker();
+          setEtaDisplay(null);
+        }
+        if (prog.status === 'error') {
+          stopEtaTicker();
+          setEtaDisplay(null);
         }
       });
       return unsub;
     }
-  }, []);
+  }, [startEtaTicker, stopEtaTicker, formatDuration]);
+
+  // Cleanup ETA ticker on unmount
+  useEffect(() => () => stopEtaTicker(), [stopEtaTicker]);
 
   if (!exportModalOpen) return null;
 
@@ -141,6 +200,8 @@ export const ExportModal: React.FC = () => {
   const handleStartRender = async () => {
     // Immediately clear preview video player to release any file locks on Windows
     setCompletedFilePath(null);
+    setEtaDisplay(null);
+    stopEtaTicker();
     const ext = format === 'mov' ? 'mov' : format === 'mp3' ? 'mp3' : 'mp4';
     const cleanName = (name || 'Export').replace(/[\\/:*?"<>|]/g, '_');
     const targetDir = exportToDir || 'projects_data/renders';
@@ -491,6 +552,7 @@ export const ExportModal: React.FC = () => {
         {/* PROGRESS / STATUS BAR */}
         {(isRendering || isCompleted || renderProgress.status === 'error') && (
           <div className="px-6 py-2.5 bg-[#17171a] border-t border-[#2e2e32] flex flex-col gap-1.5">
+            {/* Top row: message + percent */}
             <div className="flex items-center justify-between text-xs">
               <span className="flex items-center gap-2">
                 {isRendering && <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />}
@@ -501,12 +563,30 @@ export const ExportModal: React.FC = () => {
               <span className="font-mono text-cyan-400 font-bold">{renderProgress.percent}%</span>
             </div>
 
+            {/* Progress bar */}
             <div className="w-full h-1.5 bg-[#2e2e32] rounded-full overflow-hidden">
               <div
                 style={{ width: `${renderProgress.percent}%` }}
-                className="h-full bg-gradient-to-r from-cyan-500 to-emerald-400 transition-all duration-200"
+                className="h-full bg-gradient-to-r from-cyan-500 to-emerald-400 transition-all duration-500"
               />
             </div>
+
+            {/* ETA row — shown while actively rendering */}
+            {isRendering && etaDisplay && (
+              <div className="flex items-center justify-between text-[11px] font-mono mt-0.5">
+                <span className="text-slate-500">
+                  Elapsed: <span className="text-slate-300">{etaDisplay.elapsed}</span>
+                </span>
+                {etaDisplay.remaining ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-slate-500">Est. remaining:</span>
+                    <span className="text-amber-400 font-semibold tracking-wide">{etaDisplay.remaining}</span>
+                  </span>
+                ) : renderProgress.percent > 0 && renderProgress.percent <= 2 ? (
+                  <span className="text-slate-500 italic">Calculating ETA...</span>
+                ) : null}
+              </div>
+            )}
 
             {isCompleted && completedFilePath && (
               <div className="text-[11px] font-mono text-slate-300 bg-[#131316] p-2 rounded border border-[#2e2e32] flex items-center justify-between gap-2 mt-1">

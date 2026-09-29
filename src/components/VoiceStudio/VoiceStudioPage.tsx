@@ -43,13 +43,17 @@ import {
   Quote,
   FileText,
   Volume2,
-  ArrowUpDown
+  ArrowUpDown,
+  Clapperboard,
+  Clock,
+  Timer
 } from 'lucide-react';
 import { getVoiceSampleText } from '../../utils/voiceSamples';
 import { 
   validateVoiceText, 
   truncateToEngineLimit 
 } from '../../utils/voiceLimits';
+import { detectPhoneticReplacements, applyPhoneticAssistant } from '../../utils/textSanitizer';
 
 interface QuickStarterPreset {
   id: string;
@@ -298,11 +302,16 @@ export const VoiceStudioPage: React.FC = () => {
     directVocalScript,
     voiceMasteringPreset,
     setVoiceMasteringPreset,
+    f5Quality,
+    setF5Quality,
+    enableNaturalBreaths,
+    setEnableNaturalBreaths,
     pronunciationRules,
     setPronunciationRules,
     sendVoiceoverToTimeline,
     isGeneratingTTS,
     ttsProgressMessage,
+    ttsProgressData,
     globalApiKeys,
     loadGlobalApiKeys,
     saveGlobalApiKeys,
@@ -332,6 +341,25 @@ export const VoiceStudioPage: React.FC = () => {
   const [emotion, setEmotion] = useState<string>('neutral');
   const [showAdvancedSettings, setShowAdvancedSettings] = useState<boolean>(false);
   const [isDirectingScript, setIsDirectingScript] = useState<boolean>(false);
+
+  // Voice Expressiveness Slider (Feature 1)
+  // Maps 0-100 → cfg_strength 1.5 (stable/flat) to 2.5 (expressive/dynamic). Default 40 = cfg_strength 1.90
+  const [voiceExpressiveness, setVoiceExpressiveness] = useState<number>(40);
+  const computedCfgStrength = parseFloat((1.5 + (voiceExpressiveness / 100) * 1.0).toFixed(3));
+
+  // Single-Sentence Re-Roll (Feature 2)
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const reRollAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [selectedSentence, setSelectedSentence] = useState<string>('');
+  const [isReRolling, setIsReRolling] = useState<boolean>(false);
+  const [reRollAudioUrl, setReRollAudioUrl] = useState<string | null>(null);
+  const [isReRollPlaying, setIsReRollPlaying] = useState<boolean>(false);
+
+  // 3-Take Audition Director Mode State
+  const [isAuditioning, setIsAuditioning] = useState<boolean>(false);
+  const [auditionProgress, setAuditionProgress] = useState<number>(0);
+  const [auditionTakes, setAuditionTakes] = useState<{ id: number; seed: number; audioUrl: string; duration: number; path: string }[]>([]);
+  const [activeTakeIndex, setActiveTakeIndex] = useState<number>(0);
 
   // Right Side Voice Catalog Filters & Search
   const [voiceSearch, setVoiceSearch] = useState('');
@@ -390,6 +418,7 @@ export const VoiceStudioPage: React.FC = () => {
   // Pronunciation Rule Inputs
   const [newRulePattern, setNewRulePattern] = useState('');
   const [newRuleReplacement, setNewRuleReplacement] = useState('');
+  const [pronTestResult, setPronTestResult] = useState<string | null>(null);
 
   // Multi-Speaker Dialogue State
   const [speakers, setSpeakers] = useState<DialogueSpeaker[]>([
@@ -418,9 +447,66 @@ export const VoiceStudioPage: React.FC = () => {
 
     const active = useProjectStore.getState().activeVoiceAudio;
     if (active && active.audioPath) {
-      setAudioUrl(`media://${active.audioPath.replace(/\\/g, '/')}`);
+      setAudioUrl(`media://${active.audioPath.replace(/\\/g, '/')}?t=${Date.now()}`);
       setAudioDuration(active.duration || 10);
     }
+
+    // Feature 3: Load pronunciation rules from localStorage on mount
+    // Also runs a migration to fix old rules that used wrong phonetic spellings
+    try {
+      const defaultRules = useProjectStore.getState().pronunciationRules || [];
+      const defaultMap = new Map(defaultRules.map((r) => [r.pattern.toLowerCase(), r.replacement]));
+      const savedRules = localStorage.getItem('tts_pronunciation_rules');
+      if (savedRules) {
+        const parsed = JSON.parse(savedRules);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          let didMigrate = false;
+          // Filter out dummy rules and Bengali test rules
+          const validSaved = parsed.filter((rule: any) => {
+            if (!rule || !rule.pattern || !rule.replacement) return false;
+            // Filter out old Bengali test replacements for English acronyms
+            if (/[\u0980-\u09FF]/.test(rule.replacement)) {
+              didMigrate = true;
+              return false;
+            }
+            return true;
+          });
+
+          // Upgraded rules with verified phonetic defaults
+          const upgraded = validSaved.map((rule: any) => {
+            const patLower = rule.pattern.toLowerCase();
+            const defReplacement = defaultMap.get(patLower);
+            if (defReplacement) {
+              // If the saved rule is a dummy rule (maps to itself) or doesn't match verified default, upgrade it!
+              if (
+                rule.replacement.trim().toLowerCase() === rule.pattern.trim().toLowerCase() ||
+                rule.replacement !== defReplacement
+              ) {
+                didMigrate = true;
+                return { ...rule, replacement: defReplacement };
+              }
+            }
+            return rule;
+          });
+
+          // Merge any default rules from store that are not in the saved rules
+          const existingPatterns = new Set(upgraded.map((r: any) => r.pattern.toLowerCase()));
+          const missingDefaults = defaultRules.filter(r => !existingPatterns.has(r.pattern.toLowerCase()));
+          const merged = missingDefaults.length > 0 ? [...upgraded, ...missingDefaults] : upgraded;
+
+          if (didMigrate || missingDefaults.length > 0) {
+            try { localStorage.setItem('tts_pronunciation_rules', JSON.stringify(merged)); } catch {}
+          }
+          setPronunciationRules(merged);
+        }
+      } else {
+        // No saved rules: initialize with defaults from store
+        if (defaultRules.length > 0) {
+          try { localStorage.setItem('tts_pronunciation_rules', JSON.stringify(defaultRules)); } catch {}
+          setPronunciationRules(defaultRules);
+        }
+      }
+    } catch { /* ignore parse errors */ }
   }, []);
 
   // When activeVoiceProfile is initially loaded or changed, auto-sync to its pre-tuned speed & mastering preset
@@ -491,12 +577,125 @@ export const VoiceStudioPage: React.FC = () => {
       },
     ];
     setPronunciationRules(nextRules);
+    try { localStorage.setItem('tts_pronunciation_rules', JSON.stringify(nextRules)); } catch {}
     setNewRulePattern('');
     setNewRuleReplacement('');
+    setPronTestResult(null);
   };
 
   const handleDeleteRule = (id: string) => {
-    setPronunciationRules(pronunciationRules.filter((r) => r.id !== id));
+    const next = pronunciationRules.filter((r) => r.id !== id);
+    setPronunciationRules(next);
+    try { localStorage.setItem('tts_pronunciation_rules', JSON.stringify(next)); } catch {}
+  };
+
+  const handleExportRules = () => {
+    const json = JSON.stringify(pronunciationRules, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'pronunciation_rules.json';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportRules = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const imported = JSON.parse(ev.target?.result as string);
+        if (Array.isArray(imported)) {
+          const merged = [...pronunciationRules];
+          for (const rule of imported) {
+            if (rule.pattern && rule.replacement && !merged.find(r => r.pattern === rule.pattern)) {
+              merged.push({ id: rule.id || `rule-${Date.now()}-${Math.random()}`, pattern: rule.pattern, replacement: rule.replacement });
+            }
+          }
+          setPronunciationRules(merged);
+          try { localStorage.setItem('tts_pronunciation_rules', JSON.stringify(merged)); } catch {}
+        }
+      } catch { /* ignore */ }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const handleResetDefaultRules = () => {
+    const defaultRules = useProjectStore.getState().pronunciationRules || [];
+    setPronunciationRules(defaultRules);
+    try { localStorage.setItem('tts_pronunciation_rules', JSON.stringify(defaultRules)); } catch {}
+    setPronTestResult('Dictionary reset to all verified phonetic defaults.');
+  };
+
+  const handleTestRule = () => {
+    if (!newRulePattern.trim()) return;
+    try {
+      const escaped = newRulePattern.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'giu');
+      const testInput = scriptText || 'Test sentence with the word here.';
+      const result = testInput.replace(regex, `[→ ${newRuleReplacement.trim() || '???'}]`);
+      setPronTestResult(result.length > 120 ? result.slice(0, 120) + '…' : result);
+    } catch { setPronTestResult('Invalid pattern'); }
+  };
+
+  // Feature 2: Re-Roll selected sentence
+  const handleSelectionChange = () => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const { selectionStart, selectionEnd } = ta;
+    if (selectionStart !== selectionEnd) {
+      const selected = ta.value.slice(selectionStart, selectionEnd).trim();
+      setSelectedSentence(selected.length > 5 ? selected : '');
+    } else {
+      setSelectedSentence('');
+    }
+  };
+
+  const handleReRollSentence = async () => {
+    if (!selectedSentence || isReRolling || isGeneratingTTS) return;
+    const voice = activeVoiceProfile || voiceProfiles[0];
+    if (!voice) return;
+    setIsReRolling(true);
+    setReRollAudioUrl(null);
+    try {
+      const seed = Math.floor(Math.random() * 9000) + 1000;
+      const res = await generateTTSVoiceover({
+        text: selectedSentence,
+        engine: voice.engine,
+        voiceId: voice.id,
+        language: voice.language,
+        gender: voice.gender,
+        referenceAudioPath: voice.referenceAudioPath,
+        referenceText: voice.referenceText,
+        speed,
+        pitch,
+        emotion,
+        f5Quality,
+        odeSteps: f5Quality === 'cinema_studio' ? 64 : f5Quality === 'ultra_master' ? 48 : 32,
+        enableNaturalBreaths,
+        masteringPreset: voiceMasteringPreset,
+        prosodyPacing: voice.prosodyPacing,
+        cfgStrength: computedCfgStrength,
+        seed,
+      });
+      if (res.success && res.audioPath) {
+        const url = `media://${res.audioPath.replace(/\\/g, '/')}`;
+        setReRollAudioUrl(url);
+        if (reRollAudioRef.current) {
+          reRollAudioRef.current.src = url;
+          reRollAudioRef.current.currentTime = 0;
+          reRollAudioRef.current.play().catch(() => {});
+          setIsReRollPlaying(true);
+        }
+      }
+    } catch (err: any) {
+      console.warn('Re-roll failed:', err);
+    } finally {
+      setIsReRolling(false);
+    }
   };
 
   const handleSaveApiKey = async () => {
@@ -671,13 +870,17 @@ export const VoiceStudioPage: React.FC = () => {
         speed,
         pitch,
         emotion,
+        f5Quality,
+        odeSteps: f5Quality === 'cinema_studio' ? 64 : f5Quality === 'ultra_master' ? 48 : 32,
+        enableNaturalBreaths,
         masteringPreset: voiceMasteringPreset,
         prosodyPacing: voice.prosodyPacing,
+        cfgStrength: computedCfgStrength,
       });
     }
 
     if (res.success && res.audioPath) {
-      const fullUrl = `media://${res.audioPath.replace(/\\/g, '/')}`;
+      const fullUrl = `media://${res.audioPath.replace(/\\/g, '/')}?t=${Date.now()}`;
       setAudioUrl(fullUrl);
       setAudioDuration(res.duration || estimatedSeconds);
       setAudioCurrentTime(0);
@@ -689,6 +892,74 @@ export const VoiceStudioPage: React.FC = () => {
       }, 200);
     } else {
       setErrorMessage(res.error || 'Failed to synthesize speech.');
+    }
+  };
+
+  const handle3TakeAudition = async () => {
+    const voice = activeVoiceProfile || voiceProfiles[0];
+    if (!voice || !scriptText.trim() || isGeneratingTTS || isAuditioning) return;
+    setIsAuditioning(true);
+    setAuditionTakes([]);
+    setActiveTakeIndex(0);
+    setErrorMessage(null);
+
+    const seeds = [42, 108, 777];
+    const takes: { id: number; seed: number; audioUrl: string; duration: number; path: string }[] = [];
+
+    try {
+      for (let i = 0; i < seeds.length; i++) {
+        setAuditionProgress(i + 1);
+        const s = seeds[i];
+        const res = await generateTTSVoiceover({
+          text: scriptText.trim(),
+          engine: voice.engine,
+          voiceId: voice.id,
+          language: voice.language,
+          gender: voice.gender,
+          referenceAudioPath: voice.referenceAudioPath,
+          referenceText: voice.referenceText,
+          speed,
+          pitch,
+          emotion,
+          f5Quality,
+          odeSteps: f5Quality === 'cinema_studio' ? 64 : f5Quality === 'ultra_master' ? 48 : 32,
+          enableNaturalBreaths,
+          masteringPreset: voiceMasteringPreset,
+          prosodyPacing: voice.prosodyPacing,
+          cfgStrength: computedCfgStrength,
+          seed: s,
+        });
+
+        if (res.success && res.audioPath) {
+          const fullUrl = `media://${res.audioPath.replace(/\\/g, '/')}`;
+          takes.push({
+            id: i + 1,
+            seed: s,
+            audioUrl: fullUrl,
+            duration: res.duration || estimatedSeconds,
+            path: res.audioPath,
+          });
+        }
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Error during 3-take audition');
+    } finally {
+      setIsAuditioning(false);
+      setAuditionProgress(0);
+    }
+
+    if (takes.length > 0) {
+      setAuditionTakes(takes);
+      setActiveTakeIndex(0);
+      setAudioUrl(takes[0].audioUrl);
+      setAudioDuration(takes[0].duration);
+      setAudioCurrentTime(0);
+      setTimeout(() => {
+        if (audioRef.current) {
+          audioRef.current.play().catch(() => {});
+          setIsPlayingAudio(true);
+        }
+      }, 200);
     }
   };
 
@@ -733,7 +1004,7 @@ export const VoiceStudioPage: React.FC = () => {
 
   const handlePlayHistoryRecord = (rec: GeneratedVoiceRecord) => {
     setActiveVoiceAudio(rec);
-    const fullUrl = `media://${rec.audioPath.replace(/\\/g, '/')}`;
+    const fullUrl = `media://${rec.audioPath.replace(/\\/g, '/')}?t=${Date.now()}`;
     setAudioUrl(fullUrl);
     setAudioDuration(rec.duration || 10);
     setAudioCurrentTime(0);
@@ -749,6 +1020,17 @@ export const VoiceStudioPage: React.FC = () => {
     const mins = Math.floor(secs / 60);
     const s = Math.floor(secs % 60);
     return `${mins}:${s.toString().padStart(2, '0')}`;
+  };
+
+  const formatEta = (secs?: number) => {
+    if (secs === undefined || secs === null || isNaN(secs) || secs < 0) return 'calculating...';
+    if (secs < 1) return '< 1s';
+    const hrs = Math.floor(secs / 3600);
+    const mins = Math.floor((secs % 3600) / 60);
+    const s = Math.floor(secs % 60);
+    if (hrs > 0) return `${hrs}h ${mins}m ${s}s`;
+    if (mins > 0) return `${mins}m ${s.toString().padStart(2, '0')}s`;
+    return `${s}s`;
   };
 
   const activeVoice = activeVoiceProfile || voiceProfiles[0];
@@ -801,12 +1083,9 @@ export const VoiceStudioPage: React.FC = () => {
   // Right Voices Catalog Filtering & Sorting
   const filteredVoices = voiceProfiles
     .filter((v) => {
-      // If onlyFavorites is toggled ON, filter out non-favorites
-      if (onlyFavorites && !favoriteVoiceIds.has(v.id)) {
-        return false;
-      }
+      const hasSearch = Boolean(voiceSearch.trim());
 
-      if (voiceSearch.trim()) {
+      if (hasSearch) {
         const rawQ = voiceSearch.toLowerCase().trim();
         const searchableText = [
           v.name,
@@ -827,7 +1106,7 @@ export const VoiceStudioPage: React.FC = () => {
         let isMatch = searchableText.includes(rawQ);
 
         // 2. Multi-token keyword search (handles punctuation, parenthesized models, and reordered words)
-        // e.g. "Marcus (F5-TTS Flow Matching)", "Marcus F5", "Marcus ElevenLabs", "Kenneth Walker"
+        // e.g. "Marcus (F5-TTS Flow Matching)", "Marcus F5", "Before It Worked", "Before Worked"
         if (!isMatch) {
           const tokens = rawQ
             .split(/[\s()\-—_/,]+/)
@@ -839,6 +1118,15 @@ export const VoiceStudioPage: React.FC = () => {
         }
 
         if (!isMatch) return false;
+
+        // When user explicitly searches by query, direct name/id matches are always displayed
+        const isDirectNameMatch = v.name.toLowerCase().includes(rawQ) || v.id.toLowerCase().includes(rawQ);
+        if (isDirectNameMatch) return true;
+      }
+
+      // If onlyFavorites is toggled ON, filter out non-favorites
+      if (onlyFavorites && !favoriteVoiceIds.has(v.id)) {
+        return false;
       }
 
       if (selectedGender !== 'all' && v.gender !== selectedGender) {
@@ -871,7 +1159,7 @@ export const VoiceStudioPage: React.FC = () => {
         } else if (selectedUseCase === 'designed') {
           if (v.category !== 'custom_designed') return false;
         } else if (selectedUseCase === 'cloned') {
-          if (v.category !== 'custom_cloned' && v.category !== 'custom_designed') return false;
+          if (v.category !== 'custom_cloned' && v.category !== 'custom_designed' && v.engine !== 'f5_tts' && !v.id.includes('before-it-worked')) return false;
         } else {
           const cat = getVoiceCategory(v);
           const d = (v.description || '').toLowerCase();
@@ -880,7 +1168,7 @@ export const VoiceStudioPage: React.FC = () => {
 
           let matchesCat = cat === selectedUseCase;
           if (!matchesCat) {
-            if (selectedUseCase === 'news_documentary' && (d.includes('documentary') || d.includes('history') || d.includes('bbc') || tg.includes('documentary') || tg.includes('news') || tg.includes('history') || nm.includes('documentary'))) matchesCat = true;
+            if (selectedUseCase === 'news_documentary' && (d.includes('documentary') || d.includes('history') || d.includes('bbc') || tg.includes('documentary') || tg.includes('news') || tg.includes('history') || nm.includes('documentary') || nm.includes('before it worked'))) matchesCat = true;
             if (selectedUseCase === 'podcast_conversational' && (d.includes('podcast') || d.includes('conversational') || d.includes('creator') || d.includes('host') || tg.includes('podcast') || tg.includes('conversational') || tg.includes('youtube') || nm.includes('podcast'))) matchesCat = true;
             if (selectedUseCase === 'audiobook_story' && (d.includes('story') || d.includes('audiobook') || d.includes('narrat') || tg.includes('story') || tg.includes('audiobook') || nm.includes('story'))) matchesCat = true;
             if (selectedUseCase === 'commercial_promo' && (d.includes('commercial') || d.includes('promo') || d.includes('ads') || d.includes('elegance') || tg.includes('commercial') || tg.includes('promo') || nm.includes('commercial'))) matchesCat = true;
@@ -926,16 +1214,16 @@ export const VoiceStudioPage: React.FC = () => {
         if (aFav !== bFav) {
           return bFav - aFav; // Favorites on top!
         }
-        // Within non-favorites, place top featured presets like Marcus, Arthur & Julian first
-        const aJulian = (a.id === 'f5-en-marcus-clone' || a.id === 'f5-en-arthur-clone' || a.id === 'edge-en-marcus-deep' || a.id === 'edge-en-julian-sleep' || a.id === 'edge-en-julian-midnight') ? 1 : 0;
-        const bJulian = (b.id === 'f5-en-marcus-clone' || b.id === 'f5-en-arthur-clone' || b.id === 'edge-en-marcus-deep' || b.id === 'edge-en-julian-sleep' || b.id === 'edge-en-julian-midnight') ? 1 : 0;
+        // Within non-favorites, place top featured presets like Before It Worked, Marcus, Arthur & Julian first
+        const aJulian = (a.id === 'f5-en-before-it-worked' || a.id === 'f5-en-marcus-clone' || a.id === 'f5-en-arthur-clone' || a.id === 'edge-en-marcus-deep' || a.id === 'edge-en-julian-sleep' || a.id === 'edge-en-julian-midnight') ? 1 : 0;
+        const bJulian = (b.id === 'f5-en-before-it-worked' || b.id === 'f5-en-marcus-clone' || b.id === 'f5-en-arthur-clone' || b.id === 'edge-en-marcus-deep' || b.id === 'edge-en-julian-sleep' || b.id === 'edge-en-julian-midnight') ? 1 : 0;
         if (aJulian !== bJulian) return bJulian - aJulian;
         return 0;
       }
 
       if (voiceSortOption === 'default') {
-        const aJulian = (a.id === 'f5-en-marcus-clone' || a.id === 'f5-en-arthur-clone' || a.id === 'edge-en-marcus-deep' || a.id === 'edge-en-julian-sleep' || a.id === 'edge-en-julian-midnight') ? 1 : 0;
-        const bJulian = (b.id === 'f5-en-marcus-clone' || b.id === 'f5-en-arthur-clone' || b.id === 'edge-en-marcus-deep' || b.id === 'edge-en-julian-sleep' || b.id === 'edge-en-julian-midnight') ? 1 : 0;
+        const aJulian = (a.id === 'f5-en-before-it-worked' || a.id === 'f5-en-marcus-clone' || a.id === 'f5-en-arthur-clone' || a.id === 'edge-en-marcus-deep' || a.id === 'edge-en-julian-sleep' || a.id === 'edge-en-julian-midnight') ? 1 : 0;
+        const bJulian = (b.id === 'f5-en-before-it-worked' || b.id === 'f5-en-marcus-clone' || b.id === 'f5-en-arthur-clone' || b.id === 'edge-en-marcus-deep' || b.id === 'edge-en-julian-sleep' || b.id === 'edge-en-julian-midnight') ? 1 : 0;
         if (aJulian !== bJulian) return bJulian - aJulian;
       }
 
@@ -1290,12 +1578,15 @@ export const VoiceStudioPage: React.FC = () => {
 
                 {/* Script Textarea */}
                 <textarea
+                  ref={textareaRef}
                   value={scriptText}
                   onChange={(e) => {
                     setScriptText(e.target.value);
                     if (errorMessage) setErrorMessage(null);
                   }}
-                  placeholder="Enter narration script text here (Bangla, English, or any language)..."
+                  onMouseUp={handleSelectionChange}
+                  onKeyUp={handleSelectionChange}
+                  placeholder="Enter narration script text here — select any sentence to Re-Roll it individually..."
                   className="flex-1 w-full bg-transparent p-4 text-slate-100 placeholder-slate-500 text-sm leading-relaxed focus:outline-none resize-none font-sans min-h-[200px]"
                 />
 
@@ -1324,18 +1615,31 @@ export const VoiceStudioPage: React.FC = () => {
                 )}
 
                 {/* Quick Emotional Acting Tags Bar */}
-                <div className="px-4 py-2 bg-surface-card/30 border-t border-border-subtle/50 flex items-center gap-1.5 flex-wrap">
-                  <span className="text-[10px] font-medium text-slate-400 mr-1">Acting Cues:</span>
-                  {[
-                    { tag: '[whisper]', label: '🤫 Whisper' },
-                    { tag: '[dramatic]', label: '🎬 Dramatic' },
-                    { tag: '[cheerful]', label: '✨ Cheerful' },
+                <div className="px-4 py-2 bg-surface-card/30 border-t border-border-subtle/50 flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[10px] font-medium text-slate-400 mr-1">Acting Cues:</span>
+                    {[
+                      { tag: '[whisper]', label: '🤫 Whisper' },
+                      { tag: '[dramatic]', label: '🎬 Dramatic' },
+                      { tag: '[hopeful]', label: '🌅 Hopeful' },
+                    { tag: '[mysterious]', label: '🕵️ Mysterious' },
+                    { tag: '[nostalgic]', label: '📼 Nostalgic' },
+                    { tag: '[empathetic]', label: '🤝 Empathetic' },
+                    { tag: '[breathless]', label: '🏃 Breathless' },
+                    { tag: '[shouting]', label: '📢 Shouting' },
+                    { tag: '[hesitant]', label: '💭 Hesitant' },
+                    { tag: '[clears throat]', label: '🗣️ Clears Throat' },
+                    { tag: '[sniffle]', label: '🤧 Sniffle' },
+                    { tag: '[gulp]', label: '💧 Gulp' },
+                    { tag: '[yawn]', label: '🥱 Yawn' },
+                    { tag: '[humming]', label: '🎵 Humming' },
                     { tag: '[pause: 0.5s]', label: '⏱️ 0.5s Pause' },
                     { tag: '[pause: 1.0s]', label: '⏱️ 1.0s Breath' },
                     { tag: '[pause: 2.0s]', label: '🌙 2.0s Sleep Pause' },
                     { tag: '[pause: 3.5s]', label: '🌌 3.5s Drift Pause' },
                     { tag: '[laugh]', label: '😂 Laugh' },
                     { tag: '[sigh]', label: '😮‍💨 Sigh' },
+                    { tag: '[gasp]', label: '😲 Gasp' },
                   ].map((item) => (
                     <button
                       key={item.tag}
@@ -1346,11 +1650,88 @@ export const VoiceStudioPage: React.FC = () => {
                       {item.label}
                     </button>
                   ))}
+                  </div>
+
+                  {/* 1-Click Phonetic Assistant */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const { text: newText, count } = applyPhoneticAssistant(scriptText);
+                      if (count > 0) {
+                        setScriptText(newText);
+                      }
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 text-amber-300 text-[10px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer flex-shrink-0"
+                    title="1-Click Phoneticize: Automatically converts proper names, foreign locations, and Roman numerals to phonetically articulated spoken text"
+                  >
+                    <Sparkles className="w-3 h-3 text-amber-400" />
+                    <span>✨ Auto-Phoneticize</span>
+                    {detectPhoneticReplacements(scriptText).length > 0 && (
+                      <span className="px-1.5 py-0.2 rounded-full bg-amber-400 text-black text-[9px] font-bold">
+                        {detectPhoneticReplacements(scriptText).length} found
+                      </span>
+                    )}
+                  </button>
+
+                  {/* Re-Roll Selected Sentence (Feature 2) */}
+                  {selectedSentence && (
+                    <button
+                      type="button"
+                      onClick={handleReRollSentence}
+                      disabled={isReRolling || isGeneratingTTS}
+                      className="px-2.5 py-1 rounded-lg bg-violet-500/15 hover:bg-violet-500/25 border border-violet-500/40 text-violet-300 text-[10px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer flex-shrink-0 disabled:opacity-50 animate-fadeIn"
+                      title={`Re-Roll just this sentence with a random seed: "${selectedSentence.slice(0, 40)}${selectedSentence.length > 40 ? '…' : ''}"`}
+                    >
+                      {isReRolling ? (
+                        <Loader2 className="w-3 h-3 animate-spin text-violet-400" />
+                      ) : (
+                        <RotateCcw className="w-3 h-3 text-violet-400" />
+                      )}
+                      <span>🎲 Re-Roll ({selectedSentence.split(/\s+/).length}w)</span>
+                    </button>
+                  )}
                 </div>
+
+                {/* Re-Roll Mini-Player (Feature 2) */}
+                {reRollAudioUrl && (
+                  <div className="mx-4 mb-3 p-3 rounded-xl bg-violet-950/30 border border-violet-500/30 flex items-center gap-3 text-xs animate-fadeIn">
+                    <div className="flex items-center gap-1.5 text-violet-300">
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      <span className="font-semibold">Re-Roll Preview</span>
+                    </div>
+                    <div className="flex-1 truncate text-slate-400 italic text-[10px]">
+                      "{selectedSentence.slice(0, 60)}{selectedSentence.length > 60 ? '…' : ''}"
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!reRollAudioRef.current) return;
+                        if (isReRollPlaying) {
+                          reRollAudioRef.current.pause();
+                          setIsReRollPlaying(false);
+                        } else {
+                          reRollAudioRef.current.play().catch(() => {});
+                          setIsReRollPlaying(true);
+                        }
+                      }}
+                      className="p-1.5 rounded-lg bg-violet-600/20 hover:bg-violet-600/40 text-violet-300 border border-violet-500/40 transition-all cursor-pointer"
+                    >
+                      {isReRollPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReRollAudioUrl(null)}
+                      className="p-1.5 rounded-lg text-slate-500 hover:text-slate-300 transition-all cursor-pointer"
+                      title="Dismiss re-roll"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
 
                 {/* Editor Bottom Status & Primary Synthesize Bar */}
                 <div className="p-3 bg-surface-card/60 border-t border-border-subtle flex items-center justify-between gap-3 flex-wrap">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     {/* Vocal Settings Drawer Toggle */}
                     <button
                       type="button"
@@ -1367,6 +1748,64 @@ export const VoiceStudioPage: React.FC = () => {
                       <span className="text-[10px] text-slate-400 font-mono">({speed.toFixed(1)}x)</span>
                     </button>
 
+                    {/* F5-TTS Neural Flow Quality Pill Toggle */}
+                    {(activeVoiceProfile?.engine === 'f5_tts' || activeVoiceProfile?.engine === 'indic_f5' || !activeVoiceProfile) && (
+                      <div className="flex items-center gap-1.5">
+                        <div className="flex items-center bg-surface-panel border border-border-subtle rounded-xl p-0.5 text-xs font-semibold">
+                          <button
+                            type="button"
+                            onClick={() => setF5Quality('standard')}
+                            className={`px-2.5 py-1 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                              f5Quality === 'standard'
+                                ? 'bg-cyan-950/80 text-cyan-300 border border-cyan-700/60 shadow-xs'
+                                : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                            title="Standard 32 ODE steps (~0.78x RTF) — Fast synthesis for daily generation"
+                          >
+                            <span>⚡ 32 Steps</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setF5Quality('ultra_master')}
+                            className={`px-2.5 py-1 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                              f5Quality === 'ultra_master'
+                                ? 'bg-indigo-950/80 text-indigo-300 border border-indigo-700/60 shadow-xs'
+                                : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                            title="Ultra Master 48 ODE steps — 50% more resolution, crystal diction, zero grain"
+                          >
+                            <span>💎 48 Master</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setF5Quality('cinema_studio')}
+                            className={`px-2.5 py-1 rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                              f5Quality === 'cinema_studio'
+                                ? 'bg-amber-950/80 text-amber-300 border border-amber-700/60 shadow-xs'
+                                : 'text-slate-400 hover:text-slate-200'
+                            }`}
+                            title="Cinema Studio 64 ODE steps — Maximum flow-matching resolution for final theatrical export"
+                          >
+                            <span>🎬 64 Studio</span>
+                          </button>
+                        </div>
+
+                        {/* Natural Micro-Breaths Toggle */}
+                        <button
+                          type="button"
+                          onClick={() => setEnableNaturalBreaths(!enableNaturalBreaths)}
+                          className={`px-2.5 py-1 rounded-xl border text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer ${
+                            enableNaturalBreaths
+                              ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700/60 shadow-xs'
+                              : 'bg-surface-panel border-border-subtle text-slate-400 hover:text-slate-200'
+                          }`}
+                          title="Natural Micro-Breaths: Automatically inserts subtle, human-like inhale breaths before speaking and at major narrative pauses"
+                        >
+                          <span>🌬️ Breaths: {enableNaturalBreaths ? 'ON' : 'OFF'}</span>
+                        </button>
+                      </div>
+                    )}
+
                     {scriptText.trim() && (
                       <button
                         type="button"
@@ -1379,26 +1818,118 @@ export const VoiceStudioPage: React.FC = () => {
                     )}
                   </div>
 
-                  {/* Primary Synthesis CTA Button */}
-                  <button
-                    type="button"
-                    onClick={handleSynthesize}
-                    disabled={isGeneratingTTS || !scriptText.trim() || limitValidation.isExceeded}
-                    className="px-6 py-2 rounded-xl bg-gradient-to-r from-indigo-600 via-indigo-500 to-cyan-500 hover:brightness-110 active:scale-98 text-white font-bold text-xs shadow-lg shadow-indigo-600/20 flex items-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                  >
-                    {isGeneratingTTS ? (
-                      <>
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>{ttsProgressMessage || 'Generating Speech...'}</span>
-                      </>
-                    ) : (
-                      <>
-                        <Sparkles className="w-4 h-4" />
-                        <span>Synthesize Speech</span>
-                      </>
-                    )}
-                  </button>
+                  {/* CTA Buttons: 3-Take Audition & Primary Synthesize */}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handle3TakeAudition}
+                      disabled={isGeneratingTTS || isAuditioning || !scriptText.trim() || limitValidation.isExceeded || scriptText.length > 15000}
+                      className="px-4 py-2 rounded-xl bg-purple-950/70 hover:bg-purple-900/80 border border-purple-500/50 text-purple-200 hover:text-white font-bold text-xs shadow-md shadow-purple-950/40 flex items-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                      title={scriptText.length > 15000 ? "3-Take Audition is designed for preview scripts under 15,000 chars. Use 'Synthesize Speech' for full 50-minute voiceovers." : "Director's 3-Take Audition: Synthesizes 3 distinct delivery variations with different neural flow seeds (Seeds 42, 108, 777) so you can audition and pick the winning inflection"}
+                    >
+                      {isAuditioning ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin text-purple-300" />
+                          <span>Auditioning ({auditionProgress}/3)...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Clapperboard className="w-4 h-4 text-purple-400" />
+                          <span>3-Take Audition</span>
+                        </>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleSynthesize}
+                      disabled={isGeneratingTTS || isAuditioning || !scriptText.trim() || limitValidation.isExceeded}
+                      className="px-6 py-2 rounded-xl bg-gradient-to-r from-indigo-600 via-indigo-500 to-cyan-500 hover:brightness-110 active:scale-98 text-white font-bold text-xs shadow-lg shadow-indigo-600/20 flex items-center gap-2 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      {isGeneratingTTS ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin text-cyan-200" />
+                          <span>
+                            {ttsProgressData?.chunk && ttsProgressData?.total
+                              ? `Synthesizing ${ttsProgressData.percent.toFixed(0)}% (${ttsProgressData.chunk}/${ttsProgressData.total})`
+                              : ttsProgressMessage || 'Generating Speech...'}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles className="w-4 h-4" />
+                          <span>Synthesize Speech</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
+
+                {/* Real-time TTS Progress HUD & Live ETA Bar */}
+                {isGeneratingTTS && (
+                  <div className="p-4 bg-slate-900/95 border-t border-indigo-500/30 animate-fadeIn space-y-2.5">
+                    <div className="flex items-center justify-between text-xs flex-wrap gap-2">
+                      <div className="flex items-center gap-2.5">
+                        <span className="relative flex h-2.5 w-2.5">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-cyan-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-cyan-500"></span>
+                        </span>
+                        <span className="font-bold text-white text-xs">
+                          {ttsProgressData?.chunk && ttsProgressData?.total
+                            ? `Synthesizing Chunk ${ttsProgressData.chunk} of ${ttsProgressData.total}`
+                            : ttsProgressMessage || 'Synthesizing voiceover...'}
+                        </span>
+                        {ttsProgressData?.percent !== undefined && (
+                          <span className="px-2 py-0.5 rounded-full font-mono text-[11px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-xs">
+                            {ttsProgressData.percent.toFixed(0)}%
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-3 font-mono text-xs">
+                        {ttsProgressData?.elapsedSec !== undefined && ttsProgressData.elapsedSec > 0 && (
+                          <span className="flex items-center gap-1.5 text-slate-400">
+                            <Clock className="w-3.5 h-3.5 text-slate-500" />
+                            <span>Elapsed: <strong className="text-slate-200">{formatEta(ttsProgressData.elapsedSec)}</strong></span>
+                          </span>
+                        )}
+                        {ttsProgressData?.etaSec !== undefined && ttsProgressData.etaSec > 0 ? (
+                          <span className="flex items-center gap-1.5 text-emerald-300 bg-emerald-950/70 px-2.5 py-1 rounded-lg border border-emerald-500/40 shadow-xs animate-pulse">
+                            <Timer className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>ETA: <strong>~{formatEta(ttsProgressData.etaSec)} remaining</strong></span>
+                          </span>
+                        ) : (
+                          ttsProgressData?.chunk ? (
+                            <span className="text-[11px] text-slate-500 italic">Calculating ETA...</span>
+                          ) : null
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Glowing Multi-Stop Progress Bar */}
+                    <div className="relative w-full h-3 bg-slate-950/90 rounded-full overflow-hidden border border-slate-800 p-0.5">
+                      <div
+                        className="h-full bg-gradient-to-r from-indigo-500 via-purple-500 to-cyan-400 transition-all duration-300 ease-out rounded-full shadow-[0_0_15px_rgba(99,102,241,0.7)]"
+                        style={{
+                          width: `${Math.max(2, Math.min(100, ttsProgressData?.percent ?? (isGeneratingTTS ? 5 : 0)))}%`
+                        }}
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 inline-block"></span>
+                        {activeVoice?.name || 'Voice'} • {activeVoice?.engine === 'f5_tts' ? 'F5-TTS Flow Matching' : activeVoice?.engine?.toUpperCase() || 'Neural'}
+                        {f5Quality && activeVoice?.engine === 'f5_tts' ? ` • ${f5Quality === 'cinema_studio' ? '64 Studio ODE' : f5Quality === 'ultra_master' ? '48 Master ODE' : '32 Standard ODE'}` : ''}
+                      </span>
+                      <span>
+                        {ttsProgressData?.percent !== undefined
+                          ? `${ttsProgressData.percent.toFixed(1)}% complete`
+                          : 'Processing neural flow...'}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1481,22 +2012,162 @@ export const VoiceStudioPage: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Emotion Delivery */}
+                {/* Neural Flow Quality (ODE Steps) */}
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between text-xs font-medium text-slate-300">
-                    <span>Emotion Delivery</span>
-                    <span className="font-mono text-cyan-300 font-semibold capitalize">[{emotion}]</span>
+                    <span>Neural Quality (ODE)</span>
+                    <span className="font-mono text-cyan-300 font-semibold">
+                      {f5Quality === 'cinema_studio' ? '64 Steps · Studio' : f5Quality === 'ultra_master' ? '48 Steps · Master' : '32 Steps · Fast'}
+                    </span>
                   </div>
-                  <div className="grid grid-cols-4 gap-1">
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setF5Quality('standard')}
+                      className={`p-1.5 rounded-xl text-left border transition-all cursor-pointer ${
+                        f5Quality === 'standard'
+                          ? 'bg-cyan-950/60 border-cyan-500 text-white shadow-sm ring-1 ring-cyan-500/40'
+                          : 'bg-surface-card border-border-subtle text-slate-400 hover:border-border-default hover:text-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[11px] font-bold">
+                        <span>⚡ Standard</span>
+                        {f5Quality === 'standard' && <Check className="w-3 h-3 text-cyan-400" />}
+                      </div>
+                      <p className="text-[9px] text-slate-400 mt-0.5 leading-tight">32 Steps · Fast</p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setF5Quality('ultra_master')}
+                      className={`p-1.5 rounded-xl text-left border transition-all cursor-pointer ${
+                        f5Quality === 'ultra_master'
+                          ? 'bg-indigo-950/70 border-indigo-500 text-white shadow-sm ring-1 ring-indigo-500/40'
+                          : 'bg-surface-card border-border-subtle text-slate-400 hover:border-border-default hover:text-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[11px] font-bold">
+                        <span>💎 Master</span>
+                        {f5Quality === 'ultra_master' && <Check className="w-3 h-3 text-indigo-400" />}
+                      </div>
+                      <p className="text-[9px] text-slate-400 mt-0.5 leading-tight">48 Steps · High Res</p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setF5Quality('cinema_studio')}
+                      className={`p-1.5 rounded-xl text-left border transition-all cursor-pointer ${
+                        f5Quality === 'cinema_studio'
+                          ? 'bg-amber-950/70 border-amber-500 text-white shadow-sm ring-1 ring-amber-500/40'
+                          : 'bg-surface-card border-border-subtle text-slate-400 hover:border-border-default hover:text-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-[11px] font-bold">
+                        <span>🎬 Cinema</span>
+                        {f5Quality === 'cinema_studio' && <Check className="w-3 h-3 text-amber-400" />}
+                      </div>
+                      <p className="text-[9px] text-slate-400 mt-0.5 leading-tight">64 Steps · Studio</p>
+                    </button>
+                  </div>
+                  <div className="flex justify-between text-[10px] text-slate-500 font-mono">
+                    <span>32 Steps (Fast Preview)</span>
+                    <span>64 Steps (Final Master)</span>
+                  </div>
+                </div>
+
+                {/* Natural Micro-Breaths Setting */}
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex items-center justify-between text-xs font-medium text-slate-300">
+                    <span className="flex items-center gap-1.5">
+                      <span>🌬️ Natural Inhale Breaths</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setEnableNaturalBreaths(!enableNaturalBreaths)}
+                      className={`px-2 py-0.5 rounded-md text-[11px] font-bold transition-all cursor-pointer border ${
+                        enableNaturalBreaths
+                          ? 'bg-emerald-950/80 text-emerald-300 border-emerald-600/70'
+                          : 'bg-surface-panel text-slate-400 border-border-subtle hover:text-slate-200'
+                      }`}
+                    >
+                      {enableNaturalBreaths ? 'ENABLED' : 'DISABLED'}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-400 leading-tight">
+                    Injects subtle, authentic physiological inhale pauses before speech and after dramatic pauses (≥0.65s).
+                  </p>
+                </div>
+              </div>
+
+              {/* Voice Expressiveness / Stability Slider (Feature 1) */}
+              <div className="space-y-1.5 pt-1 border-t border-border-subtle/50 mt-2">
+                <div className="flex items-center justify-between text-xs font-medium text-slate-300">
+                  <div className="flex items-center gap-1.5">
+                    <span>🎭 Voice Expressiveness</span>
+                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-border-subtle">
+                      CFG {computedCfgStrength.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {voiceExpressiveness !== 40 && (
+                      <button
+                        type="button"
+                        onClick={() => setVoiceExpressiveness(40)}
+                        className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center gap-0.5 cursor-pointer underline"
+                        title="Reset to natural default (CFG 1.90)"
+                      >
+                        <RotateCcw className="w-2.5 h-2.5" />
+                        <span>Reset</span>
+                      </button>
+                    )}
+                    <span className={`font-mono text-xs font-bold ${voiceExpressiveness < 30 ? 'text-cyan-400' : voiceExpressiveness < 70 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                      {voiceExpressiveness < 30 ? '🔒 Stable' : voiceExpressiveness < 70 ? '🎯 Natural' : '🔥 Expressive'}
+                    </span>
+                  </div>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step="5"
+                  value={voiceExpressiveness}
+                  onChange={(e) => setVoiceExpressiveness(parseInt(e.target.value, 10))}
+                  className="w-full accent-amber-500 cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] text-slate-500 font-mono">
+                  <span>🔒 Stable / Controlled</span>
+                  <span>🎯 Natural (Default)</span>
+                  <span>🔥 Expressive / Dynamic</span>
+                </div>
+                <p className="text-[10px] text-slate-400 leading-tight">
+                  Controls flow-matching guidance scale. Lower = flatter, more controlled. Higher = more dynamic inflection and creative deviation from the reference voice.
+                </p>
+              </div>
+
+              {/* Emotion Delivery */}
+              <div className="space-y-1.5 pt-1">
+                <div className="flex items-center justify-between text-xs font-medium text-slate-300">
+                  <span>Emotion Delivery</span>
+                  <span className="font-mono text-cyan-300 font-semibold capitalize">[{emotion}]</span>
+                </div>
+                  <div className="grid grid-cols-4 sm:grid-cols-8 gap-1">
                     {[
                       { id: 'neutral', label: 'Neutral', emoji: '🎙️' },
                       { id: 'dramatic', label: 'Dramatic', emoji: '🎬' },
                       { id: 'whisper', label: 'Whisper', emoji: '🤫' },
+                      { id: 'hopeful', label: 'Hopeful', emoji: '🌅' },
+                      { id: 'mysterious', label: 'Mysterious', emoji: '🕵️' },
+                      { id: 'nostalgic', label: 'Nostalgic', emoji: '📼' },
+                      { id: 'empathetic', label: 'Empathetic', emoji: '🤝' },
+                      { id: 'relieved', label: 'Relieved', emoji: '😌' },
                       { id: 'cheerful', label: 'Cheerful', emoji: '✨' },
                       { id: 'sad', label: 'Sad', emoji: '💧' },
                       { id: 'excited', label: 'Excited', emoji: '⚡' },
                       { id: 'angry', label: 'Angry', emoji: '🔥' },
                       { id: 'calm', label: 'Calm', emoji: '🌿' },
+                      { id: 'shouting', label: 'Shouting', emoji: '📢' },
+                      { id: 'breathless', label: 'Breathless', emoji: '🏃' },
+                      { id: 'hesitant', label: 'Hesitant', emoji: '💭' },
                     ].map((em) => (
                       <button
                         key={em.id}
@@ -1514,21 +2185,21 @@ export const VoiceStudioPage: React.FC = () => {
                     ))}
                   </div>
                 </div>
-              </div>
 
               {/* Audio Mastering Preset */}
               <div className="pt-2.5 border-t border-border-subtle/70 space-y-2">
-                <span className="text-xs font-semibold text-slate-300">Studio Audio Mastering Preset (FFmpeg DSP)</span>
-                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
                   {[
-                    { id: 'deep_sleep_master', label: '💤 Deep Sleep & Hypnosis', desc: '6kHz roll-off, -18 LUFS' },
-                    { id: 'late_night_warmth', label: '🌙 Late-Night Warmth', desc: 'Chest warmth & de-esser' },
-                    { id: 'broadcast_studio', label: '💎 Broadcast Studio', desc: '8-Stage Strip + Air' },
-                    { id: 'podcast_warmth', label: '🎙️ Podcast Warmth', desc: '150Hz chest warmth' },
-                    { id: 'cinema_trailer', label: '🎬 Cinema Trailer', desc: 'Sub-bass power punch' },
-                    { id: 'crisp_youtube', label: '🔊 Crisp YouTube', desc: '2.8kHz vocal clarity' },
-                    { id: 'vintage_radio', label: '📻 Vintage Radio', desc: 'Telephone grit filter' },
-                    { id: 'none', label: '⚡ Raw / None', desc: 'Direct neural speech' },
+                    { id: 'deep_night_story', label: '🌌 Deep Night Story', desc: 'Bedtime Warmth & Clean Pauses' },
+                    { id: 'deep_cinema_warmth', label: '🎬 Cinema Warmth', desc: '110Hz SM7B Warmth & Limiter' },
+                    { id: 'broadcast_studio', label: '💎 Broadcast Studio', desc: '8-Stage Strip & 10kHz Air' },
+                    { id: 'cinema_trailer', label: '💥 Cinema Trailer', desc: '50Hz Sub-Bass & Punch' },
+                    { id: 'crisp_youtube', label: '🔊 Video Essay / Tech', desc: '2.8kHz High-Clarity Presence' },
+                    { id: 'late_night_warmth', label: '🌙 Late-Night Warmth', desc: 'Intimate Chest & De-Esser' },
+                    { id: 'deep_sleep_master', label: '💤 Sleep & Bedtime', desc: 'Gentle Pillow Warmth, -17 LUFS' },
+                    { id: 'podcast_warmth', label: '🎙️ Podcast Warmth', desc: '150Hz Proximity Warmth' },
+                    { id: 'vintage_radio', label: '📻 Vintage Radio', desc: 'Telephone Bandpass Filter' },
+                    { id: 'none', label: '⚡ Raw / None', desc: 'Direct Neural Speech' },
                   ].map((preset) => (
                     <button
                       key={preset.id}
@@ -1556,7 +2227,19 @@ export const VoiceStudioPage: React.FC = () => {
                 {[
                   { tag: '[whisper]', label: '🤫 Whisper' },
                   { tag: '[dramatic]', label: '🎬 Dramatic' },
-                  { tag: '[cheerful]', label: '✨ Cheerful' },
+                  { tag: '[hopeful]', label: '🌅 Hopeful' },
+                  { tag: '[mysterious]', label: '🕵️ Mysterious' },
+                  { tag: '[nostalgic]', label: '📼 Nostalgic' },
+                  { tag: '[empathetic]', label: '🤝 Empathetic' },
+                  { tag: '[relieved]', label: '😌 Relieved' },
+                  { tag: '[breathless]', label: '🏃 Breathless' },
+                  { tag: '[shouting]', label: '📢 Shouting' },
+                  { tag: '[hesitant]', label: '💭 Hesitant' },
+                  { tag: '[clears throat]', label: '🗣️ Clears Throat' },
+                  { tag: '[sniffle]', label: '🤧 Sniffle' },
+                  { tag: '[gulp]', label: '💧 Gulp' },
+                  { tag: '[yawn]', label: '🥱 Yawn' },
+                  { tag: '[cackle]', label: '😈 Cackle' },
                   { tag: '[pause: 0.5s]', label: '⏱️ 0.5s Pause' },
                   { tag: '[pause: 1.0s]', label: '⏱️ 1.0s Breath' },
                   { tag: '[laugh]', label: '😂 Laugh' },
@@ -1583,6 +2266,67 @@ export const VoiceStudioPage: React.FC = () => {
             </div>
           )}
 
+          {/* Director's 3-Take Audition Bar */}
+          {auditionTakes.length > 0 && (
+            <div className="p-3.5 rounded-2xl bg-purple-950/40 border border-purple-500/40 shadow-xl space-y-2.5 animate-fadeIn">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="p-1 rounded-lg bg-purple-500/20 text-purple-300">
+                    <Clapperboard className="w-4 h-4 text-purple-400" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-purple-200">Director's 3-Take Audition</h4>
+                    <p className="text-[10px] text-purple-300/70">3 distinct neural flow deliveries • Audition each inflection and select the best take</p>
+                  </div>
+                </div>
+                <span className="px-2 py-0.5 rounded-full bg-purple-500/20 border border-purple-500/40 text-purple-300 text-[10px] font-mono font-bold">
+                  Take {activeTakeIndex + 1} of {auditionTakes.length} Active
+                </span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                {auditionTakes.map((take, idx) => (
+                  <button
+                    key={take.id}
+                    type="button"
+                    onClick={() => {
+                      setActiveTakeIndex(idx);
+                      setAudioUrl(take.audioUrl);
+                      setAudioDuration(take.duration);
+                      setAudioCurrentTime(0);
+                      setTimeout(() => {
+                        if (audioRef.current) {
+                          audioRef.current.currentTime = 0;
+                          audioRef.current.play().catch(() => {});
+                          setIsPlayingAudio(true);
+                        }
+                      }, 100);
+                    }}
+                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                      activeTakeIndex === idx
+                        ? 'bg-purple-900/60 border-purple-400 text-white shadow-md shadow-purple-950/50 ring-1 ring-purple-400/50'
+                        : 'bg-surface-card border-border-subtle text-slate-400 hover:border-border-default hover:text-slate-200'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-xs font-bold">
+                      <span className="flex items-center gap-1.5">
+                        <span>🎬 Take {take.id}</span>
+                        {activeTakeIndex === idx && <Check className="w-3 h-3 text-purple-400" />}
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-mono">{formatTime(take.duration)}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono mt-1">
+                      <span>Flow Seed {take.seed}</span>
+                      <span className={activeTakeIndex === idx ? 'text-purple-300 font-semibold' : ''}>
+                        {activeTakeIndex === idx ? '✓ Selected' : 'Click to Audition'}
+                      </span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Audio Player Bar (when speech is generated or loaded) */}
           {audioUrl && (
             <div className="p-4 rounded-2xl bg-surface-panel border border-cyan-500/30 shadow-xl space-y-3 animate-fadeIn">
@@ -1598,7 +2342,7 @@ export const VoiceStudioPage: React.FC = () => {
                       {activeVoice?.name || 'Generated Voiceover'}
                     </h3>
                     <p className="text-[11px] text-slate-400">
-                      Duration: {formatTime(audioDuration)} • {voiceMasteringPreset === 'broadcast_studio' ? '💎 Broadcast Master' : voiceMasteringPreset === 'late_night_warmth' ? '🌙 Late-Night Master' : voiceMasteringPreset === 'deep_sleep_master' ? '💤 Sleep Master' : voiceMasteringPreset === 'deep_cinema_warmth' ? '🎬 Cinema Warmth' : voiceMasteringPreset.replace('_', ' ')}
+                      Duration: {formatTime(audioDuration)} • {voiceMasteringPreset === 'deep_night_story' ? '🌌 Deep Night Story' : voiceMasteringPreset === 'broadcast_studio' ? '💎 Broadcast Master' : voiceMasteringPreset === 'late_night_warmth' ? '🌙 Late-Night Master' : voiceMasteringPreset === 'deep_sleep_master' ? '💤 Sleep Master' : voiceMasteringPreset === 'deep_cinema_warmth' ? '🎬 Cinema Warmth' : voiceMasteringPreset.replace('_', ' ')}
                     </p>
                   </div>
                 </div>
@@ -2328,7 +3072,7 @@ export const VoiceStudioPage: React.FC = () => {
                         )}
                         {voice.defaultMasteringPreset && (
                           <span className="px-1.5 py-0.5 rounded-md bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 text-[9px] font-mono font-semibold" title="Calibrated studio audio strip">
-                            {voice.defaultMasteringPreset === 'broadcast_studio' ? '💎 Broadcast Master' : voice.defaultMasteringPreset === 'late_night_warmth' ? '🌙 Late-Night Master' : voice.defaultMasteringPreset === 'deep_sleep_master' ? '💤 Sleep Master' : voice.defaultMasteringPreset === 'deep_cinema_warmth' ? '🎬 Cinema Warmth' : voice.defaultMasteringPreset.replace('_', ' ')}
+                            {voice.defaultMasteringPreset === 'deep_night_story' ? '🌌 Deep Night Story' : voice.defaultMasteringPreset === 'broadcast_studio' ? '💎 Broadcast Master' : voice.defaultMasteringPreset === 'late_night_warmth' ? '🌙 Late-Night Master' : voice.defaultMasteringPreset === 'deep_sleep_master' ? '💤 Sleep Master' : voice.defaultMasteringPreset === 'deep_cinema_warmth' ? '🎬 Cinema Warmth' : voice.defaultMasteringPreset === 'cinema_trailer' ? '💥 Trailer Punch' : voice.defaultMasteringPreset === 'crisp_youtube' ? '🔊 Tech & Essay' : voice.defaultMasteringPreset.replace('_', ' ')}
                           </span>
                         )}
                         <span className="px-1.5 py-0.5 rounded-md bg-surface-canvas text-slate-400 border border-border-subtle text-[9px] font-mono uppercase">
@@ -2497,6 +3241,7 @@ export const VoiceStudioPage: React.FC = () => {
       {/* Hidden Audio Player for Generated Script */}
       {audioUrl && (
         <audio
+          key={audioUrl}
           ref={audioRef}
           src={audioUrl}
           onTimeUpdate={() => {
@@ -2513,6 +3258,12 @@ export const VoiceStudioPage: React.FC = () => {
           setIsPreviewPlaying(false);
           setPreviewingVoiceId(null);
         }}
+      />
+
+      {/* Hidden Audio Player for Re-Roll Sentence Preview (Feature 2) */}
+      <audio
+        ref={reRollAudioRef}
+        onEnded={() => setIsReRollPlaying(false)}
       />
 
       {/* Voice Cloning Modal */}
@@ -2535,73 +3286,168 @@ export const VoiceStudioPage: React.FC = () => {
         }}
       />
 
-      {/* Pronunciation Rules Modal */}
+      {/* Pronunciation Rules Modal — Enhanced (Feature 3) */}
       {isPronunciationModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn">
-          <div className="w-full max-w-lg bg-surface-panel border border-border-subtle rounded-3xl p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-border-subtle">
-              <div className="flex items-center gap-2">
-                <BookOpen className="w-5 h-5 text-indigo-400" />
-                <h3 className="font-bold text-white text-sm">Pronunciation Dictionary Rules</h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsPronunciationModalOpen(false)}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-white"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+          <div className="w-full max-w-xl bg-surface-panel border border-border-subtle rounded-3xl shadow-2xl flex flex-col max-h-[85vh]">
 
-            <p className="text-xs text-slate-400">
-              Automatically replace specific acronyms, names, or words before sending to TTS models.
-            </p>
-
-            <div className="space-y-2 max-h-56 overflow-y-auto">
-              {pronunciationRules.map((rule) => (
-                <div key={rule.id} className="flex items-center justify-between p-2.5 rounded-xl bg-surface-card border border-border-subtle text-xs">
-                  <div className="flex items-center gap-2 font-mono">
-                    <span className="text-white font-bold">{rule.pattern}</span>
-                    <span className="text-slate-500">→</span>
-                    <span className="text-emerald-400">{rule.replacement}</span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleDeleteRule(rule.id)}
-                    className="text-slate-500 hover:text-rose-400 p-1"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+            {/* Header */}
+            <div className="flex items-center justify-between p-5 border-b border-border-subtle flex-shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-indigo-500/15 border border-indigo-500/30">
+                  <BookOpen className="w-4 h-4 text-indigo-400" />
                 </div>
-              ))}
+                <div>
+                  <h3 className="font-bold text-white text-sm">Pronunciation Dictionary</h3>
+                  <p className="text-[10px] text-slate-400 mt-0.5">Persistent phonetic rules · Auto-applied before synthesis</p>
+                </div>
+                {pronunciationRules.length > 0 && (
+                  <span className="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 text-[10px] font-bold border border-indigo-500/30">
+                    {pronunciationRules.length} rules
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {/* Reset Defaults Button */}
+                <button
+                  type="button"
+                  onClick={handleResetDefaultRules}
+                  className="px-2.5 py-1 rounded-lg bg-surface-card hover:bg-surface-elevated text-amber-300 border border-border-subtle text-[10px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer"
+                  title="Reset dictionary to verified defaults"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Reset Defaults</span>
+                </button>
+                {/* Export Button */}
+                <button
+                  type="button"
+                  onClick={handleExportRules}
+                  disabled={pronunciationRules.length === 0}
+                  className="px-2.5 py-1 rounded-lg bg-surface-card hover:bg-surface-elevated text-emerald-300 border border-border-subtle text-[10px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-40"
+                  title="Export rules as JSON"
+                >
+                  <Download className="w-3 h-3" />
+                  <span>Export</span>
+                </button>
+                {/* Import Button */}
+                <label className="px-2.5 py-1 rounded-lg bg-surface-card hover:bg-surface-elevated text-cyan-300 border border-border-subtle text-[10px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer">
+                  <Upload className="w-3 h-3" />
+                  <span>Import</span>
+                  <input type="file" accept=".json" onChange={handleImportRules} className="hidden" />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => { setIsPronunciationModalOpen(false); setPronTestResult(null); }}
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-surface-card transition-all cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
-            <div className="pt-2 border-t border-border-subtle flex items-center gap-2">
-              <input
-                type="text"
-                value={newRulePattern}
-                onChange={(e) => setNewRulePattern(e.target.value)}
-                placeholder="Find (e.g. AI)"
-                className="flex-1 py-1.5 px-3 bg-surface-canvas border border-border-subtle rounded-xl text-xs text-white"
-              />
-              <input
-                type="text"
-                value={newRuleReplacement}
-                onChange={(e) => setNewRuleReplacement(e.target.value)}
-                placeholder="Replace (e.g. এআই)"
-                className="flex-1 py-1.5 px-3 bg-surface-canvas border border-border-subtle rounded-xl text-xs text-white"
-              />
-              <button
-                type="button"
-                onClick={handleAddRule}
-                className="px-3 py-1.5 rounded-xl bg-indigo-600 text-white font-semibold text-xs"
-              >
-                Add
-              </button>
+            {/* Rules List */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-1.5 min-h-0">
+              {pronunciationRules.length === 0 ? (
+                <div className="py-8 text-center text-slate-500 text-xs space-y-2">
+                  <BookOpen className="w-8 h-8 mx-auto opacity-30" />
+                  <p className="font-semibold text-slate-400">No rules yet</p>
+                  <p className="text-[10px] max-w-xs mx-auto leading-relaxed">
+                    Add word-level replacements below. e.g. "AI" → "এআই" or "Messi" → "Leonel Messi"
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between text-[10px] text-slate-500 mb-2 px-1">
+                    <span className="font-medium">{pronunciationRules.length} active rules · Saved to browser</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPronunciationRules([]);
+                        try { localStorage.removeItem('tts_pronunciation_rules'); } catch {}
+                      }}
+                      className="text-rose-400 hover:text-rose-300 font-semibold cursor-pointer"
+                    >
+                      Clear all
+                    </button>
+                  </div>
+                  {pronunciationRules.map((rule) => (
+                    <div key={rule.id} className="flex items-center justify-between p-2.5 rounded-xl bg-surface-card border border-border-subtle text-xs hover:border-indigo-500/30 transition-colors group">
+                      <div className="flex items-center gap-2 font-mono min-w-0">
+                        <span className="text-white font-bold truncate max-w-[140px]">{rule.pattern}</span>
+                        <span className="text-indigo-400 font-bold flex-shrink-0">→</span>
+                        <span className="text-emerald-400 truncate max-w-[160px]">{rule.replacement}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteRule(rule.id)}
+                        className="text-slate-600 hover:text-rose-400 p-1 opacity-0 group-hover:opacity-100 transition-all cursor-pointer flex-shrink-0"
+                        title="Delete rule"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+
+            {/* Add New Rule */}
+            <div className="p-4 border-t border-border-subtle space-y-3 flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={newRulePattern}
+                  onChange={(e) => { setNewRulePattern(e.target.value); setPronTestResult(null); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleAddRule(); }}
+                  placeholder="Find word (e.g. AI)"
+                  className="flex-1 py-2 px-3 bg-surface-canvas border border-border-subtle rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50"
+                />
+                <span className="text-slate-500 text-sm font-bold flex-shrink-0">→</span>
+                <input
+                  type="text"
+                  value={newRuleReplacement}
+                  onChange={(e) => { setNewRuleReplacement(e.target.value); setPronTestResult(null); }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleAddRule(); }}
+                  placeholder="Replace with (e.g. এআই)"
+                  className="flex-1 py-2 px-3 bg-surface-canvas border border-border-subtle rounded-xl text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500/50"
+                />
+                <button
+                  type="button"
+                  onClick={handleTestRule}
+                  disabled={!newRulePattern.trim()}
+                  className="px-2.5 py-2 rounded-xl bg-surface-card hover:bg-surface-elevated border border-border-subtle text-slate-300 text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer disabled:opacity-40"
+                  title="Test this rule against your current script"
+                >
+                  <FileText className="w-3 h-3 text-cyan-400" />
+                  Test
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddRule}
+                  disabled={!newRulePattern.trim() || !newRuleReplacement.trim()}
+                  className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-40"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  Add
+                </button>
+              </div>
+
+              {/* Test Result Preview */}
+              {pronTestResult && (
+                <div className="p-2.5 rounded-xl bg-emerald-950/30 border border-emerald-500/30 text-[10px] text-emerald-300 font-mono leading-relaxed animate-fadeIn">
+                  <span className="text-slate-400 font-sans font-semibold block mb-1">Preview in your script:</span>
+                  {pronTestResult}
+                </div>
+              )}
+
+              <p className="text-[10px] text-slate-500 leading-relaxed">
+                Rules are applied in order before sending text to TTS. Use <span className="font-mono text-slate-400">→</span> to map phonetic spellings, language substitutions, or acronym expansions. Rules are <strong className="text-slate-300">saved to browser storage</strong> and persist across sessions.
+              </p>
             </div>
           </div>
         </div>
       )}
+
 
       {/* API Key Modal */}
       {isKeyModalOpen && (

@@ -109,6 +109,20 @@ export function getVoiceCardIdentity(voice: VoiceProfile): VoiceVisualIdentity {
     };
   }
 
+  if (id === 'f5-en-before-it-worked' || (name.toLowerCase().includes('before it worked') && voice.engine === 'f5_tts')) {
+    return {
+      displayName: 'Before It Worked (F5-TTS)',
+      subtitle: 'Master Documentary • 110Hz Baritone',
+      gradient: 'from-sky-600 via-cyan-800 to-slate-950',
+      glowBorder: 'border-cyan-500/50 shadow-cyan-500/25',
+      badgeStyle: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
+      badgeText: '🎙️ Master Documentary Clone',
+      timbre: '110Hz Sub-Baritone Flow Matching',
+      flag,
+      iconType: 'documentary',
+    };
+  }
+
   if (id === 'f5-en-carrier-clone' || (name.toLowerCase().includes('carrier') && voice.engine === 'f5_tts')) {
     return {
       displayName: 'Carrier (F5-TTS)',

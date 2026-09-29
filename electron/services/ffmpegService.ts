@@ -3,10 +3,14 @@ import ffmpegPath from 'ffmpeg-static';
 import path from 'path';
 import fs from 'fs-extra';
 import { spawn } from 'child_process';
-import { Project, ExportSettings, RenderProgress, AspectRatio, ExportResolution, SceneSegment, AudioMasteringPreset } from '../../src/types';
+import sharp from 'sharp';
+import { Project, ExportSettings, RenderProgress, AspectRatio, ExportResolution, SceneSegment, AudioMasteringPreset, OverlayClip } from '../../src/types';
+import { StickerRasterizer } from './stickerRasterizer';
+import { SubtitleAssGenerator } from './subtitleAssGenerator';
 
 export class FFmpegService {
   private isRendering: boolean = false;
+  private isCancelled: boolean = false;
   private currentCommand: ffmpeg.FfmpegCommand | null = null;
 
   constructor() {
@@ -15,6 +19,39 @@ export class FFmpegService {
       ffmpeg.setFfmpegPath(resolvedPath);
       console.log(`[FFmpegService] Initialized FFmpeg binary at: ${resolvedPath}`);
     }
+  }
+
+  /**
+   * Probe for the NVIDIA GPU index among all adapters.
+   * On Optimus laptops (AMD integrated + NVIDIA dedicated), FFmpeg defaults
+   * to GPU 0 (AMD) which has no NVENC. We find the NVIDIA adapter index so
+   * we can pass -gpu <n> to h264_nvenc to target the right card.
+   * Returns 0 if only one GPU or detection fails (safe default).
+   */
+  private async probeNvidiaGpuIndex(): Promise<number> {
+    return new Promise((resolve) => {
+      const proc = spawn(ffmpegPath!.replace('app.asar', 'app.asar.unpacked'), ['-hide_banner', '-init_hw_device', 'cuda=test:0', '-f', 'lavfi', '-i', 'nullsrc', '-frames:v', '1', '-c:v', 'h264_nvenc', '-gpu', '0', '-f', 'null', '-', ]);
+      let stderr = '';
+      proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+      proc.on('close', (code: number) => {
+        if (code === 0) {
+          resolve(0); // GPU 0 is NVIDIA
+          return;
+        }
+        // GPU 0 failed — try GPU 1 (NVIDIA on Optimus)
+        const proc2 = spawn(ffmpegPath!.replace('app.asar', 'app.asar.unpacked'), ['-hide_banner', '-init_hw_device', 'cuda=test:1', '-f', 'lavfi', '-i', 'nullsrc', '-frames:v', '1', '-c:v', 'h264_nvenc', '-gpu', '1', '-f', 'null', '-']);
+        proc2.on('close', (code2: number) => {
+          if (code2 === 0) {
+            console.log('[FFmpegService] Optimus detected: NVIDIA GPU is adapter index 1');
+            resolve(1);
+          } else {
+            console.warn('[FFmpegService] NVENC probe failed on both GPU 0 and GPU 1, defaulting to 0');
+            resolve(0);
+          }
+        });
+        proc2.stderr.resume();
+      });
+    });
   }
 
   /**
@@ -150,6 +187,7 @@ export class FFmpegService {
       this.cancelRender();
     }
 
+    this.isCancelled = false;
     this.isRendering = true;
     const { scenes, metadata } = project;
     
@@ -176,19 +214,60 @@ export class FFmpegService {
         message: 'Preparing scene visual assets and GPU pipeline...',
       });
 
-      // Avoid leading dots or backslashes in temp dir name
-      const tempDir = path.resolve(outputDir, `render_temp_${Date.now()}`).replace(/\\/g, '/');
+      // Check for reusable temp directory with existing rendered segments
+      let tempDir = (settings as any).reuseTempDir && fs.existsSync((settings as any).reuseTempDir)
+        ? (settings as any).reuseTempDir.replace(/\\/g, '/')
+        : '';
+
+      if (!tempDir) {
+        try {
+          const entries = fs.readdirSync(outputDir);
+          for (const e of entries) {
+            if (e.startsWith('render_temp_')) {
+              const cand = path.join(outputDir, e).replace(/\\/g, '/');
+              if (fs.existsSync(path.join(cand, `seg_v3_${scenes.length - 1}.mp4`))) {
+                console.log(`[FFmpegService] Found existing complete render temp folder: ${cand}`);
+                tempDir = cand;
+                break;
+              }
+            }
+          }
+        } catch {}
+      }
+
+      if (!tempDir) {
+        tempDir = path.resolve(outputDir, `render_temp_${Date.now()}`).replace(/\\/g, '/');
+      }
       fs.ensureDirSync(tempDir);
 
       const segmentFiles: string[] = [];
 
+      // Parallel scene rendering — up to RENDER_CONCURRENCY scenes at a time
+      const RENDER_CONCURRENCY = 4;
+
       const processSegments = async () => {
         try {
-          // 1. Render intermediate video segments
+          // Probe which GPU adapter index has NVENC (needed for Optimus dual-GPU laptops)
+          const tryNvencSegs = settings.codec === 'h264_nvenc' || settings.codec === 'hevc_nvenc';
+          const nvencGpuIdx = tryNvencSegs ? await this.probeNvidiaGpuIndex() : 0;
+          if (tryNvencSegs) {
+            console.log(`[FFmpegService] Using NVENC on GPU adapter ${nvencGpuIdx} for segment rendering`);
+          }
+
+          // Pre-allocate segment slot so order is preserved regardless of completion order
           for (let i = 0; i < scenes.length; i++) {
+            segmentFiles.push(path.resolve(tempDir, `seg_v3_${i}.mp4`).replace(/\\/g, '/'));
+          }
+
+          // Helper: render a single scene to its segment file
+          const renderScene = async (i: number): Promise<void> => {
             const scene = scenes[i];
-            const segmentPath = path.resolve(tempDir, `seg_${i}.mp4`).replace(/\\/g, '/');
-            segmentFiles.push(segmentPath);
+            const segmentPath = segmentFiles[i];
+
+            // If segment already exists and has valid size (> 100KB), reuse it
+            if (fs.existsSync(segmentPath) && fs.statSync(segmentPath).size > 100 * 1024) {
+              return;
+            }
 
             const duration = Math.max(0.1, +(scene.durationInSeconds || 1).toFixed(3));
             const numFrames = Math.max(1, Math.round(duration * fps));
@@ -202,110 +281,166 @@ export class FFmpegService {
               const videoFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight},setsar=1,fps=${fps}`;
 
               await new Promise<void>((resSeg, rejSeg) => {
-                ffmpeg()
-                  .input(videoInput)
-                  .inputOptions(['-stream_loop -1', `-t ${duration}`])
-                  .videoFilter(videoFilter)
-                  .outputOptions([
-                    '-y',
-                    '-c:v libx264',
-                    '-pix_fmt yuv420p',
-                    `-t ${duration}`,
-                    `-r ${fps}`,
-                    '-preset ultrafast',
-                    '-an',
-                  ])
-                  .output(segmentPath)
-                  .on('end', () => {
-                    const percent = Math.round(5 + ((i + 1) / scenes.length) * 60);
-                    onProgress({
-                      status: 'rendering',
-                      percent,
-                      message: `Rendered video scene ${i + 1} of ${scenes.length} (${settings.resolution?.toUpperCase() || '4K'})`,
-                    });
-                    resSeg();
-                  })
-                  .on('error', (err) => {
-                    console.error(`Error rendering video segment ${i}:`, err);
-                    rejSeg(err);
-                  })
-                  .run();
+                const tryNvencSeg = (gpuIdx: number, fallback: boolean) => {
+                  const cmd = ffmpeg()
+                    .input(videoInput)
+                    .inputOptions(['-stream_loop -1', `-t ${duration}`])
+                    .videoFilter(videoFilter);
+                  if (!fallback) {
+                    cmd.outputOptions(['-y', '-c:v', 'h264_nvenc', `-gpu`, `${gpuIdx}`, '-preset', 'p4', '-rc:v', 'vbr', '-cq:v', '24', '-pix_fmt', 'yuv420p', `-t`, `${duration}`, `-r`, `${fps}`, '-vsync', 'cfr', '-an']);
+                  } else {
+                    cmd.outputOptions(['-y', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', `-t`, `${duration}`, `-r`, `${fps}`, '-preset', 'ultrafast', '-crf', '0', '-threads', '0', '-vsync', 'cfr', '-an']);
+                  }
+                  cmd.output(segmentPath)
+                    .on('end', () => resSeg())
+                    .on('error', (err) => {
+                      if (!fallback) {
+                        console.warn(`[FFmpegService] NVENC seg ${i} failed, falling back to CPU: ${err.message}`);
+                        tryNvencSeg(gpuIdx, true);
+                      } else {
+                        console.error(`Error rendering video segment ${i}:`, err);
+                        rejSeg(err);
+                      }
+                    })
+                    .run();
+                };
+                tryNvencSeg(nvencGpuIdx, !tryNvencSegs);
               });
-              continue;
+              return;
             }
 
-            const imgInput = await this.prepareSceneImage(
-              scene,
-              tempDir,
-              i,
-              targetWidth,
-              targetHeight
-            );
+            const imgInput = await this.prepareSceneImage(scene, tempDir, i, targetWidth, targetHeight);
 
-            // Scale image to high-resolution canvas then apply smooth Ken Burns motion (skip if duration < 1.5s or static)
-            let complexFilter = '';
+            // Full-resolution smooth Ken Burns motion matching Remotion SceneMotion.tsx
+            // Supersample source canvas to 8000px wide so zoom/pan has clean sub-pixel margin
+            // and to eliminate staircase artifacts during zoompan's bicubic resampling.
+
             let motionToUse = scene.motionType || 'zoom_in';
             if (motionToUse === 'handheld_drift' || motionToUse === 'dolly_zoom') {
               motionToUse = 'zoom_in';
             }
 
-            const effectiveMotion = (duration < 1.5 || motionToUse === 'static')
-              ? 'static'
-              : motionToUse;
+            const effectiveMotion = (duration < 1.5 || motionToUse === 'static') ? 'static' : motionToUse;
 
-            switch (effectiveMotion) {
-              case 'zoom_in':
-                complexFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight},zoompan=z='min(1.0+0.15*(on/${numFrames}),1.18)':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps},setsar=1`;
-                break;
-              case 'zoom_out':
-                complexFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight},zoompan=z='max(1.0,1.18-0.15*(on/${numFrames}))':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps},setsar=1`;
-                break;
-              case 'pan_left':
-                complexFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight},zoompan=z='1.12':x='min(max(0,(iw-iw/zoom)*(1-on/${numFrames})),iw-iw/zoom)':y='(ih-ih/zoom)/2':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps},setsar=1`;
-                break;
-              case 'pan_right':
-                complexFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight},zoompan=z='1.12':x='min(max(0,(iw-iw/zoom)*(on/${numFrames})),iw-iw/zoom)':y='(ih-ih/zoom)/2':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps},setsar=1`;
-                break;
-              case 'pan_up':
-                complexFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight},zoompan=z='1.12':x='(iw-iw/zoom)/2':y='min(max(0,(ih-ih/zoom)*(1-on/${numFrames})),ih-ih/zoom)':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps},setsar=1`;
-                break;
-              case 'pan_down':
-                complexFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight},zoompan=z='1.12':x='(iw-iw/zoom)/2':y='min(max(0,(ih-ih/zoom)*(on/${numFrames})),ih-ih/zoom)':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps},setsar=1`;
-                break;
-              default:
-                complexFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight},setsar=1,fps=${fps}`;
-                break;
+            // Transition fade-in matching Remotion SceneMotion.tsx (default 0.35s)
+            const isShortClip = duration < 2.0;
+            const defaultTransDur = isShortClip ? 0.2 : 0.35;
+            const transDur = Math.min(duration * 0.25, scene.transitionDuration || defaultTransDur);
+            let postFilters = '';
+            if (scene.transitionType !== 'none') {
+              postFilters += `,fade=t=in:st=0:d=${transDur.toFixed(3)}`;
             }
 
+            // Cinematic Vignette Overlay matching Remotion SceneMotion.tsx
+            const vignetteStrength = scene.effects?.vignette !== undefined
+              ? scene.effects.vignette
+              : (scene.vignetteStrength !== undefined ? scene.vignetteStrength : (scene.colorGrading?.vignette || 25) / 100);
+            if (vignetteStrength > 0) {
+              postFilters += `,vignette=PI/4`;
+            }
+
+            // Color grading filters matching Remotion SceneMotion.tsx
+            const c = scene.colorGrading;
+            if (c && (c.brightness || c.contrast || c.saturation)) {
+              const bVal = (c.brightness || 0) / 100;
+              const cVal = 1.0 + (c.contrast || 0) / 100;
+              const sVal = 1.0 + (c.saturation || 0) / 100;
+              postFilters += `,eq=brightness=${bVal.toFixed(2)}:contrast=${cVal.toFixed(2)}:saturation=${sVal.toFixed(2)}`;
+            }
+
+            const isStatic = (duration < 1.5 || motionToUse === 'static');
+            let complexFilter = '';
+
+            if (isStatic) {
+              complexFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight},setsar=1,fps=${fps}${postFilters}`;
+            } else {
+              // 8000px high-resolution coordinate buffer: masks rounding error so 1px step = 0.24 display pixels
+              const zoomStep = (0.20 / numFrames).toFixed(6);
+              const panShiftX = Math.round(targetWidth * 0.026 * 4);
+              const panShiftY = Math.round(targetHeight * 0.037 * 4);
+              const panDeltaX = ((panShiftX * 2) / numFrames).toFixed(5);
+              const panDeltaY = ((panShiftY * 2) / numFrames).toFixed(5);
+
+              switch (effectiveMotion) {
+                case 'zoom_in':
+                  // Center-anchored smooth incremental zoom from 1.0 to 1.20
+                  complexFilter = `scale=8000:-1,setsar=1,zoompan=z='min(zoom+${zoomStep},1.20)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps}${postFilters}`;
+                  break;
+                case 'zoom_out':
+                  // Center-anchored smooth incremental zoom from 1.20 down to 1.0
+                  complexFilter = `scale=8000:-1,setsar=1,zoompan=z='if(lte(zoom,1.0),1.20,max(1.001,zoom-${zoomStep}))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps}${postFilters}`;
+                  break;
+                case 'pan_left':
+                  // Subtle camera drift to left (viewport moves right-to-left)
+                  complexFilter = `scale=8000:-1,setsar=1,zoompan=z='1.14':x='if(eq(on,1),iw/2-(iw/zoom/2)+${panShiftX},x-${panDeltaX})':y='ih/2-(ih/zoom/2)':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps}${postFilters}`;
+                  break;
+                case 'pan_right':
+                  // Subtle camera drift to right (viewport moves left-to-right)
+                  complexFilter = `scale=8000:-1,setsar=1,zoompan=z='1.14':x='if(eq(on,1),iw/2-(iw/zoom/2)-${panShiftX},x+${panDeltaX})':y='ih/2-(ih/zoom/2)':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps}${postFilters}`;
+                  break;
+                case 'pan_up':
+                  // Subtle camera tilt upwards
+                  complexFilter = `scale=8000:-1,setsar=1,zoompan=z='1.14':x='iw/2-(iw/zoom/2)':y='if(eq(on,1),ih/2-(ih/zoom/2)+${panShiftY},y-${panDeltaY})':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps}${postFilters}`;
+                  break;
+                case 'pan_down':
+                  // Subtle camera tilt downwards
+                  complexFilter = `scale=8000:-1,setsar=1,zoompan=z='1.14':x='iw/2-(iw/zoom/2)':y='if(eq(on,1),ih/2-(ih/zoom/2)-${panShiftY},y+${panDeltaY})':d=${numFrames}:s=${targetWidth}x${targetHeight}:fps=${fps}${postFilters}`;
+                  break;
+                default:
+                  complexFilter = `scale=${targetWidth}:${targetHeight}:force_original_aspect_ratio=increase,crop=${targetWidth}:${targetHeight},setsar=1,fps=${fps}${postFilters}`;
+                  break;
+              }
+            }
+
+
             await new Promise<void>((resSeg, rejSeg) => {
-              ffmpeg()
-                .input(imgInput.replace(/\\/g, '/'))
-                .inputOptions(['-loop 1', `-t ${duration}`])
-                .videoFilter(complexFilter)
-                .outputOptions([
-                  '-y',
-                  '-c:v libx264',
-                  '-pix_fmt yuv420p',
-                  `-t ${duration}`,
-                  `-r ${fps}`,
-                  '-preset ultrafast',
-                ])
-                .output(segmentPath)
-                .on('end', () => {
-                  const percent = Math.round(5 + ((i + 1) / scenes.length) * 60);
-                  onProgress({
-                    status: 'rendering',
-                    percent,
-                    message: `Rendered scene ${i + 1} of ${scenes.length} (${settings.resolution?.toUpperCase() || '4K'})`,
-                  });
-                  resSeg();
-                })
-                .on('error', (err) => {
-                  console.error(`Error rendering segment ${i}:`, err);
-                  rejSeg(err);
-                })
-                .run();
+              const tryNvencImgSeg = (gpuIdx: number, fallback: boolean) => {
+                const cmd = ffmpeg().input(imgInput.replace(/\\/g, '/'));
+                cmd.inputOptions(['-loop 1', `-t ${duration}`]);
+                cmd.videoFilter(complexFilter);
+                if (!fallback) {
+                  // -vsync cfr: force constant frame rate — prevents PTS drift when segments
+                  // are concatenated. Without this, floating-point rounding in the filter
+                  // graph can produce segments with N±1 frames, causing cumulative timestamp
+                  // drift that manifests as ghost frames from wrong scenes in the final output.
+                  cmd.outputOptions(['-y', '-c:v', 'h264_nvenc', '-gpu', `${gpuIdx}`, '-preset', 'p4', '-rc:v', 'vbr', '-cq:v', '20', '-pix_fmt', 'yuv420p', `-t`, `${duration}`, `-r`, `${fps}`, '-vsync', 'cfr']);
+                } else {
+                  cmd.outputOptions(['-y', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', `-t`, `${duration}`, `-r`, `${fps}`, '-preset', 'ultrafast', '-crf', '0', '-threads', '0', '-vsync', 'cfr']);
+                }
+                cmd.output(segmentPath)
+                  .on('end', () => resSeg())
+                  .on('error', (err) => {
+                    if (!fallback) {
+                      console.warn(`[FFmpegService] NVENC img seg ${i} failed, falling back to CPU: ${err.message}`);
+                      tryNvencImgSeg(gpuIdx, true);
+                    } else {
+                      console.error(`Error rendering segment ${i}:`, err);
+                      rejSeg(err);
+                    }
+                  })
+                  .run();
+              };
+              tryNvencImgSeg(nvencGpuIdx, !tryNvencSegs);
             });
+          };
+
+          // Run rendering in batches with RENDER_CONCURRENCY
+          let completedCount = 0;
+          for (let i = 0; i < scenes.length; i += RENDER_CONCURRENCY) {
+            const chunkIndices = [];
+            for (let j = i; j < Math.min(i + RENDER_CONCURRENCY, scenes.length); j++) {
+              chunkIndices.push(j);
+            }
+            await Promise.all(chunkIndices.map(async (idx) => {
+              await renderScene(idx);
+              completedCount++;
+              const percent = Math.round(5 + (completedCount / scenes.length) * 60);
+              onProgress({
+                status: 'rendering',
+                percent,
+                message: `Rendered scene ${completedCount} of ${scenes.length} (${settings.resolution?.toUpperCase() || '4K'})`,
+              });
+            }));
           }
 
           // 2. Concat video segments into concat list file with safe forward-slashed paths
@@ -315,150 +450,416 @@ export class FFmpegService {
             .join('\n');
           fs.writeFileSync(concatListPath, concatContent);
 
-          // 3. Assemble final master video with audio mixing
+          // 2.5 Prepare Timeline Overlays and Stickers (Track V2, V3, V4, V5)
+          onProgress({
+            status: 'rendering',
+            percent: 65,
+            message: 'Preparing timeline stickers, graphics, and burned subtitles...',
+          });
+
+          interface PreparedOverlay {
+            clip: OverlayClip;
+            filePath: string;
+            isVideo: boolean;
+            preScaled?: boolean;
+            overlayW: number;
+          }
+          const preparedOverlays: PreparedOverlay[] = [];
+          const rawOverlays = metadata.overlayClips || [];
+          const trackMutes = metadata.trackMutes || {};
+
+          for (const clip of rawOverlays) {
+            const isMuted = 
+              clip.track === 'V5' ? trackMutes.v5 :
+              clip.track === 'V4' ? trackMutes.v4 :
+              clip.track === 'V3' ? trackMutes.v3 :
+              trackMutes.v2;
+            if (isMuted) continue;
+
+            const t = clip.transform || {};
+            const scale = typeof t.scale === 'number' ? t.scale : 1.0;
+            const baseRatio = 0.25;
+            const rawOverlayW = Math.max(80, Math.round(targetWidth * baseRatio * scale));
+            const overlayW = rawOverlayW % 2 === 0 ? rawOverlayW : rawOverlayW + 1;
+
+            let resolvedSourcePath: string | null = null;
+            let isVideo = false;
+
+            if (clip.stickerId) {
+              try {
+                const stickerMedia = await StickerRasterizer.getStickerMedia(clip.stickerId, tempDir);
+                if (fs.existsSync(stickerMedia.filePath)) {
+                  resolvedSourcePath = stickerMedia.filePath;
+                  isVideo = stickerMedia.isVideo;
+                }
+              } catch (stkErr) {
+                console.warn(`[FFmpegService] Failed to rasterize sticker ${clip.stickerId}:`, stkErr);
+              }
+            } else if (clip.filePath) {
+              const fp = clip.filePath;
+              // Handle SVG data URIs and raw SVG paths by rasterizing to PNG
+              if (fp.startsWith('data:image/svg') || fp.startsWith('data:image/') || /\.svg$/i.test(fp)) {
+                try {
+                  const cacheKey = clip.id || (clip.name || 'custom').replace(/\W/g, '_');
+                  const pngPath = await StickerRasterizer.rasterizeSvgOrDataUri(fp, cacheKey, 480, 480);
+                  if (fs.existsSync(pngPath)) {
+                    resolvedSourcePath = pngPath;
+                    isVideo = false;
+                  }
+                } catch (svgErr) {
+                  console.warn(`[FFmpegService] Failed to rasterize SVG overlay ${clip.name}:`, svgErr);
+                }
+              } else {
+                const resolved = this.resolveImagePath(fp);
+                if (resolved && fs.existsSync(resolved)) {
+                  resolvedSourcePath = resolved;
+                  isVideo = clip.mediaType === 'video' || /\.(mp4|webm|mov|mkv|avi|m4v)$/i.test(resolved);
+                }
+              }
+            }
+
+            if (resolvedSourcePath) {
+              let finalOverlayPath = resolvedSourcePath;
+              let isPreScaled = false;
+
+              if (isVideo) {
+                // ─── GHOST-FRAME BLINK FIX ──────────────────────────────────────────────
+                // Root cause: Using `-stream_loop -1` for animated sticker videos in the
+                // final filter graph causes the overlay's framesync to encounter a PTS
+                // discontinuity at each loop point. framesync responds by requesting an
+                // older PTS from the concat demuxer (main video), which seeks back to a
+                // previous segment boundary. That segment's first frame appears as a "blink."
+                //
+                // Fix: Mark the sticker as needing in-filter loop treatment. The actual
+                // loop is applied in the filter_complex using:
+                //   loop=loop=-1:size=9999:start=0,setpts=PTS-STARTPTS
+                //
+                // `loop` handles the infinite repetition internally (no runtime stream_loop).
+                // `setpts=PTS-STARTPTS` resets the sticker PTS so framesync always sees it
+                // starting from 0 — eliminating the backward-seek PTS discontinuity.
+                //
+                // No pre-rendering needed — the loop is handled in-graph with zero overhead.
+                console.log(`[FFmpegService] Video sticker ${clip.stickerId || clip.name} will use in-graph loop filter (blink-free)`);
+
+              } else {
+                // Pre-scale static images on disk once so FFmpeg doesn't burn CPU scaling on every frame!
+                try {
+                  const prescaledPath = path.join(tempDir, `prescaled_ov_${preparedOverlays.length}.png`).replace(/\\/g, '/');
+                  await sharp(resolvedSourcePath).resize(overlayW).png().toFile(prescaledPath);
+                  finalOverlayPath = prescaledPath;
+                  isPreScaled = true;
+                } catch (sharpErr) {
+                  console.warn('[FFmpegService] Sharp prescale failed, will scale in filter graph:', sharpErr);
+                }
+              }
+              preparedOverlays.push({ clip, filePath: finalOverlayPath, isVideo, preScaled: isPreScaled, overlayW });
+            }
+          }
+
+
+          // 2.6 Generate Subtitle ASS file (Burned in captions)
+          let assSubtitlePath: string | null = null;
+          try {
+            assSubtitlePath = await SubtitleAssGenerator.generateAssFile(
+              scenes,
+              metadata,
+              targetWidth,
+              targetHeight,
+              tempDir
+            );
+            if (assSubtitlePath) {
+              console.log(`[FFmpegService] Generated master ASS subtitles: ${assSubtitlePath}`);
+            }
+          } catch (subErr) {
+            console.warn('[FFmpegService] Failed to generate ASS subtitles:', subErr);
+          }
+
+          // 3. Assemble final master video with overlays, subtitles, and audio mixing
           const assembleVideo = (useNvenc: boolean): Promise<string> => {
             return new Promise((resFinal, rejFinal) => {
               const finalCommand = ffmpeg()
                 .input(concatListPath)
-                .inputOptions(['-f concat', '-safe 0']);
+                // -f concat: demux segment list file
+                // -safe 0: allow absolute paths in the list
+                // -vsync cfr: normalize timestamps across all segments to prevent
+                //   cumulative PTS drift from producing ghost frames in the output
+                .inputOptions(['-f concat', '-safe 0', '-vsync', 'cfr']);
 
-              // Multi-Track Audio handling: Voiceover (multiple clips) + Background Music + SFX Clips
+
+              let currentInputIndex = 1; // 0 is concatListPath
+
+              // A. Add Overlay Inputs
+              const overlayInputIndices: number[] = [];
+              for (const ov of preparedOverlays) {
+                if (ov.isVideo) {
+                  // Animated sticker: pre-rendered as a finite looped file to avoid the
+                  // framesync PTS-discontinuity blink bug (see ghost-frame blink fix above).
+                  // No stream_loop needed — the file already has the right duration.
+                  finalCommand.input(ov.filePath);
+                } else {
+                  finalCommand.input(ov.filePath).inputOptions(['-loop 1', `-framerate ${fps}`]);
+                }
+                overlayInputIndices.push(currentInputIndex++);
+              }
+
+
+              // B. Add Multi-Track Audio Inputs
               interface AudioSource {
                 filePath: string;
                 startTime: number;
                 volume: number;
                 category: 'voiceover' | 'music' | 'sfx';
+                inputIndex: number;
               }
-
               const allAudioSources: AudioSource[] = [];
 
-              // 1. Collect all valid audio clips from metadata.audioClips
               const allRawClips = metadata.audioClips || [];
               for (const clip of allRawClips) {
                 const resolved = this.resolveImagePath(clip.filePath);
                 if (resolved && fs.existsSync(resolved)) {
                   const cat = clip.category || (clip.track === 'A1' ? 'voiceover' : clip.track === 'A2' ? 'music' : 'sfx');
+                  finalCommand.input(resolved);
                   allAudioSources.push({
                     filePath: resolved,
                     startTime: Math.max(0, clip.startTime || 0),
                     volume: clip.volume ?? 1.0,
                     category: cat as 'voiceover' | 'music' | 'sfx',
+                    inputIndex: currentInputIndex++,
                   });
                 }
               }
 
-              // 2. Fallback for legacy single audio tracks if not in audioClips
               const hasVoiceInClips = allAudioSources.some((s) => s.category === 'voiceover');
               const resolvedVoicePath = this.resolveImagePath(metadata.audioPath);
               if (!hasVoiceInClips && resolvedVoicePath && fs.existsSync(resolvedVoicePath)) {
+                finalCommand.input(resolvedVoicePath);
                 allAudioSources.push({
                   filePath: resolvedVoicePath,
                   startTime: 0,
                   volume: 1.0,
                   category: 'voiceover',
+                  inputIndex: currentInputIndex++,
                 });
               }
 
               const hasMusicInClips = allAudioSources.some((s) => s.category === 'music');
               const resolvedMusicPath = this.resolveImagePath(metadata.bgMusicPath);
               if (!hasMusicInClips && resolvedMusicPath && fs.existsSync(resolvedMusicPath)) {
+                finalCommand.input(resolvedMusicPath);
                 allAudioSources.push({
                   filePath: resolvedMusicPath,
                   startTime: 0,
                   volume: metadata.bgMusicVolume ?? 0.25,
                   category: 'music',
+                  inputIndex: currentInputIndex++,
                 });
               }
 
-              if (allAudioSources.length > 0) {
-                // Add all audio sources as ffmpeg inputs (input 1, 2, 3...)
-                for (const src of allAudioSources) {
-                  finalCommand.input(src.filePath);
-                }
+              // C. Construct Filter Complex (Video Overlays + Subtitles + Audio Mixing)
+              const filterSteps: string[] = [];
+              let currentVideoLabel = '0:v';
 
-                if (allAudioSources.length === 1 && allAudioSources[0].startTime === 0 && allAudioSources[0].volume === 1.0) {
-                  finalCommand.outputOptions(['-c:a aac', '-b:a 192k', '-shortest']);
-                } else {
-                  // Build complex audio mixing graph with millisecond delay and volume adjustments
-                  const filterSteps: string[] = [];
-                  const voiceLabels: string[] = [];
-                  const musicLabels: string[] = [];
-                  const sfxLabels: string[] = [];
+              // 1. Video Overlays & Stickers
+              if (preparedOverlays.length > 0) {
+                preparedOverlays.forEach((ov, idx) => {
+                  const inIdx = overlayInputIndices[idx];
+                  const scaledLabel = `ov_scaled_${idx}`;
+                  const nextVLabel = `v_ov_${idx}`;
 
-                  allAudioSources.forEach((src, idx) => {
-                    const inputIdx = idx + 1; // input 0 is video
-                    const delayMs = Math.round(src.startTime * 1000);
-                    const label = `a_${inputIdx}`;
+                  const t = ov.clip.transform || {};
+                  const posX = t.x || 0;
+                  const posY = t.y || 0;
+                  const opacity = ov.clip.opacity !== undefined ? Math.max(0, Math.min(1, ov.clip.opacity)) : 1.0;
 
-                    if (delayMs > 0) {
-                      filterSteps.push(`[${inputIdx}:a]volume=${src.volume},adelay=${delayMs}|${delayMs},apad[${label}]`);
-                    } else {
-                      filterSteps.push(`[${inputIdx}:a]volume=${src.volume},apad[${label}]`);
-                    }
+                  const start = Math.max(0, +(ov.clip.startTime || 0).toFixed(3));
+                  const end = Math.max(start + 0.1, +(ov.clip.startTime + ov.clip.duration).toFixed(3));
 
-                    if (src.category === 'voiceover') voiceLabels.push(`[${label}]`);
-                    else if (src.category === 'music') musicLabels.push(`[${label}]`);
-                    else sfxLabels.push(`[${label}]`);
-                  });
+                  // Center percentage positioning: (W-w)/2 + (posX * W / 100)
+                  const xExpr = `(W-w)/2+(${posX}*W/100)`;
+                  const yExpr = `(H-h)/2+(${posY}*H/100)`;
 
-                  const isDucking = metadata.audioDucking !== false && voiceLabels.length > 0 && musicLabels.length > 0;
-
-                  if (isDucking) {
-                    // Combine all voice clips into one stream
-                    if (voiceLabels.length > 1) {
-                      filterSteps.push(`${voiceLabels.join('')}amix=inputs=${voiceLabels.length}:duration=longest:dropout_transition=2[voice_combined]`);
-                    } else {
-                      filterSteps.push(`${voiceLabels[0]}anull[voice_combined]`);
-                    }
-
-                    // Combine all music clips into one stream
-                    if (musicLabels.length > 1) {
-                      filterSteps.push(`${musicLabels.join('')}amix=inputs=${musicLabels.length}:duration=longest:dropout_transition=2[music_combined]`);
-                    } else {
-                      filterSteps.push(`${musicLabels[0]}anull[music_combined]`);
-                    }
-
-                    // Apply sidechain ducking on background music
-                    filterSteps.push(`[voice_combined]asplit=2[sc][voice_out]`);
-                    filterSteps.push(`[music_combined][sc]sidechaincompress=threshold=0.035:ratio=8:attack=180:release=550:knee=2.5[ducked_music]`);
-
-                    // Combine voice + ducked music + SFX
-                    const finalMixInputs = ['[voice_out]', '[ducked_music]', ...sfxLabels];
-                    filterSteps.push(`${finalMixInputs.join('')}amix=inputs=${finalMixInputs.length}:duration=first:dropout_transition=2[aout]`);
+                  if (ov.isVideo) {
+                    // loop=-1: infinite loop within filter graph (no stream_loop PTS issues)
+                    // size=9999: buffer up to 9999 frames in the loop (covers any sticker duration)
+                    // setpts=PTS-STARTPTS: reset sticker PTS so framesync always reads from 0
+                    //   — this is the core of the ghost-frame blink fix
+                    filterSteps.push(`[${inIdx}:v]loop=loop=-1:size=32767:start=0,setpts=PTS-STARTPTS,scale=${ov.overlayW}:-2,format=yuva420p[${scaledLabel}]`);
+                    filterSteps.push(`[${currentVideoLabel}][${scaledLabel}]overlay=x='${xExpr}':y='${yExpr}':enable='between(t,${start},${end})'[${nextVLabel}]`);
+                  } else if (ov.preScaled && opacity >= 0.99) {
+                    // Pre-scaled on disk with 100% opacity: zero per-frame CPU scaling/channel mixing!
+                    filterSteps.push(`[${currentVideoLabel}][${inIdx}:v]overlay=x='${xExpr}':y='${yExpr}':enable='between(t,${start},${end})'[${nextVLabel}]`);
                   } else {
-                    // Simple multi-track mix
-                    const allLabels = allAudioSources.map((_, idx) => `[a_${idx + 1}]`);
-                    filterSteps.push(`${allLabels.join('')}amix=inputs=${allLabels.length}:duration=first:dropout_transition=2[aout]`);
+                    const scalePart = ov.preScaled ? '' : `scale=${ov.overlayW}:-1,`;
+                    filterSteps.push(`[${inIdx}:v]${scalePart}format=rgba,colorchannelmixer=aa=${opacity}[${scaledLabel}]`);
+                    filterSteps.push(`[${currentVideoLabel}][${scaledLabel}]overlay=x='${xExpr}':y='${yExpr}':enable='between(t,${start},${end})'[${nextVLabel}]`);
+                  }
+                  currentVideoLabel = nextVLabel;
+                });
+              }
+
+              // 2. Burn ASS Subtitles on top
+              if (assSubtitlePath) {
+                const escapedAss = assSubtitlePath.replace(/\\/g, '/').replace(/:/g, '\\:');
+                const subbedLabel = 'v_subbed';
+                filterSteps.push(`[${currentVideoLabel}]subtitles='${escapedAss}'[${subbedLabel}]`);
+                currentVideoLabel = subbedLabel;
+              }
+
+              // 3. Multi-track Audio Mixing
+              let hasAudioOutput = false;
+              if (allAudioSources.length > 0) {
+                hasAudioOutput = true;
+                const voiceLabels: string[] = [];
+                const musicLabels: string[] = [];
+                const sfxLabels: string[] = [];
+
+                allAudioSources.forEach((src) => {
+                  const delayMs = Math.round(src.startTime * 1000);
+                  const label = `a_${src.inputIndex}`;
+
+                  if (delayMs > 0) {
+                    filterSteps.push(`[${src.inputIndex}:a]volume=${src.volume},adelay=${delayMs}|${delayMs},apad=whole_dur=${totalDuration.toFixed(3)}[${label}]`);
+                  } else {
+                    filterSteps.push(`[${src.inputIndex}:a]volume=${src.volume},apad=whole_dur=${totalDuration.toFixed(3)}[${label}]`);
                   }
 
-                  console.log('[FFmpegService] Multi-track audio filter graph:', filterSteps.join('; '));
-                  finalCommand.complexFilter(filterSteps);
-                  finalCommand.outputOptions(['-map 0:v', '-map [aout]', '-c:a aac', '-b:a 192k', '-shortest']);
+                  if (src.category === 'voiceover') voiceLabels.push(`[${label}]`);
+                  else if (src.category === 'music') musicLabels.push(`[${label}]`);
+                  else sfxLabels.push(`[${label}]`);
+                });
+
+                const isDucking = metadata.audioDucking !== false && voiceLabels.length > 0 && musicLabels.length > 0;
+
+                if (isDucking) {
+                  if (voiceLabels.length > 1) {
+                    filterSteps.push(`${voiceLabels.join('')}amix=inputs=${voiceLabels.length}:duration=longest:dropout_transition=2[voice_combined]`);
+                  } else {
+                    filterSteps.push(`${voiceLabels[0]}anull[voice_combined]`);
+                  }
+
+                  if (musicLabels.length > 1) {
+                    filterSteps.push(`${musicLabels.join('')}amix=inputs=${musicLabels.length}:duration=longest:dropout_transition=2[music_combined]`);
+                  } else {
+                    filterSteps.push(`${musicLabels[0]}anull[music_combined]`);
+                  }
+
+                  filterSteps.push(`[voice_combined]asplit=2[sc][voice_out]`);
+                  filterSteps.push(`[music_combined][sc]sidechaincompress=threshold=0.035:ratio=8:attack=180:release=550:knee=2.5[ducked_music]`);
+
+                  const finalMixInputs = ['[voice_out]', '[ducked_music]', ...sfxLabels];
+                  filterSteps.push(`${finalMixInputs.join('')}amix=inputs=${finalMixInputs.length}:duration=first:dropout_transition=2[aout]`);
+                } else if (allAudioSources.length > 1 || (allAudioSources.length === 1 && allAudioSources[0].startTime > 0)) {
+                  const allLabels = allAudioSources.map((s) => `[a_${s.inputIndex}]`);
+                  filterSteps.push(`${allLabels.join('')}amix=inputs=${allLabels.length}:duration=first:dropout_transition=2[aout]`);
+                } else {
+                  // Single audio input starting at 0
+                  filterSteps.push(`[a_${allAudioSources[0].inputIndex}]anull[aout]`);
                 }
               }
 
-              const encoder = useNvenc ? 'h264_nvenc' : 'libx264';
+              if (filterSteps.length > 0) {
+                console.log('[FFmpegService] Assembling with complex filter graph:', filterSteps.length, 'filter steps');
+                finalCommand.complexFilter(filterSteps);
+              }
+
+              // D. Stream Mapping Options
+              const outputMaps: string[] = [];
+              if (currentVideoLabel !== '0:v') {
+                outputMaps.push(`-map [${currentVideoLabel}]`);
+              } else {
+                outputMaps.push('-map 0:v');
+              }
+
+              if (hasAudioOutput) {
+                outputMaps.push('-map [aout]', '-c:a aac', '-b:a 192k', '-shortest');
+              }
+
+              finalCommand.outputOptions(outputMaps);
+
+              // NVENC works fine with complex filter graphs — the old restriction
+              // was overly conservative. h264_nvenc accepts software-filtered frames.
+              // We only fall back to libx264 if h264_nvenc truly fails (caught in the
+              // outer try/catch that retries with assembleVideo(false)).
+              const effectiveUseNvenc = useNvenc;
+              const encoder = effectiveUseNvenc ? 'h264_nvenc' : 'libx264';
+
               let bitrateStr = '30M';
               if (settings.bitrate === 'higher') bitrateStr = settings.resolution === '4k' ? '55M' : '22M';
               else if (settings.bitrate === 'lower') bitrateStr = settings.resolution === '4k' ? '18M' : '6M';
               else bitrateStr = settings.resolution === '4k' ? '35M' : '14M';
 
+              // GPU: NVENC with high-throughput p1 preset & low-latency tuning for maximum FPS.
+              // CPU fallback: 'fast' preset for speed/quality balance.
+              const nvencOptions = effectiveUseNvenc
+                ? [
+                    '-preset p1',
+                    '-tune ll',
+                    '-rc:v vbr',
+                    '-cq:v 24',
+                    '-b:v 0',
+                    '-maxrate:v 50M',
+                    '-bufsize:v 50M',
+                    '-gpu', `${nvencGpuIdx}`,
+                  ]
+                : [];
+              const cpuOptions = !effectiveUseNvenc ? ['-preset fast', '-crf 18', '-threads 0'] : [];
+
+              // Capture FFmpeg stderr for diagnostics
+              let ffmpegStderr = '';
+              finalCommand.on('stderr', (line: string) => {
+                ffmpegStderr += line + '\n';
+              });
+
               finalCommand
                 .videoCodec(encoder)
                 .outputOptions([
                   '-y',
+                  '-movflags +faststart',
                   '-pix_fmt yuv420p',
+                  `-r ${fps}`,
+                  '-vsync cfr',
                   `-b:v ${bitrateStr}`,
-                  '-preset fast',
+                  `-t ${totalDuration.toFixed(3)}`,
+                  '-threads 0',
+                  '-filter_threads 8',
+                  ...nvencOptions,
+                  ...cpuOptions,
                 ])
                 .output(settings.outputPath)
                 .on('progress', (prog) => {
-                  const p = Math.min(99, 65 + Math.round((prog.percent || 0) * 0.34));
+                  let processedSec = 0;
+                  const totalDurationSec = totalDuration;
+
+                  if (prog.timemark && totalDurationSec > 0) {
+                    const parts = prog.timemark.split(':');
+                    if (parts.length === 3) {
+                      const h = parseFloat(parts[0]) || 0;
+                      const m = parseFloat(parts[1]) || 0;
+                      const s = parseFloat(parts[2]) || 0;
+                      processedSec = h * 3600 + m * 60 + s;
+                    }
+                  } else if (prog.percent) {
+                    processedSec = ((prog.percent || 0) / 100) * totalDurationSec;
+                  }
+
+                  // Clamp to never exceed true duration
+                  processedSec = Math.min(totalDurationSec, processedSec);
+
+                  const assemblyFraction = totalDurationSec > 0 ? Math.min(1, processedSec / totalDurationSec) : 0;
+                  const p = Math.min(99, 65 + Math.round(assemblyFraction * 34));
+
+                  const curM = Math.floor(processedSec / 60);
+                  const curS = Math.floor(processedSec % 60);
+                  const totM = Math.floor(totalDurationSec / 60);
+                  const totS = Math.floor(totalDurationSec % 60);
+                  const timeStr = `${curM}:${curS.toString().padStart(2, '0')} / ${totM}:${totS.toString().padStart(2, '0')}`;
+                  const fpsStr = prog.currentFps ? ` • ${prog.currentFps} FPS` : '';
+
                   onProgress({
                     status: 'rendering',
                     percent: p,
                     fps: prog.currentFps,
-                    message: `Assembling master ${settings.resolution?.toUpperCase() || '4K'} ${settings.format?.toUpperCase() || 'MP4'} stream (${p}%)...`,
+                    message: `Assembling master video: ${timeStr} (${p}%)${fpsStr}`,
                   });
                 })
                 .on('end', () => {
@@ -474,7 +875,16 @@ export class FFmpegService {
                   resFinal(settings.outputPath);
                 })
                 .on('error', (err) => {
-                  console.error('Assemble error:', err);
+                  if (this.isCancelled) {
+                    this.isRendering = false;
+                    this.currentCommand = null;
+                    fs.remove(tempDir).catch(() => {});
+                    return rejFinal(new Error('Export was cancelled by user.'));
+                  }
+                  console.error('[FFmpegService] Assemble error:', err.message);
+                  if (ffmpegStderr) {
+                    console.error('[FFmpegService] FFmpeg stderr (last 2000 chars):', ffmpegStderr.slice(-2000));
+                  }
                   this.currentCommand = null;
                   rejFinal(err);
                 });
@@ -491,6 +901,12 @@ export class FFmpegService {
             this.isRendering = false;
             resolve(settings.outputPath);
           } catch (firstErr: any) {
+            if (this.isCancelled) {
+              this.isRendering = false;
+              this.currentCommand = null;
+              fs.remove(tempDir).catch(() => {});
+              return reject(new Error('Export was cancelled by user.'));
+            }
             if (tryNvenc) {
               console.warn('[FFmpegService] NVENC GPU acceleration unavailable, retrying with CPU libx264...');
               try {
@@ -498,6 +914,12 @@ export class FFmpegService {
                 this.isRendering = false;
                 resolve(settings.outputPath);
               } catch (cpuErr: any) {
+                if (this.isCancelled) {
+                  this.isRendering = false;
+                  this.currentCommand = null;
+                  fs.remove(tempDir).catch(() => {});
+                  return reject(new Error('Export was cancelled by user.'));
+                }
                 this.isRendering = false;
                 this.currentCommand = null;
                 fs.remove(tempDir).catch(() => {});
@@ -516,11 +938,13 @@ export class FFmpegService {
           this.isRendering = false;
           this.currentCommand = null;
           fs.remove(tempDir).catch(() => {});
-          onProgress({
-            status: 'error',
-            percent: 0,
-            message: err.message || 'Render failed',
-          });
+          if (!this.isCancelled) {
+            onProgress({
+              status: 'error',
+              percent: 0,
+              message: err.message || 'Render failed',
+            });
+          }
           reject(err);
         }
       };
@@ -530,6 +954,7 @@ export class FFmpegService {
   }
 
   public cancelRender() {
+    this.isCancelled = true;
     if (this.currentCommand) {
       try {
         this.currentCommand.kill('SIGKILL');
@@ -693,23 +1118,20 @@ export class FFmpegService {
         let filterChain = '';
 
         if (preset === 'broadcast_studio') {
-          // 8-Stage Award-Winning Documentary Channel Strip (Ken Burns & Modern Video Essay Standard):
-          // 80Hz HPF rumble cut, 120Hz sub-baritone chest resonance (+2.2dB),
-          // 400Hz boxiness & mud scoop (-2.2dB - clears cardboard throat resonance),
-          // 3400Hz consonant articulation & diction clarity (+3.2dB - crisp vocal intelligibility),
-          // 7500Hz surgical de-esser (-1.8dB - silky non-piercing high end),
-          // 10.5kHz condenser sheen & air (+2.2dB - pristine acoustic presence),
-          // Upfront leveling compressor (threshold 0.10, ratio 3.2, attack 10ms, release 120ms, makeup 2.0),
-          // High-impact -12.0 LUFS YouTube commercial broadcast loudness normalization
+          // Industry Documentary Standard Strip (ElevenLabs & Ken Burns Matched Profile):
+          // 50Hz HPF sub-rumble cut, 105Hz chest warmth (+3.2dB), 380Hz cardboard scoop (-2.2dB),
+          // 3.4kHz silky presence (+1.0dB), 7.5kHz de-esser (-2.0dB), 10kHz air (+1.0dB),
+          // 2.2:1 optical leveling compressor, -14.5 LUFS integrated loudness with -1.2 dB True Peak
           filterChain = [
-            'highpass=f=80',
-            'afftdn=nf=-36:tn=1',
-            'equalizer=f=120:width_type=q:width=1.2:g=2.2',
-            'equalizer=f=400:width_type=q:width=1.5:g=-2.2',
-            'equalizer=f=3200:width_type=q:width=1.2:g=2.4',
-            'equalizer=f=7500:width_type=q:width=2.5:g=-2.0',
-            'acompressor=threshold=0.12:ratio=2.6:attack=15:release=140:makeup=1.6',
-            'loudnorm=I=-13.5:TP=-1.0:LRA=6'
+            'highpass=f=50',
+            'equalizer=f=75:width_type=q:width=1.0:g=1.8',
+            'equalizer=f=105:width_type=q:width=1.1:g=3.2',
+            'equalizer=f=380:width_type=q:width=1.5:g=-2.2',
+            'equalizer=f=3400:width_type=q:width=1.2:g=1.0',
+            'equalizer=f=7500:width_type=q:width=2.0:g=-2.0',
+            'equalizer=f=10000:width_type=h:width=2500:g=1.0',
+            'acompressor=threshold=0.12:ratio=2.2:attack=15:release=160:makeup=1.8',
+            'loudnorm=I=-14.5:TP=-1.2:LRA=4.0'
           ].join(',');
         } else if (preset === 'podcast_warmth') {
           // 60Hz cut, 150Hz chest warmth (+2.5dB), 3.5kHz clarity (+2dB), 7.5kHz de-esser (-2.5dB), smooth compression, -14 LUFS
@@ -785,26 +1207,43 @@ export class FFmpegService {
             'acompressor=threshold=0.12:ratio=2.0:attack=25:release=300:makeup=1.1',
             'loudnorm=I=-17:TP=-1.8:LRA=6'
           ].join(',');
-        } else if (preset === 'deep_cinema_warmth') {
-          // 🎬 Marcus Deep Cinema Warmth — Competitor-Grade Cinematic Master Channel Strip:
-          // 1. 50Hz highpass: eliminates sub-audible HVAC & DC rumble while keeping chest body
-          // 2. 110Hz chest warmth (+2.8dB, Q=1.0): Shure SM7B proximity resonance — deep emotional weight
-          // 3. 450Hz boxiness scoop (-2.2dB, Q=1.5): clears telephone/cardboard mid-honk
-          // 4. 3000Hz vocal presence (+3.5dB, Q=1.2): upfront broadcast vocal clarity & intimate proximity
-          // 5. 5500Hz consonant articulation (+1.8dB, Q=1.5): crisp diction without harsh sibilance
-          // 6. 10000Hz air shelf (+2.5dB): studio top-end sheen and clarity
-          // 7. Optical leveling compressor (2.6:1, attack 15ms, release 180ms, makeup 2.8x): rich vocal density
-          // 8. Brickwall broadcast peak limiter (peak ceiling -0.06 dBFS matching competitor broadcast master)
+        } else if (preset === 'deep_night_story') {
+          // 🌌 Deep Night Story & Bedtime Master Channel Strip:
+          // Calibrated to YouTube/Broadcast Studio Standard (-14 LUFS, True Peak -1.0 dBFS):
+          // 1. 55Hz highpass: clean low-end cut eliminating room boom & DC offset
+          // 2. 105Hz chest warmth (+3.2dB, Q=1.0): rich, soothing, resonant bedtime proximity
+          // 3. 420Hz boxiness scoop (-2.2dB, Q=1.5): clears mid-mud for velvety clarity
+          // 4. 2600Hz gentle presence (+1.2dB, Q=1.3): intimate storytelling clarity without piercing highs
+          // 5. 6500Hz lower de-esser (-2.5dB, Q=1.6): softens sibilants for late-night earphone relaxation
+          // 6. 8600Hz upper de-esser (-3.5dB, Q=1.2): eliminates all sibilant sizzle & 'jhaa' rasp
+          // 7. 10500Hz high-shelf softening (-2.0dB, Q=1.5): warm, analog tape-style top-end roll-off
+          // 8. Smooth optical leveling (ratio 1.8:1, attack 25ms, release 250ms, makeup 1.25x): zero noise pumping
+          // 9. Standard Broadcast -14 LUFS loudness normalization (TP = -1.0 dBFS, LRA = 7)
           filterChain = [
-            'highpass=f=50',
-            'equalizer=f=110:width_type=q:width=1.0:g=2.8',
-            'equalizer=f=450:width_type=q:width=1.5:g=-2.2',
-            'equalizer=f=3000:width_type=q:width=1.2:g=3.5',
-            'equalizer=f=5500:width_type=q:width=1.5:g=1.8',
-            'equalizer=f=10000:width_type=h:width=2500:g=2.5',
-            'acompressor=threshold=0.12:ratio=2.6:attack=15:release=180:makeup=2.8',
-            'alimiter=limit=1.0:attack=3:release=35:asc=1',
-            'volume=0.35dB'
+            'highpass=f=55',
+            'equalizer=f=105:width_type=q:width=1.0:g=3.2',
+            'equalizer=f=420:width_type=q:width=1.5:g=-2.2',
+            'equalizer=f=2600:width_type=q:width=1.3:g=1.2',
+            'equalizer=f=6500:width_type=q:width=1.6:g=-2.5',
+            'equalizer=f=8600:width_type=q:width=1.2:g=-3.5',
+            'equalizer=f=10500:width_type=q:width=1.5:g=-2.0',
+            'acompressor=threshold=0.15:ratio=1.8:attack=25:release=250:makeup=1.25',
+            'loudnorm=I=-14:TP=-1.0:LRA=7'
+          ].join(',');
+        } else if (preset === 'deep_cinema_warmth') {
+          // 🎬 Marcus Deep Cinema Warmth — Refined Clean Cinematic Master:
+          // Calibrated with headroom trim and balanced compression to eliminate static hiss pumping:
+          filterChain = [
+            'volume=-1.5dB',
+            'highpass=f=65',
+            'equalizer=f=110:width_type=q:width=1.0:g=2.2',
+            'equalizer=f=450:width_type=q:width=1.5:g=-2.0',
+            'equalizer=f=2800:width_type=q:width=1.2:g=1.8',
+            'equalizer=f=6500:width_type=q:width=1.5:g=-3.0',
+            'equalizer=f=8600:width_type=q:width=1.2:g=-4.0',
+            'equalizer=f=10500:width_type=q:width=1.5:g=-3.5',
+            'acompressor=threshold=0.16:ratio=2.0:attack=25:release=220:makeup=1.15',
+            'loudnorm=I=-15:TP=-1.5:LRA=8'
           ].join(',');
         } else {
           filterChain = 'loudnorm=I=-14:LRA=8:TP=-1.5';

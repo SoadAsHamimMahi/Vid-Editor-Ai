@@ -11,6 +11,7 @@ import { LLMDirectorService } from './services/llmDirectorService';
 import { TTSService } from './services/ttsService';
 import { ColabVideoService, ColabVideoJobRequest } from './services/colabVideoService';
 import { VideoEditorMcpServer } from './services/mcpServer';
+import { GeminiAgenticStudioService } from './services/geminiAgenticStudioService';
 import { Project, ExportSettings } from '../src/types';
 
 const currentFile = fileURLToPath(import.meta.url);
@@ -53,6 +54,11 @@ const automatorPool = new FlowAutomatorPool([9222, 9223]);
 const whisperService = new WhisperService();
 const ffmpegService = new FFmpegService();
 const projectStorage = new ProjectStorage();
+projectStorage.getSettings().then((s) => {
+  if (s && Array.isArray(s.cdpPorts) && s.cdpPorts.length > 0) {
+    automatorPool.setPorts(s.cdpPorts);
+  }
+}).catch(() => {});
 const llmDirectorService = new LLMDirectorService();
 const ttsService = new TTSService();
 const mcpServer = new VideoEditorMcpServer({
@@ -63,6 +69,20 @@ const mcpServer = new VideoEditorMcpServer({
   whisperService,
   getMainWindow: () => mainWindow,
 });
+
+const geminiAgenticStudioService = new GeminiAgenticStudioService(ttsService, whisperService);
+geminiAgenticStudioService.setCallbacks(
+  (progress) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('agentic-studio:progress', progress);
+    }
+  },
+  (log) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('agentic-studio:log', log);
+    }
+  }
+);
 
 automatorPool.setProgressCallback((sceneId, status, mediaPath, error, mediaType, projectId) => {
   // Directly persist ready or error states to the project's project.json on disk
@@ -160,6 +180,27 @@ function createWindow() {
       contextIsolation: true,
       webSecurity: true,
     },
+  });
+
+  mainWindow.webContents.on('console-message', (event: any, ...args: any[]) => {
+    if (typeof event === 'object' && event !== null && event.message !== undefined) {
+      console.log(`[Renderer L${event.level}] ${event.message} (${event.sourceId || ''}:${event.lineNumber || ''})`);
+    } else {
+      const [level, message, line, sourceId] = args;
+      console.log(`[Renderer L${level}] ${message} (${sourceId || ''}:${line || ''})`);
+    }
+  });
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    console.log('[Renderer] ✓ did-finish-load successfully loaded dist/index.html');
+  });
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    console.error(`[Renderer] Failed to load ${validatedURL}: ${errorCode} - ${errorDescription}`);
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error(`[Renderer] Process gone / crashed:`, details);
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -434,6 +475,38 @@ ipcMain.handle('cdp:close-instance', async (_event, port: number) => {
   }
 });
 
+ipcMain.handle('cdp:add-port', async (_event, port: number) => {
+  console.log('[IPC] cdp:add-port called for port:', port);
+  try {
+    const ports = automatorPool.addPort(port);
+    const settings = await projectStorage.getSettings();
+    settings.cdpPorts = ports;
+    await projectStorage.saveSettings(settings);
+    return ports;
+  } catch (err: any) {
+    console.error('[IPC] cdp:add-port ERROR:', err.message);
+    return automatorPool.getPorts();
+  }
+});
+
+ipcMain.handle('cdp:remove-port', async (_event, port: number) => {
+  console.log('[IPC] cdp:remove-port called for port:', port);
+  try {
+    const ports = await automatorPool.removePort(port);
+    const settings = await projectStorage.getSettings();
+    settings.cdpPorts = ports;
+    await projectStorage.saveSettings(settings);
+    return ports;
+  } catch (err: any) {
+    console.error('[IPC] cdp:remove-port ERROR:', err.message);
+    return automatorPool.getPorts();
+  }
+});
+
+ipcMain.handle('cdp:get-ports', async () => {
+  return automatorPool.getPorts();
+});
+
 // LLM Script Director & Splitter (2-Stage Continuity Pipeline)
 ipcMain.handle('llm:parse-script', async (event, script: string, apiKey?: string, model?: 'groq' | 'gemini' | 'openai' | 'local_heuristic', fps?: number, stylePromptModifier?: string) => {
   return await llmDirectorService.processScript(
@@ -621,7 +694,7 @@ ipcMain.handle('audio:segment-text', async (_event, scriptText: string, duration
   return { transcription, scenes };
 });
 
-ipcMain.handle('audio:transcribe-file', async (_event, audioPath: string, apiKey?: string, provider?: 'gemini' | 'openai' | 'groq' | 'local', fps: number = 30) => {
+ipcMain.handle('audio:transcribe-file', async (_event, audioPath: string, apiKey?: string, provider?: 'gemini' | 'openai' | 'groq' | 'local', fps: number = 30, userProvidedScript?: string) => {
   const settings = await projectStorage.getSettings();
   const resolvedProvider: 'gemini' | 'openai' | 'groq' | 'local' = provider || (settings.geminiApiKey ? 'gemini' : (settings.groqApiKey ? 'groq' : 'gemini'));
   let resolvedKey = apiKey;
@@ -629,7 +702,19 @@ ipcMain.handle('audio:transcribe-file', async (_event, audioPath: string, apiKey
     resolvedKey = resolvedProvider === 'gemini' ? settings.geminiApiKey : (settings.groqApiKey || settings.geminiApiKey);
   }
   const duration = await ffmpegService.getAudioDuration(audioPath);
-  return await whisperService.transcribeAudioFile(audioPath, resolvedKey, resolvedProvider, duration, fps);
+  const fallbackGeminiKey = settings.geminiApiKey;
+  return await whisperService.transcribeAudioFile(audioPath, resolvedKey, resolvedProvider, duration, fps, userProvidedScript, fallbackGeminiKey);
+});
+
+ipcMain.handle('audio:transcribe-range', async (_event, audioPath: string, startTime: number, duration: number, apiKey?: string, provider?: 'gemini' | 'openai' | 'groq' | 'local', fps: number = 30) => {
+  const settings = await projectStorage.getSettings();
+  const resolvedProvider: 'gemini' | 'openai' | 'groq' | 'local' = provider || (settings.groqApiKey ? 'groq' : (settings.geminiApiKey ? 'gemini' : 'groq'));
+  let resolvedKey = apiKey;
+  if (!resolvedKey) {
+    resolvedKey = resolvedProvider === 'gemini' ? settings.geminiApiKey : (settings.groqApiKey || settings.geminiApiKey);
+  }
+  const fallbackGeminiKey = settings.geminiApiKey;
+  return await whisperService.transcribeAudioRange(audioPath, startTime, duration, resolvedKey, resolvedProvider, fps, fallbackGeminiKey);
 });
 
 ipcMain.handle('audio:voice-to-scenes', async (_event, audioPath: string, stylePreset: any = 'cinematic', apiKey?: string, provider?: 'gemini' | 'openai' | 'groq' | 'local', fps: number = 30, userProvidedScript?: string, customStyleModifier?: string) => {
@@ -971,8 +1056,12 @@ ipcMain.handle('project:load', async () => {
 });
 
 // AI Voice Studio & Text-to-Speech (IndicF5, Chatterbox, Voice Cloning, Neural)
-ipcMain.handle('tts:generate', async (_event, req: any) => {
-  return await ttsService.generateSpeech(req);
+ipcMain.handle('tts:generate', async (event, req: any) => {
+  return await ttsService.generateSpeech(req, (progress) => {
+    try {
+      event.sender.send('tts:progress', progress);
+    } catch {}
+  });
 });
 
 ipcMain.handle('tts:generate-multi-speaker', async (_event, req: any) => {
@@ -1277,4 +1366,55 @@ ipcMain.handle('colab:generate-video', async (_event, job: ColabVideoJobRequest)
 ipcMain.handle('colab:cancel-job', async (_event, sceneId: string) => {
   return await colabVideoService.cancelJob(sceneId);
 });
+
+// ==========================================
+// AUTONOMOUS MULTI-AGENT GEMINI STUDIO
+// ==========================================
+ipcMain.handle('agentic-studio:start', async (_event, config: any) => {
+  try {
+    const result = await geminiAgenticStudioService.startWorkflow(config);
+    return { success: true, ...result };
+  } catch (err: any) {
+    console.error('[Main] Agentic Studio workflow error:', err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('agentic-studio:pause', async () => {
+  geminiAgenticStudioService.pauseWorkflow();
+  return { success: true };
+});
+
+ipcMain.handle('agentic-studio:resume', async () => {
+  geminiAgenticStudioService.resumeWorkflow();
+  return { success: true };
+});
+
+ipcMain.handle('agentic-studio:cancel', async () => {
+  geminiAgenticStudioService.cancelWorkflow();
+  return { success: true };
+});
+
+ipcMain.handle('agentic-studio:approve-script', async (_event, editedScript?: string) => {
+  geminiAgenticStudioService.approveScript(editedScript);
+  return { success: true };
+});
+
+ipcMain.handle('agentic-studio:get-channels', async () => {
+  return geminiAgenticStudioService.getChannelProfiles();
+});
+
+ipcMain.handle('agentic-studio:save-channels', async (_event, profiles: any[]) => {
+  return geminiAgenticStudioService.saveChannelProfiles(profiles);
+});
+
+ipcMain.handle('agentic-studio:get-key-pool', async () => {
+  return geminiAgenticStudioService.getKeyPool();
+});
+
+ipcMain.handle('agentic-studio:save-key-pool', async (_event, keys: string[]) => {
+  geminiAgenticStudioService.setKeyPool(keys);
+  return { success: true };
+});
+
 

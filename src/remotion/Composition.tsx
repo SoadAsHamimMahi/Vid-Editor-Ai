@@ -28,6 +28,7 @@ export const MainComposition: React.FC<MainCompositionProps> = React.memo(({ pro
   const isV2Muted = !!trackMutes.v2;
   const isV3Muted = !!trackMutes.v3;
   const isV4Muted = !!trackMutes.v4;
+  const isV5Muted = !!trackMutes.v5;
   const isA1Muted = !!trackMutes.a1;
   const isA2Muted = !!trackMutes.a2;
   const isA3Muted = !!trackMutes.a3;
@@ -114,6 +115,7 @@ export const MainComposition: React.FC<MainCompositionProps> = React.memo(({ pro
                 captionStyle={metadata.captionStyle} 
                 autoEmojiEnabled={metadata.autoEmojiEnabled !== false}
                 captionPosition={metadata.captionPosition}
+                captionScale={metadata.captionScale}
               />
             )}
           </Sequence>
@@ -123,8 +125,9 @@ export const MainComposition: React.FC<MainCompositionProps> = React.memo(({ pro
       {/* 4. Multi-Track Video Overlay Layers (V2, V3, V4 B-Roll, PiP, Graphics) */}
       {(metadata.overlayClips || []).map((clip) => {
         const isMuted = 
-          clip.track === 'V3' ? isV3Muted :
+          clip.track === 'V5' ? isV5Muted :
           clip.track === 'V4' ? isV4Muted :
+          clip.track === 'V3' ? isV3Muted :
           isV2Muted;
         if (isMuted) return null;
 
@@ -133,8 +136,8 @@ export const MainComposition: React.FC<MainCompositionProps> = React.memo(({ pro
         const clipUrl = clip.filePath ? normalizeMediaUrl(clip.filePath) : '';
         if (!clip.stickerId && !clipUrl) return null;
 
-        // Layer stacking z-index: V2 = 25, V3 = 30, V4 = 35
-        const trackZIndex = clip.track === 'V4' ? 35 : clip.track === 'V3' ? 30 : 25;
+        // Layer stacking z-index: V2 = 25, V3 = 30, V4 = 35, V5 = 40
+        const trackZIndex = clip.track === 'V5' ? 40 : clip.track === 'V4' ? 35 : clip.track === 'V3' ? 30 : 25;
 
         return (
           <Sequence

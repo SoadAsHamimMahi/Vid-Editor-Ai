@@ -10,6 +10,8 @@ import {
   CheckCircle2, 
   AlertCircle,
   ShieldCheck,
+  ShieldAlert,
+  Copy,
   AlertTriangle,
   RotateCcw,
   ScanLine,
@@ -34,7 +36,8 @@ import {
   Pause,
   Play,
   Square,
-  Zap
+  Zap,
+  Trash2
 } from 'lucide-react';
 import { BrowserInstanceInfo, FlowGenerationMode } from '../../types';
 import { useGenerationETA } from '../../hooks/useGenerationETA';
@@ -43,6 +46,8 @@ export const FlowImageGeneratorPanel: React.FC = () => {
   const { 
     browsers, 
     setBrowsers, 
+    addCdpPort,
+    removeCdpPort,
     project, 
     selectedSceneId,
     updateScene, 
@@ -69,6 +74,8 @@ export const FlowImageGeneratorPanel: React.FC = () => {
     openPromptExport,
     setCustomPromptImportModalOpen,
     setGapCheckerModalOpen,
+    setPolicyFixModalOpen,
+    copyFailedPromptsToClipboard,
     setVoiceToVideoModalOpen,
     setScriptDirectorModalOpen,
   } = useProjectStore();
@@ -216,18 +223,13 @@ export const FlowImageGeneratorPanel: React.FC = () => {
     setBrowsers(updated);
   };
 
-  // Add new browser account
-  const handleAddBrowser = () => {
+  const [customPanelPort, setCustomPanelPort] = useState('');
+
+  // Add new browser account / port
+  const handleAddBrowser = async (port?: number) => {
     const highestPort = browsers.reduce((max, b) => Math.max(max, b.port), 9221);
-    const newPort = highestPort + 1;
-    const newBrowser: BrowserInstanceInfo = {
-      port: newPort,
-      connected: false,
-      activeJobs: 0,
-      enabled: true,
-      name: `Browser ${browsers.length + 1}`,
-    };
-    setBrowsers([...browsers, newBrowser]);
+    const newPort = port || (highestPort + 1);
+    await addCdpPort(newPort);
   };
 
   // Batch dispatch prompts to Google Flow
@@ -771,15 +773,62 @@ export const FlowImageGeneratorPanel: React.FC = () => {
               </button>
             </div>
 
-            {/* Failed Scenes Retry Bar (if any failed) */}
+            {/* Failed Scenes & Policy Fix Action Hub */}
             {failedScenesCount > 0 && (
-              <button
-                onClick={handleRetryFailed}
-                className="w-full py-2 px-3 rounded-xl bg-red-950/70 hover:bg-red-900/80 border border-red-500/50 text-red-200 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer transition-all active:scale-98 shadow-md"
-              >
-                <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
-                <span>⚠️ Retry {failedScenesCount} Failed Scene(s)</span>
-              </button>
+              <div className="p-3 bg-[#17121c] rounded-xl border border-red-500/50 space-y-2.5 shadow-lg animate-fadeIn">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 text-xs font-bold text-red-300">
+                    <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+                    <span>{failedScenesCount} Failed Scene(s) / Policy Block(s)</span>
+                  </div>
+                  <span className="text-[10px] font-mono text-red-400 bg-red-950/80 px-2 py-0.5 rounded-full border border-red-500/30">
+                    Action Needed
+                  </span>
+                </div>
+
+                <p className="text-[10px] text-slate-400 leading-tight">
+                  If blocked by Google safety policies (minors, violence, gore), retrying identical text will fail again. Copy or sanitize prompts to replace them.
+                </p>
+
+                <div className="grid grid-cols-2 gap-1.5 pt-0.5">
+                  {/* 1-Click Copy Failed Prompts */}
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const count = await copyFailedPromptsToClipboard();
+                      setPullFeedback(`📋 Copied ${count} failed prompt(s) with timecodes to clipboard!`);
+                      setTimeout(() => setPullFeedback(null), 4000);
+                    }}
+                    className="py-2 px-2.5 rounded-lg bg-[#221c2b] hover:bg-[#2e263a] border border-purple-500/40 text-purple-200 text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 transition-all"
+                    title="Copy all failed prompts with their timecodes to clipboard"
+                  >
+                    <Copy className="w-3.5 h-3.5 text-purple-400" />
+                    <span>Copy Failed ({failedScenesCount})</span>
+                  </button>
+
+                  {/* Fix Policy Violations Modal */}
+                  <button
+                    type="button"
+                    onClick={() => setPolicyFixModalOpen(true)}
+                    className="py-2 px-2.5 rounded-lg bg-gradient-to-r from-red-600 to-amber-600 hover:from-red-500 hover:to-amber-500 text-white text-[11px] font-bold flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 shadow-md transition-all"
+                    title="Inspect policy triggers, auto-sanitize minor/violence keywords, and replace in timeline"
+                  >
+                    <ShieldAlert className="w-3.5 h-3.5 text-amber-200" />
+                    <span>🛡️ Fix & Replace</span>
+                  </button>
+                </div>
+
+                {/* Direct Retry button */}
+                <button
+                  type="button"
+                  onClick={handleRetryFailed}
+                  className="w-full py-1.5 px-3 rounded-lg bg-[#23151b] hover:bg-red-950/80 border border-red-500/30 text-slate-300 hover:text-white text-[10px] font-semibold flex items-center justify-center gap-1.5 cursor-pointer transition-all active:scale-98"
+                  title="Retry without modifying prompts (if failure was caused by network timeout or temporary disconnect)"
+                >
+                  <RotateCcw className="w-3 h-3 text-red-400" />
+                  <span>Retry Unmodified ({failedScenesCount})</span>
+                </button>
+              </div>
             )}
           </>
         ) : (
@@ -1292,8 +1341,19 @@ export const FlowImageGeneratorPanel: React.FC = () => {
 
             {/* Browser CDP Ports */}
             <div className="space-y-1.5 pt-1 border-t border-[#252536]">
-              <span className="text-[11px] text-slate-400 font-semibold">Connected Chrome Browsers</span>
-              <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-slate-400 font-semibold">Connected Chrome Browsers ({browsers.length})</span>
+                <button
+                  onClick={() => handleAddBrowser()}
+                  className="px-2 py-0.5 rounded-md bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-500/40 text-indigo-300 text-[10px] font-semibold flex items-center gap-1 transition-colors cursor-pointer"
+                  title="Quick add next browser port"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>+ Port :{browsers.reduce((max, b) => Math.max(max, b.port), 9221) + 1}</span>
+                </button>
+              </div>
+
+              <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
                 {browsers.map((browser, idx) => {
                   const isLoginLoading = loadingAction?.port === browser.port && loadingAction.action === 'login';
                   const isConnectLoading = loadingAction?.port === browser.port && loadingAction.action === 'connect';
@@ -1353,10 +1413,54 @@ export const FlowImageGeneratorPanel: React.FC = () => {
                             ✕ Disconnect
                           </button>
                         )}
+                        {browsers.length > 1 && (
+                          <button
+                            onClick={() => removeCdpPort(browser.port)}
+                            className="p-1 rounded text-slate-500 hover:text-red-400 hover:bg-red-950/40 transition-colors cursor-pointer"
+                            title={`Remove Port :${browser.port}`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
                 })}
+              </div>
+
+              {/* Custom Port Input */}
+              <div className="flex items-center gap-1.5 pt-1.5">
+                <input
+                  type="number"
+                  placeholder="Custom port (e.g. 9224)..."
+                  value={customPanelPort}
+                  onChange={(e) => setCustomPanelPort(e.target.value)}
+                  onKeyDown={async (e) => {
+                    if (e.key === 'Enter' && customPanelPort.trim()) {
+                      const p = parseInt(customPanelPort.trim(), 10);
+                      if (p >= 1024 && p <= 65535) {
+                        await handleAddBrowser(p);
+                        setCustomPanelPort('');
+                      }
+                    }
+                  }}
+                  className="flex-1 px-2 py-1 bg-[#1d1d28] border border-[#2c2c3e] rounded-lg text-xs font-mono text-slate-200 placeholder-slate-500 focus:outline-hidden focus:border-indigo-500"
+                  min="1024"
+                  max="65535"
+                />
+                <button
+                  onClick={async () => {
+                    if (!customPanelPort.trim()) return;
+                    const p = parseInt(customPanelPort.trim(), 10);
+                    if (p >= 1024 && p <= 65535) {
+                      await handleAddBrowser(p);
+                      setCustomPanelPort('');
+                    }
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-[#262638] hover:bg-[#32324a] text-slate-200 text-xs font-semibold border border-[#2c2c3e] transition-colors cursor-pointer"
+                >
+                  Add Port
+                </button>
               </div>
             </div>
 

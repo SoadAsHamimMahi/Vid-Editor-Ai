@@ -111,49 +111,48 @@ export function scoreCandidateCard(
     }
   }
 
-  // 3. Significant Semantic Word Overlap
+  // 3. Normalized Stem & Keyword Overlap
   const STOPWORDS = new Set([
-    'scene', 'visual', 'shot', 'macro', 'close', 'wide', 'hardcover', 'resting', 
-    'cinematic', 'photo', 'realism', 'octane', 'render', 'style', 'aesthetic', 
-    '4k', '8k', 'image', 'more', 'vert', 'favorite', 'redo', 'download'
+    'scene', 'visual', 'shot', 'macro', 'cinematic', 'photo', 'realism', 'octane', 
+    'render', 'style', 'aesthetic', '4k', '8k', 'image', 'more', 'vert', 'favorite', 
+    'redo', 'download', 'prompt', 'generation', 'displaying', 'tile', 'user'
   ]);
   const promptLower = (prompt || '').toLowerCase();
-  const words = promptLower
+  const promptWords = promptLower
     .replace(/[^a-z0-9]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w.length > 3 && !STOPWORDS.has(w));
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w));
 
-  if (words.length > 0) {
-    let matchedWords = 0;
-    for (const w of words) {
-      if (textLower.includes(w)) {
-        matchedWords++;
-      }
-    }
-    const overlapRatio = matchedWords / words.length;
-    score += Math.round(overlapRatio * 300);
-    if (matchedWords >= 3) score += 50;
-  }
-
-  // 4. Card-to-Prompt Coverage (for concise titles/labels like Google Flow's Angular tiles)
   const cardWords = textLower
     .replace(/[^a-z0-9]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w.length > 3 && !STOPWORDS.has(w));
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w));
 
-  if (cardWords.length > 0) {
-    let cardMatched = 0;
+  if (cardWords.length > 0 && promptWords.length > 0) {
+    let matchedCardWords = 0;
     for (const cw of cardWords) {
-      if (promptLower.includes(cw)) {
-        cardMatched++;
+      const matched = promptWords.some((pw) => {
+        if (pw === cw) return true;
+        if (cw.length >= 4 && pw.length >= 4) {
+          return pw.startsWith(cw.slice(0, 4)) || cw.startsWith(pw.slice(0, 4)) || pw.includes(cw) || cw.includes(pw);
+        }
+        return false;
+      });
+      if (matched) {
+        matchedCardWords++;
       }
     }
-    const cardCoverage = cardMatched / cardWords.length;
-    if (cardCoverage >= 0.75 && cardMatched >= 3) {
-      score += 350; // High confidence card title match!
-    } else if (cardCoverage >= 0.5 && cardMatched >= 2) {
-      score += 180;
+
+    const cardCoverage = matchedCardWords / cardWords.length;
+    if (matchedCardWords >= 3) {
+      score += 400;
+    } else if (matchedCardWords >= 2) {
+      score += 250;
+    } else if (matchedCardWords === 1 && cardWords.length <= 5) {
+      score += 160;
     }
+
+    score += Math.round(cardCoverage * 150);
   }
 
   return score;
@@ -170,6 +169,7 @@ export class FlowAutomatorPool {
   private consumedUrls: Set<string> = new Set(); // Global set of harvested image/video URLs to prevent duplicate pulls
   private consumedFailedTiles: Set<string> = new Set(); // Track failed policy violation tiles to avoid duplicate alerts
   private maxConcurrentPerBrowser: number = 3; // Default to 3x Studio parallel mode
+  private lastAppliedSettingsMap: Map<string, string> = new Map(); // canvas URL -> serialized settings key
   private onJobProgress?: (
     sceneId: string,
     status: 'generating' | 'ready' | 'error' | 'pending',
@@ -180,7 +180,37 @@ export class FlowAutomatorPool {
   ) => void;
 
   constructor(ports: number[] = [9222, 9223]) {
-    this.ports = ports;
+    this.ports = Array.from(new Set(ports));
+  }
+
+  public getPorts(): number[] {
+    return [...this.ports];
+  }
+
+  public setPorts(ports: number[]): number[] {
+    const valid = Array.from(new Set(ports.filter((p) => Number.isInteger(p) && p >= 1024 && p <= 65535)));
+    this.ports = valid.length > 0 ? valid : [9222, 9223];
+    console.log('[FlowAutomator] CDP ports set to:', this.ports);
+    return this.getPorts();
+  }
+
+  public addPort(port: number): number[] {
+    if (Number.isInteger(port) && port >= 1024 && port <= 65535 && !this.ports.includes(port)) {
+      this.ports.push(port);
+      console.log(`[FlowAutomator] Added CDP port :${port}. Active ports:`, this.ports);
+    }
+    return this.getPorts();
+  }
+
+  public async removePort(port: number): Promise<number[]> {
+    await this.closeInstance(port).catch(() => {});
+    this.ports = this.ports.filter((p) => p !== port);
+    this.browsers.delete(port);
+    this.inFlightMap.delete(port);
+    this.activeWorkers.delete(port);
+    this.rateLimitedPorts.delete(port);
+    console.log(`[FlowAutomator] Removed CDP port :${port}. Active ports:`, this.ports);
+    return this.getPorts();
   }
 
   public setProgressCallback(
@@ -197,7 +227,9 @@ export class FlowAutomatorPool {
   }
 
   public setMaxConcurrency(concurrency: number) {
-    this.maxConcurrentPerBrowser = Math.max(1, Math.min(4, concurrency));
+    const newVal = Math.max(1, Math.min(4, concurrency));
+    if (this.maxConcurrentPerBrowser === newVal) return;
+    this.maxConcurrentPerBrowser = newVal;
     console.log(`[FlowAutomator] Max concurrent generations per browser set to: ${this.maxConcurrentPerBrowser}`);
   }
 
@@ -229,6 +261,9 @@ export class FlowAutomatorPool {
   public stopGeneration(): boolean {
     const dropped = this.queue.length;
     this.queue.length = 0;
+    for (const [_, inFlight] of this.inFlightMap.entries()) {
+      inFlight.length = 0;
+    }
     this.isPaused = false;
     console.log(`[FlowAutomator] ⏹️ Generation STOPPED by user. Dropped ${dropped} queued scene(s).`);
     return true;
@@ -593,8 +628,8 @@ export class FlowAutomatorPool {
     // Start asynchronous monitoring loop
     (async () => {
       let remaining = [...inFlightCards];
-      const maxPollCycles = 180; // up to 7+ minutes
-      const timeoutMs = isVideo ? 360000 : 240000;
+      const timeoutMs = isVideo ? 600000 : Math.max(360000, targetJobs.length * 30000);
+      const maxPollCycles = Math.ceil(timeoutMs / 2500) + 20;
       const startTime = Date.now();
       let agentRepliedCount = 0; // track how many times we auto-replied to agent questions
 
@@ -657,17 +692,16 @@ export class FlowAutomatorPool {
 
               if (replied) {
                 await new Promise((r) => setTimeout(r, 500));
-                // Click submit button
+                // Click submit button or press Enter
+                const replySubmitRes = await this.triggerFlowSubmit(page);
+                if (replySubmitRes.x && replySubmitRes.y) {
+                  await page.mouse.click(replySubmitRes.x, replySubmitRes.y).catch(() => {});
+                }
                 await page.evaluate(() => {
-                  const submitBtn = (
-                    document.querySelector('button[aria-label="Start generation"]') ||
-                    document.querySelector('button[aria-label="Send"]') ||
-                    Array.from(document.querySelectorAll('button')).find(b =>
-                      b.innerText?.includes('arrow_forward') || b.getAttribute('aria-label')?.includes('Send')
-                    )
-                  ) as HTMLElement;
-                  if (submitBtn) submitBtn.click();
-                });
+                  const editor = document.querySelector('.ProseMirror[contenteditable="true"], [contenteditable="true"]') as HTMLElement | null;
+                  if (editor) editor.focus();
+                }).catch(() => {});
+                await page.keyboard.press('Enter').catch(() => {});
                 agentRepliedCount++;
                 console.log(`[FlowAutomator Agent] ✓ Auto-reply sent. (Reply #${agentRepliedCount})`);
                 await new Promise((r) => setTimeout(r, 2000));
@@ -777,27 +811,66 @@ export class FlowAutomatorPool {
         const unconsumed = candidates.filter((c) => options.forceOverwrite || !this.consumedUrls.has(c.src));
         const availablePool = [...unconsumed];
 
-        // Step 1: High-confidence semantic / sceneTag match
+        // Step 1: Deterministic Multi-Tier Match (Tier 0 boundSceneId -> Tier 1 tag/tileId -> Tier 2 semantic with competitive bidding)
         for (const job of filteredJobs) {
           if (details.some((d) => d.sceneId === job.sceneId && d.success)) continue;
 
           const sceneTag = generateSceneTag(job.sceneId, job.prompt, job.projectId);
           const sceneTc = extractNormalizedTimecode(job.prompt || job.sceneId || '');
 
+          // Hard exclusion: Never allow matching candidates stamped for a DIFFERENT scene
+          const jobPool = availablePool.filter((cand) => {
+            if (cand.boundSceneId && cand.boundSceneId !== job.sceneId) return false;
+            if (cand.boundSceneTag && sceneTag && cand.boundSceneTag !== sceneTag) return false;
+            if (cand.tileId && (job as any).tileId && cand.tileId !== (job as any).tileId) return false;
+            return true;
+          });
+
+          if (jobPool.length === 0) continue;
+
           let bestIdx = -1;
           let highestScore = -1;
 
-          for (let i = 0; i < availablePool.length; i++) {
-            const cand = availablePool[i];
-            const score = scoreCandidateCard(cand.cardText, sceneTag, job.prompt, sceneTc);
-            if (score > highestScore && score >= 100) {
-              highestScore = score;
-              bestIdx = i;
+          // Tier 0: Direct Match by stamped boundSceneId (100% Deterministic DOM Binding)
+          bestIdx = jobPool.findIndex((cand) => cand.boundSceneId && cand.boundSceneId === job.sceneId);
+
+          // Tier 1: Match by explicit sceneTag or tileId
+          if (bestIdx === -1) {
+            bestIdx = jobPool.findIndex((cand) => cand.boundSceneTag && cand.boundSceneTag === sceneTag);
+          }
+
+          // Tier 2: Match by cardText semantic / sceneTag score with CROSS-TALK COMPETITIVE BIDDING GUARD
+          if (bestIdx === -1) {
+            for (let i = 0; i < jobPool.length; i++) {
+              const cand = jobPool[i];
+              const score = scoreCandidateCard(cand.cardText, sceneTag, job.prompt, sceneTc);
+              if (score >= 80 && score > highestScore) {
+                // Competitive bidding: Ensure no other unassigned filtered job has a HIGHER score for this candidate
+                let hasBetterCompetitor = false;
+                for (const otherJob of filteredJobs) {
+                  if (otherJob.sceneId === job.sceneId) continue;
+                  if (details.some((d) => d.sceneId === otherJob.sceneId && d.success)) continue;
+                  const otherTag = generateSceneTag(otherJob.sceneId, otherJob.prompt, otherJob.projectId);
+                  const otherTc = extractNormalizedTimecode(otherJob.prompt || otherJob.sceneId || '');
+                  const otherScore = scoreCandidateCard(cand.cardText, otherTag, otherJob.prompt, otherTc);
+                  if (otherScore > score) {
+                    hasBetterCompetitor = true;
+                    break;
+                  }
+                }
+
+                if (!hasBetterCompetitor) {
+                  highestScore = score;
+                  bestIdx = i;
+                }
+              }
             }
           }
 
           if (bestIdx !== -1) {
-            const matchedCand = availablePool.splice(bestIdx, 1)[0];
+            const matchedCand = jobPool[bestIdx];
+            const poolIdx = availablePool.indexOf(matchedCand);
+            if (poolIdx !== -1) availablePool.splice(poolIdx, 1);
             try {
               const saved = await this.saveCandidateToDisk(page, matchedCand.src, job.outputPath);
               if (saved) {
@@ -812,33 +885,20 @@ export class FlowAutomatorPool {
             }
           }
         }
-
-        // Step 2: Strict failure for unmatched scenes (PREVENTS CASCADING OFF-BY-ONE SHIFTS)
-        // If a card was rejected by Google Flow safety filters or dropped, it must NEVER steal another scene's card!
-        const remainingJobs = filteredJobs.filter((j) => !details.some((d) => d.sceneId === j.sceneId && d.success));
-        for (const job of remainingJobs) {
-          console.warn(`[FlowAutomator] Scene ${job.sceneId} has no verified matching card on canvas. Leaving empty/failed.`);
-          this.onJobProgress?.(job.sceneId, 'error', undefined, 'Image not found on canvas or was blocked by Google Flow safety filters.', 'image', job.projectId);
-          details.push({
-            sceneId: job.sceneId,
-            success: false,
-            reason: 'No verified card matching scene tag, timecode, or prompt was found on canvas. Generation may have been blocked by content policy.',
-          });
-        }
       } catch (err: any) {
         console.error(`[FlowAutomator :${port}] Error during pullFromCanvas:`, err.message);
       }
     }
 
-    // Fill in unassigned results
-    for (const job of filteredJobs) {
-      if (!details.some((d) => d.sceneId === job.sceneId)) {
-        details.push({
-          sceneId: job.sceneId,
-          success: false,
-          reason: 'No matching completed card found on Google Flow canvas.',
-        });
-      }
+    // Step 2: Strict failure for unmatched scenes (PREVENTS CASCADING OFF-BY-ONE SHIFTS)
+    const remainingJobs = filteredJobs.filter((j) => !details.some((d) => d.sceneId === j.sceneId && d.success));
+    for (const job of remainingJobs) {
+      console.warn(`[FlowAutomator] Scene ${job.sceneId} has no verified matching card on canvas.`);
+      details.push({
+        sceneId: job.sceneId,
+        success: false,
+        reason: 'No completed card matching this scene was found on the Google Flow canvas.',
+      });
     }
 
     return {
@@ -889,27 +949,66 @@ export class FlowAutomatorPool {
         const unconsumed = candidates.filter((c) => options.forceOverwrite || !this.consumedUrls.has(c.src));
         const availablePool = [...unconsumed];
 
-        // Step 1: High-confidence semantic / sceneTag match
+        // Step 1: Deterministic Multi-Tier Match (Tier 0 boundSceneId -> Tier 1 tag/tileId -> Tier 2 semantic with competitive bidding)
         for (const job of filteredJobs) {
           if (details.some((d) => d.sceneId === job.sceneId && d.success)) continue;
 
           const sceneTag = generateSceneTag(job.sceneId, job.prompt, job.projectId);
           const sceneTc = extractNormalizedTimecode(job.prompt || job.sceneId || '');
 
+          // Hard exclusion: Never allow matching candidates stamped for a DIFFERENT scene
+          const jobPool = availablePool.filter((cand) => {
+            if (cand.boundSceneId && cand.boundSceneId !== job.sceneId) return false;
+            if (cand.boundSceneTag && sceneTag && cand.boundSceneTag !== sceneTag) return false;
+            if (cand.tileId && (job as any).tileId && cand.tileId !== (job as any).tileId) return false;
+            return true;
+          });
+
+          if (jobPool.length === 0) continue;
+
           let bestIdx = -1;
           let highestScore = -1;
 
-          for (let i = 0; i < availablePool.length; i++) {
-            const cand = availablePool[i];
-            const score = scoreCandidateCard(cand.cardText, sceneTag, job.prompt, sceneTc);
-            if (score > highestScore && score >= 100) {
-              highestScore = score;
-              bestIdx = i;
+          // Tier 0: Direct Match by stamped boundSceneId (100% Deterministic DOM Binding)
+          bestIdx = jobPool.findIndex((cand) => cand.boundSceneId && cand.boundSceneId === job.sceneId);
+
+          // Tier 1: Match by explicit sceneTag or tileId
+          if (bestIdx === -1) {
+            bestIdx = jobPool.findIndex((cand) => cand.boundSceneTag && cand.boundSceneTag === sceneTag);
+          }
+
+          // Tier 2: Match by cardText semantic / sceneTag score with CROSS-TALK COMPETITIVE BIDDING GUARD
+          if (bestIdx === -1) {
+            for (let i = 0; i < jobPool.length; i++) {
+              const cand = jobPool[i];
+              const score = scoreCandidateCard(cand.cardText, sceneTag, job.prompt, sceneTc);
+              if (score >= 100 && score > highestScore) {
+                // Competitive bidding: Ensure no other unassigned filtered job has a HIGHER score for this candidate
+                let hasBetterCompetitor = false;
+                for (const otherJob of filteredJobs) {
+                  if (otherJob.sceneId === job.sceneId) continue;
+                  if (details.some((d) => d.sceneId === otherJob.sceneId && d.success)) continue;
+                  const otherTag = generateSceneTag(otherJob.sceneId, otherJob.prompt, otherJob.projectId);
+                  const otherTc = extractNormalizedTimecode(otherJob.prompt || otherJob.sceneId || '');
+                  const otherScore = scoreCandidateCard(cand.cardText, otherTag, otherJob.prompt, otherTc);
+                  if (otherScore > score) {
+                    hasBetterCompetitor = true;
+                    break;
+                  }
+                }
+
+                if (!hasBetterCompetitor) {
+                  highestScore = score;
+                  bestIdx = i;
+                }
+              }
             }
           }
 
           if (bestIdx !== -1) {
-            const matchedCand = availablePool.splice(bestIdx, 1)[0];
+            const matchedCand = jobPool[bestIdx];
+            const poolIdx = availablePool.indexOf(matchedCand);
+            if (poolIdx !== -1) availablePool.splice(poolIdx, 1);
             try {
               const saved = await this.saveVideoCandidateToDisk(page, matchedCand.src, job.outputPath);
               if (saved) {
@@ -1134,16 +1233,23 @@ export class FlowAutomatorPool {
         }
       }
 
-      // Check B: Canvas cards match by Tag, Timecode or Keywords if not found on disk
+      // Check B: Canvas cards match by Tag, boundSceneId, Timecode or Keywords if not found on disk
       if (!matchedImagePath && allCanvasCards.length > 0 && activePage) {
         let bestCard: any = null;
         let highestScore = -1;
 
-        for (const c of allCanvasCards) {
-          const score = scoreCandidateCard(c.cardText, sceneTag, scene.prompt, sceneTc);
-          if (score > highestScore && score >= 100) {
-            highestScore = score;
-            bestCard = c;
+        // Priority 1: Match by boundSceneId or exact sceneTag
+        const exactBound = allCanvasCards.find((c) => c.boundSceneId === scene.id || (c.boundSceneTag && c.boundSceneTag === sceneTag));
+        if (exactBound) {
+          bestCard = exactBound;
+        } else {
+          for (const c of allCanvasCards) {
+            if (c.boundSceneId && c.boundSceneId !== scene.id) continue;
+            const score = scoreCandidateCard(c.cardText, sceneTag, scene.prompt, sceneTc);
+            if (score > highestScore && score >= 100) {
+              highestScore = score;
+              bestCard = c;
+            }
           }
         }
 
@@ -1237,9 +1343,22 @@ export class FlowAutomatorPool {
         let parent = img.parentElement;
         let cardText = '';
         let tileId = '';
+        let boundSceneId = '';
+        let boundSceneTag = '';
         let createdTime: string | null = null;
         let posX: number | null = null;
         let posY: number | null = null;
+
+        const tileContainer = img.closest('flow-grid-tile-container, flow-tile-container, [class*="tile-container"]');
+        if (tileContainer) {
+          const tcAria = tileContainer.getAttribute('aria-label') || '';
+          const tcTitle = tileContainer.getAttribute('title') || '';
+          const tcText = (tileContainer as HTMLElement).innerText || '';
+          cardText += ` ${tcAria} ${tcTitle} ${tcText}`;
+          tileId = tileContainer.getAttribute('data-vg-tile-id') || tileContainer.getAttribute('data-tile-id') || '';
+          boundSceneId = tileContainer.getAttribute('data-vg-scene-id') || '';
+          boundSceneTag = tileContainer.getAttribute('data-vg-scene-tag') || '';
+        }
 
         for (let lvl = 0; lvl < 8 && parent; lvl++) {
           if (
@@ -1255,7 +1374,13 @@ export class FlowAutomatorPool {
             break;
           }
           if (!tileId) {
-            tileId = parent.getAttribute('data-tile-id') || '';
+            tileId = parent.getAttribute('data-vg-tile-id') || parent.getAttribute('data-tile-id') || '';
+          }
+          if (!boundSceneId) {
+            boundSceneId = parent.getAttribute('data-vg-scene-id') || '';
+          }
+          if (!boundSceneTag) {
+            boundSceneTag = parent.getAttribute('data-vg-scene-tag') || '';
           }
           const pText = parent.innerText || '';
           const pAria = parent.getAttribute('aria-label') || '';
@@ -1308,6 +1433,8 @@ export class FlowAutomatorPool {
 
         return {
           tileId,
+          boundSceneId,
+          boundSceneTag,
           src: img.src || img.getAttribute('data-src') || '',
           naturalWidth: img.naturalWidth,
           naturalHeight: img.naturalHeight,
@@ -1429,7 +1556,20 @@ export class FlowAutomatorPool {
         let parent = v.parentElement;
         let cardText = '';
         let tileId = '';
+        let boundSceneId = '';
+        let boundSceneTag = '';
         let createdTime: string | null = null;
+
+        const tileContainer = v.closest('flow-grid-tile-container, flow-tile-container, [class*="tile-container"]');
+        if (tileContainer) {
+          const tcAria = tileContainer.getAttribute('aria-label') || '';
+          const tcTitle = tileContainer.getAttribute('title') || '';
+          const tcText = (tileContainer as HTMLElement).innerText || '';
+          cardText += ` ${tcAria} ${tcTitle} ${tcText}`;
+          tileId = tileContainer.getAttribute('data-vg-tile-id') || tileContainer.getAttribute('data-tile-id') || '';
+          boundSceneId = tileContainer.getAttribute('data-vg-scene-id') || '';
+          boundSceneTag = tileContainer.getAttribute('data-vg-scene-tag') || '';
+        }
 
         for (let lvl = 0; lvl < 8 && parent; lvl++) {
           if (
@@ -1445,7 +1585,13 @@ export class FlowAutomatorPool {
             break;
           }
           if (!tileId) {
-            tileId = parent.getAttribute('data-tile-id') || '';
+            tileId = parent.getAttribute('data-vg-tile-id') || parent.getAttribute('data-tile-id') || '';
+          }
+          if (!boundSceneId) {
+            boundSceneId = parent.getAttribute('data-vg-scene-id') || '';
+          }
+          if (!boundSceneTag) {
+            boundSceneTag = parent.getAttribute('data-vg-scene-tag') || '';
           }
           const pText = parent.innerText || '';
           const pAria = parent.getAttribute('aria-label') || '';
@@ -1478,6 +1624,8 @@ export class FlowAutomatorPool {
         const effectiveSrc = v.src || v.currentSrc || (v.querySelector('source')?.src) || v.getAttribute('data-src') || '';
         return {
           tileId,
+          boundSceneId,
+          boundSceneTag,
           src: effectiveSrc,
           duration: v.duration || 5,
           cardText: cardText.toLowerCase(),
@@ -1659,9 +1807,60 @@ export class FlowAutomatorPool {
   /**
    * Applies duration, model, aspect ratio, and batch count settings in Google Flow.
    */
-  public async applyFlowSettings(page: Page, settings: FlowGenerationSettings): Promise<{ success: boolean; creditCost?: number; error?: string }> {
+  public async applyFlowSettings(
+    page: Page,
+    settings: FlowGenerationSettings,
+    force: boolean = false
+  ): Promise<{ success: boolean; creditCost?: number; error?: string }> {
     try {
-      console.log(`[FlowAutomator] Applying settings: mode=${settings.mode}, ratio=${settings.aspectRatio}, model=${settings.videoModel}, duration=${settings.videoDuration}, batch=${settings.batchCount}`);
+      const pageUrl = page.url();
+      const settingsKey = `${pageUrl}::${settings.mode}::${settings.aspectRatio}::${settings.videoModel || settings.imageModel || ''}::${settings.videoDuration || ''}::${settings.batchCount || ''}`;
+
+      // 0. Cache Check: If settings were already applied to this canvas, skip completely!
+      if (!force && this.lastAppliedSettingsMap.get(pageUrl) === settingsKey) {
+        return { success: true };
+      }
+
+      // Fast in-DOM inspection: If the settings trigger pill already reflects the target settings, skip opening popover!
+      const isAlreadyMatching = await page.evaluate((s) => {
+        const pill = document.querySelector('button[aria-label*="Settings trigger" i]') ||
+          Array.from(document.querySelectorAll('button')).find((b) => {
+            const t = (b.innerText || '').toLowerCase();
+            return t.includes('banana') || t.includes('veo') || t.includes('imagen') || t.includes('omni') || t.includes('crop_');
+          });
+
+        if (!pill) return false;
+        const pillText = ((pill as any).innerText || pill.textContent || '').toLowerCase();
+
+        // Check ratio match (e.g. "16:9" or "crop_16_9")
+        const targetRatio = (s.aspectRatio || '16:9').replace(':', '_');
+        const hasRatio = pillText.includes(targetRatio) || pillText.includes(s.aspectRatio || '16:9');
+
+        // Check model match
+        const modelTarget = (s.videoModel || s.imageModel || '').toLowerCase();
+        let hasModel = true;
+        if (modelTarget) {
+          if (modelTarget.includes('flash') || modelTarget.includes('nano') || modelTarget.includes('banana')) {
+            hasModel = pillText.includes('banana') || pillText.includes('flash') || pillText.includes('nano');
+          } else if (modelTarget.includes('veo')) {
+            hasModel = pillText.includes('veo');
+          } else if (modelTarget.includes('imagen')) {
+            hasModel = pillText.includes('imagen');
+          }
+        }
+
+        // Check batch count match (e.g. "x1", "x2")
+        const hasBatch = s.batchCount ? pillText.includes(s.batchCount.toLowerCase()) : true;
+
+        return hasRatio && hasModel && hasBatch;
+      }, settings).catch(() => false);
+
+      if (isAlreadyMatching && !force) {
+        this.lastAppliedSettingsMap.set(pageUrl, settingsKey);
+        return { success: true };
+      }
+
+      console.log(`[FlowAutomator] Applying settings to canvas: mode=${settings.mode}, ratio=${settings.aspectRatio}, model=${settings.videoModel || settings.imageModel}, duration=${settings.videoDuration}, batch=${settings.batchCount}`);
 
       // 1. Ensure the bottom settings popover is open
       let isPopoverOpen = await page.evaluate(() => {
@@ -1882,6 +2081,7 @@ export class FlowAutomatorPool {
       await page.keyboard.press('Escape').catch(() => {});
       await new Promise((r) => setTimeout(r, 200));
 
+      this.lastAppliedSettingsMap.set(pageUrl, settingsKey);
       return { success: true, creditCost: creditCost || undefined };
     } catch (err: any) {
       console.warn('[FlowAutomator] applyFlowSettings warning:', err.message);
@@ -2057,12 +2257,6 @@ export class FlowAutomatorPool {
         this.browsers.delete(port);
         this.activeWorkers.delete(port);
       });
-
-      // If queue has jobs waiting and this port isn't working, start worker immediately!
-      if (this.queue.length > 0 && !this.activeWorkers.has(port)) {
-        this.isPaused = false;
-        this.startWorkerForPort(port);
-      }
 
       return true;
     } catch (err: any) {
@@ -2331,14 +2525,19 @@ export class FlowAutomatorPool {
 
         // Timeout check for stuck jobs (> 240s for videos, > 150s for images)
         const now = Date.now();
-        const timeoutLimit = inFlight.some((c) => c.job.mediaType === 'video') ? 240000 : 150000;
-        const timedOut = inFlight.filter((c) => now - c.submittedAt > timeoutLimit);
+        const timedOut = inFlight.filter((c) => {
+          const limit = c.job.mediaType === 'video' ? 240000 : 150000;
+          return now - c.submittedAt > limit;
+        });
         if (timedOut.length > 0) {
           for (const dead of timedOut) {
-            console.warn(`[FlowAutomator :${port}] Generation timed out for scene ${dead.job.sceneId}`);
+            console.warn(`[FlowAutomator :${port}] Generation timed out for scene ${dead.job.sceneId} (${dead.job.mediaType || 'image'})`);
             this.onJobProgress?.(dead.job.sceneId, 'error', undefined, 'Google Flow generation timed out.', dead.job.mediaType === 'video' ? 'video' : 'image', dead.job.projectId);
           }
-          const remaining = inFlight.filter((c) => now - c.submittedAt <= timeoutLimit);
+          const remaining = inFlight.filter((c) => {
+            const limit = c.job.mediaType === 'video' ? 240000 : 150000;
+            return now - c.submittedAt <= limit;
+          });
           inFlight.length = 0;
           inFlight.push(...remaining);
           this.inFlightMap.set(port, inFlight);
@@ -2398,16 +2597,17 @@ export class FlowAutomatorPool {
             ? job.prompt
             : `[REF:${sceneTag}] ${job.prompt.trim()}`;
 
-          // Snapshot existing media URLs and canvas tile IDs before submission
+          // Snapshot existing media URLs and mark all existing canvas tile containers as known before submission
           const initialUrls: string[] = await page.evaluate(() => {
             const imgs = Array.from(document.querySelectorAll('img, video')) as (HTMLImageElement | HTMLVideoElement)[];
-            return imgs.map((i) => (i as HTMLImageElement).src || (i as HTMLVideoElement).currentSrc || '');
-          }).catch(() => []);
+            const urls = imgs.map((i) => (i as HTMLImageElement).src || (i as HTMLVideoElement).currentSrc || '');
 
-          const initialTileIds: string[] = await page.evaluate(() => {
-            return Array.from(document.querySelectorAll('[data-tile-id]'))
-              .map((t) => t.getAttribute('data-tile-id') || '')
-              .filter(Boolean);
+            const tiles = Array.from(document.querySelectorAll('flow-grid-tile-container, flow-tile-container, [class*="tile-container"]'));
+            for (const t of tiles) {
+              t.setAttribute('data-vg-known', 'true');
+            }
+
+            return urls;
           }).catch(() => []);
 
           // Wake up canvas and keep camera centered so newly spawned card is visible in real-time
@@ -2439,29 +2639,61 @@ export class FlowAutomatorPool {
             continue;
           }
 
-          // Wait 3.5 seconds for Google Flow to initialize the card on canvas and complete spawn animation
-          await new Promise((r) => setTimeout(r, 3500));
-          await this.wakeAndCenterCanvas(page);
-
-          // Detect newly spawned tile ID on canvas
+          // Detect and stamp newly spawned tile container on canvas
           let tileId: string | undefined = undefined;
           try {
-            tileId = await page.evaluate((knownIds: string[]) => {
-              const knownSet = new Set(knownIds);
-              const tiles = Array.from(document.querySelectorAll('[data-tile-id]'));
-              for (const tile of tiles) {
-                const id = tile.getAttribute('data-tile-id');
-                if (id && !knownSet.has(id)) {
-                  return id;
+            const stampResult = await page.evaluate(async (info: { sceneId: string; sceneTag: string }) => {
+              const findNewTile = () => {
+                const tiles = Array.from(document.querySelectorAll('flow-grid-tile-container, flow-tile-container, [class*="tile-container"]'));
+                const unk = tiles.filter((t) => !t.hasAttribute('data-vg-known'));
+                if (unk.length > 0) {
+                  return unk[unk.length - 1];
+                }
+                return null;
+              };
+
+              let targetTile = findNewTile();
+              if (!targetTile) {
+                for (let i = 0; i < 15; i++) {
+                  await new Promise((r) => setTimeout(r, 300));
+                  targetTile = findNewTile();
+                  if (targetTile) break;
                 }
               }
-              return undefined;
-            }, initialTileIds);
-          } catch {}
 
-          if (tileId) {
-            console.log(`[FlowAutomator :${port}] ✓ Bound canvas tile ID ${tileId} to scene ${job.sceneId}`);
+              if (targetTile) {
+                const generatedTileId = `vg_tile_${info.sceneTag}_${Date.now()}`;
+                targetTile.setAttribute('data-vg-known', 'true');
+                targetTile.setAttribute('data-vg-tile-id', generatedTileId);
+                targetTile.setAttribute('data-vg-scene-id', info.sceneId);
+                targetTile.setAttribute('data-vg-scene-tag', info.sceneTag);
+                targetTile.setAttribute('data-tile-id', generatedTileId);
+
+                const inners = Array.from(targetTile.querySelectorAll('flow-tile-container, flow-image-tile, flow-video-tile, [class*="tile"], div'));
+                for (const inner of inners.slice(0, 6)) {
+                  inner.setAttribute('data-vg-scene-id', info.sceneId);
+                  inner.setAttribute('data-vg-scene-tag', info.sceneTag);
+                  inner.setAttribute('data-vg-tile-id', generatedTileId);
+                  inner.setAttribute('data-tile-id', generatedTileId);
+                }
+
+                return { tileId: generatedTileId, found: true };
+              }
+
+              return { tileId: undefined, found: false };
+            }, { sceneId: job.sceneId, sceneTag });
+
+            if (stampResult && stampResult.tileId) {
+              tileId = stampResult.tileId;
+              console.log(`[FlowAutomator :${port}] ✓ Stamped and bound DOM canvas tile ID ${tileId} to scene ${job.sceneId} [${sceneTag}]`);
+            }
+          } catch (stampErr: any) {
+            console.warn(`[FlowAutomator :${port}] DOM tile stamping attempt:`, stampErr.message);
           }
+
+          // Complete remaining spawn wait (total ~3.5s)
+          await new Promise((r) => setTimeout(r, 1000));
+          await this.wakeAndCenterCanvas(page);
 
           const promptSig = job.prompt.toLowerCase().replace(/[^a-z0-9]/g, ' ').slice(0, 45).trim();
           inFlight.push({
@@ -2492,9 +2724,41 @@ export class FlowAutomatorPool {
             inFlight.length = 0;
             inFlight.push(...remaining);
             this.inFlightMap.set(port, inFlight);
+            console.log(`[FlowAutomator :${port}] ✓ Successfully harvested ${completedScenes.length} tail scene item(s)! Remaining in flight: ${inFlight.length}`);
           }
         } catch (pollErr: any) {
           console.warn(`[FlowAutomator :${port}] Poll harvest warning:`, pollErr.message);
+        }
+      }
+
+      // 4. Tail Timeout Check: Crucial for ending jobs when queue is empty or inFlight < maxConcurrentPerBrowser
+      // Prevents remaining tail generations from freezing in 'Flow Gen' state indefinitely
+      if (inFlight.length > 0) {
+        const now = Date.now();
+        const timedOut = inFlight.filter((c) => {
+          const limit = c.job.mediaType === 'video' ? 240000 : 150000;
+          return now - c.submittedAt > limit;
+        });
+
+        if (timedOut.length > 0) {
+          for (const dead of timedOut) {
+            console.warn(`[FlowAutomator :${port}] Generation timed out for tail scene ${dead.job.sceneId} (${dead.job.mediaType || 'image'})`);
+            this.onJobProgress?.(
+              dead.job.sceneId,
+              'error',
+              undefined,
+              'Google Flow generation timed out.',
+              dead.job.mediaType === 'video' ? 'video' : 'image',
+              dead.job.projectId
+            );
+          }
+          const remaining = inFlight.filter((c) => {
+            const limit = c.job.mediaType === 'video' ? 240000 : 150000;
+            return now - c.submittedAt <= limit;
+          });
+          inFlight.length = 0;
+          inFlight.push(...remaining);
+          this.inFlightMap.set(port, inFlight);
         }
       }
     }
@@ -2524,6 +2788,20 @@ export class FlowAutomatorPool {
           canvas.dispatchEvent(new PointerEvent('pointermove', { clientX: window.innerWidth / 2, clientY: window.innerHeight / 2, bubbles: true }));
         }
       }).catch(() => {});
+
+      // 3. Zoom-to-fit: Google Flow canvas supports Shift+1 to fit all nodes into viewport.
+      // This prevents React virtualization from unmounting off-screen tail cards.
+      // Only fire if the automator/user is not actively typing in an input field.
+      const isInputActive = await page.evaluate(() => {
+        const el = document.activeElement;
+        return !!(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || (el as HTMLElement).isContentEditable));
+      }).catch(() => false);
+
+      if (!isInputActive) {
+        await page.keyboard.down('Shift').catch(() => {});
+        await page.keyboard.press('Digit1').catch(() => {});
+        await page.keyboard.up('Shift').catch(() => {});
+      }
     } catch {}
   }
 
@@ -2544,6 +2822,8 @@ export class FlowAutomatorPool {
       const consumedSet = new Set(consumedFailedList);
       const results: Array<{
         tileId?: string;
+        boundSceneId?: string;
+        boundSceneTag?: string;
         cardText: string;
         reason: string;
         isUsageLimit?: boolean;
@@ -2609,7 +2889,9 @@ export class FlowAutomatorPool {
       for (const el of errorElements) {
         // Enclose strictly within the tile container so cardText NEVER escapes to body / prompt editor!
         const tileContainer = (el.closest('flow-grid-tile-container, flow-tile-container, flow-image-tile, flow-video-tile, [data-tile-id], .react-flow__node') || el) as HTMLElement;
-        let tileId = tileContainer.getAttribute('data-tile-id') || '';
+        let tileId = tileContainer.getAttribute('data-vg-tile-id') || tileContainer.getAttribute('data-tile-id') || '';
+        let boundSceneId = tileContainer.getAttribute('data-vg-scene-id') || '';
+        let boundSceneTag = tileContainer.getAttribute('data-vg-scene-tag') || '';
         let cardText = (tileContainer.innerText || el.innerText || '') + ' ' + (tileContainer.getAttribute('aria-label') || '');
         let createdTime: string | null = null;
 
@@ -2636,6 +2918,8 @@ export class FlowAutomatorPool {
 
         results.push({
           tileId: tileId || coordKey,
+          boundSceneId,
+          boundSceneTag,
           cardText: cardText.toLowerCase(),
           reason: isUnusualActivity
             ? 'Google Flow cooldown: "We noticed some unusual activity". Google requires a brief verification or cooldown period on this account. Please check the browser window or wait a few minutes.'
@@ -2716,10 +3000,11 @@ export class FlowAutomatorPool {
         } else {
           for (const card of inFlightCards) {
             const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
-            const matchedFailed = failedCards.find((f) => {
-              // GUARD: Only trust tileId-based matches — text-only matches are too unreliable
-              // for policy violations since a single false match silently fails a good scene.
+            const matchedFailed = failedCards.find((f: any) => {
+              // Direct binding: If failed card has boundSceneId, match 1-to-1
+              if (f.boundSceneId && f.boundSceneId === card.job.sceneId) return true;
               if (f.tileId && card.tileId && f.tileId === card.tileId) return true;
+              if (f.boundSceneId && f.boundSceneId !== card.job.sceneId) return false;
 
               // For text-based matches, require VERY high confidence:
               // - The failed card text must contain the scene tag (not just generic prompt words)
@@ -2791,16 +3076,25 @@ export class FlowAutomatorPool {
       const initialSet = new Set(card.initialUrls || []);
       let newPool = availablePool.filter((cand) => cand.src && cand.src.length > 5 && !initialSet.has(cand.src));
 
-      // If no new candidates are found outside initialUrls, allow high-confidence semantic matches
-      // (score >= 180 or exact tileId) to match even if captured in initialUrls snapshot
+      // Hard exclusion: Never allow matching candidates stamped for a DIFFERENT scene
+      newPool = newPool.filter((cand) => {
+        if (cand.boundSceneId && cand.boundSceneId !== card.job.sceneId) return false;
+        if (cand.boundSceneTag && card.sceneTag && cand.boundSceneTag !== card.sceneTag) return false;
+        if (cand.tileId && card.tileId && cand.tileId !== card.tileId) return false;
+        return true;
+      });
+
+      // If no new candidates are found outside initialUrls, allow high-confidence exact matches
+      // (exact boundSceneId or exact tileId) to match even if captured in initialUrls snapshot
       if (newPool.length === 0) {
         const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
         const confidentMatch = availablePool.find((cand) => {
+          if (cand.boundSceneId && cand.boundSceneId === card.job.sceneId) return true;
           if (card.tileId && cand.tileId === card.tileId) return true;
           const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
           return score >= 180;
         });
-        if (confidentMatch) {
+        if (confidentMatch && (!confidentMatch.boundSceneId || confidentMatch.boundSceneId === card.job.sceneId)) {
           newPool = [confidentMatch];
         }
       }
@@ -2810,27 +3104,49 @@ export class FlowAutomatorPool {
       let highestScore = -1;
       const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
 
+      // Tier 0: Direct Match by stamped boundSceneId (100% Deterministic DOM Binding)
+      bestIdx = newPool.findIndex((cand) => cand.boundSceneId && cand.boundSceneId === card.job.sceneId);
+
       // Tier 1: Match by explicit tileId if captured
-      if (card.tileId) {
+      if (bestIdx === -1 && card.tileId) {
         bestIdx = newPool.findIndex((cand) => cand.tileId && cand.tileId === card.tileId);
       }
 
-      // Tier 2: Match by cardText semantic / sceneTag score if available
+      // Tier 2: Match by cardText semantic / sceneTag score with CROSS-TALK COMPETITIVE BIDDING GUARD
       if (bestIdx === -1) {
         for (let i = 0; i < newPool.length; i++) {
           const cand = newPool[i];
           const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
-          if (score > highestScore && score >= 100) {
-            highestScore = score;
-            bestIdx = i;
+          if (score >= 100 && score > highestScore) {
+            // Competitive bidding: Ensure no other in-flight card has a HIGHER score for this candidate
+            let hasBetterCompetitor = false;
+            for (const otherCard of inFlightCards) {
+              if (otherCard.job.sceneId === card.job.sceneId) continue;
+              const otherTc = extractNormalizedTimecode(otherCard.job.prompt || otherCard.job.sceneId || '');
+              const otherScore = scoreCandidateCard(cand.cardText, otherCard.sceneTag, otherCard.job.prompt, otherTc);
+              if (otherScore > score) {
+                hasBetterCompetitor = true;
+                break;
+              }
+            }
+
+            if (!hasBetterCompetitor) {
+              highestScore = score;
+              bestIdx = i;
+            }
           }
         }
       }
 
-      // Tier 3: Strict Fallback (1x Solo mode ONLY: requires elapsed >= 30s. STRICTLY DISABLED in Parallel mode!)
-      if (bestIdx === -1 && this.maxConcurrentPerBrowser === 1) {
-        const elapsed = Date.now() - card.submittedAt;
-        if (elapsed >= 30000) {
+      // Tier 3: Strict Fallback (Solo mode ONLY or safety timeout after >= 45s)
+      // In parallel mode with multiple cards in-flight, NEVER blindly map by coordinate
+      // unless only 1 card remains in flight or timeout has elapsed!
+      const canUseTier3 = (this.maxConcurrentPerBrowser === 1 || inFlightCards.length === 1);
+      const elapsed = Date.now() - card.submittedAt;
+      const requiredElapsed = canUseTier3 ? 30000 : 45000;
+
+      if (bestIdx === -1 && (canUseTier3 || elapsed >= requiredElapsed)) {
+        if (elapsed >= requiredElapsed) {
           const sortedNew = [...newPool].sort((a, b) => {
             if (a.createdTime && b.createdTime) {
               return new Date(a.createdTime).getTime() - new Date(b.createdTime).getTime();
@@ -2855,18 +3171,18 @@ export class FlowAutomatorPool {
             bestIdx = semanticCandIdx;
           } else {
             // SAFETY GUARD: Before blindly assigning the oldest card, verify it does NOT
-            // contain a [REF:SCN_...] tag belonging to a DIFFERENT known in-flight card.
-            // Without this check, a failed scene (no card) would steal the NEXT scene's card,
-            // causing a cascade off-by-one shift across all subsequent scenes.
+            // contain a [REF:SCN_...] tag or boundSceneId belonging to a DIFFERENT known in-flight card.
             const otherKnownTags = inFlightCards
               .filter(c => c.job.sceneId !== card.job.sceneId)
               .map(c => c.sceneTag.toLowerCase());
             const candidateText = (sortedNew[0]?.cardText || '').toLowerCase();
             const hasForeignRefTag = otherKnownTags.some(t => candidateText.includes(t) || candidateText.includes(`ref:${t}`));
-            if (!hasForeignRefTag) {
+            const foreignBound = sortedNew[0]?.boundSceneId && sortedNew[0]?.boundSceneId !== card.job.sceneId;
+
+            if (!hasForeignRefTag && !foreignBound) {
               bestIdx = newPool.indexOf(sortedNew[0]);
             } else {
-              console.warn(`[FlowAutomator] Tier3 fallback BLOCKED: oldest card belongs to a different in-flight scene (cascade-shift prevention). Scene ${card.job.sceneId} will remain unmatched this poll cycle.`);
+              console.warn(`[FlowAutomator] Tier3 fallback BLOCKED: oldest video card belongs to a different in-flight scene (cascade-shift prevention). Scene ${card.job.sceneId} will remain unmatched this poll cycle.`);
             }
           }
         }
@@ -2963,8 +3279,21 @@ export class FlowAutomatorPool {
         let parent = img.parentElement;
         let cardText = '';
         let tileId = '';
+        let boundSceneId = '';
+        let boundSceneTag = '';
         let createdTime: string | null = null;
         const siblingUrls: string[] = [];
+
+        const tileContainer = img.closest('flow-grid-tile-container, flow-tile-container, [class*="tile-container"]');
+        if (tileContainer) {
+          const tcAria = tileContainer.getAttribute('aria-label') || '';
+          const tcTitle = tileContainer.getAttribute('title') || '';
+          const tcText = (tileContainer as HTMLElement).innerText || '';
+          cardText += ` ${tcAria} ${tcTitle} ${tcText}`;
+          tileId = tileContainer.getAttribute('data-vg-tile-id') || tileContainer.getAttribute('data-tile-id') || '';
+          boundSceneId = tileContainer.getAttribute('data-vg-scene-id') || '';
+          boundSceneTag = tileContainer.getAttribute('data-vg-scene-tag') || '';
+        }
 
         for (let lvl = 0; lvl < 8 && parent; lvl++) {
           if (
@@ -2977,12 +3306,15 @@ export class FlowAutomatorPool {
           ) {
             break;
           }
-          const tileContainer = img.closest('flow-grid-tile-container, flow-tile-container, [class*="tile-container"]');
-          if (tileContainer) {
-            const tcAria = tileContainer.getAttribute('aria-label') || '';
-            const tcTitle = tileContainer.getAttribute('title') || '';
-            const tcText = (tileContainer as HTMLElement).innerText || '';
-            cardText += ` ${tcAria} ${tcTitle} ${tcText}`;
+
+          if (!tileId) {
+            tileId = parent.getAttribute('data-vg-tile-id') || parent.getAttribute('data-tile-id') || '';
+          }
+          if (!boundSceneId) {
+            boundSceneId = parent.getAttribute('data-vg-scene-id') || '';
+          }
+          if (!boundSceneTag) {
+            boundSceneTag = parent.getAttribute('data-vg-scene-tag') || '';
           }
 
           const pText = parent.innerText || '';
@@ -3033,6 +3365,8 @@ export class FlowAutomatorPool {
         const rect = img.getBoundingClientRect();
         return {
           tileId,
+          boundSceneId,
+          boundSceneTag,
           src: img.src || img.getAttribute('data-src') || '',
           naturalWidth: img.naturalWidth,
           naturalHeight: img.naturalHeight,
@@ -3059,16 +3393,25 @@ export class FlowAutomatorPool {
       const initialSet = new Set(card.initialUrls || []);
       let newPool = availablePool.filter((cand) => cand.src && cand.src.length > 5 && !initialSet.has(cand.src));
 
-      // If no new candidates are found outside initialUrls, allow high-confidence semantic matches
-      // (score >= 180 or exact tileId) to match even if captured in initialUrls snapshot
+      // Hard exclusion: Never allow matching candidates stamped for a DIFFERENT scene
+      newPool = newPool.filter((cand) => {
+        if (cand.boundSceneId && cand.boundSceneId !== card.job.sceneId) return false;
+        if (cand.boundSceneTag && card.sceneTag && cand.boundSceneTag !== card.sceneTag) return false;
+        if (cand.tileId && card.tileId && cand.tileId !== card.tileId) return false;
+        return true;
+      });
+
+      // If no new candidates are found outside initialUrls, allow high-confidence exact matches
+      // (exact boundSceneId or exact tileId) to match even if captured in initialUrls snapshot
       if (newPool.length === 0) {
         const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
         const confidentMatch = availablePool.find((cand) => {
+          if (cand.boundSceneId && cand.boundSceneId === card.job.sceneId) return true;
           if (card.tileId && cand.tileId === card.tileId) return true;
           const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
           return score >= 180;
         });
-        if (confidentMatch) {
+        if (confidentMatch && (!confidentMatch.boundSceneId || confidentMatch.boundSceneId === card.job.sceneId)) {
           newPool = [confidentMatch];
         }
       }
@@ -3078,27 +3421,49 @@ export class FlowAutomatorPool {
       let highestScore = -1;
       const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
 
+      // Tier 0: Direct Match by stamped boundSceneId (100% Deterministic DOM Binding)
+      bestIdx = newPool.findIndex((cand) => cand.boundSceneId && cand.boundSceneId === card.job.sceneId);
+
       // Tier 1: Match by explicit tileId if captured
-      if (card.tileId) {
+      if (bestIdx === -1 && card.tileId) {
         bestIdx = newPool.findIndex((cand) => cand.tileId && cand.tileId === card.tileId);
       }
 
-      // Tier 2: Match by cardText semantic / sceneTag score if available
+      // Tier 2: Match by cardText semantic / sceneTag score with CROSS-TALK COMPETITIVE BIDDING GUARD
       if (bestIdx === -1) {
         for (let i = 0; i < newPool.length; i++) {
           const cand = newPool[i];
           const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
-          if (score > highestScore && score >= 100) {
-            highestScore = score;
-            bestIdx = i;
+          if (score >= 100 && score > highestScore) {
+            // Competitive bidding: Ensure no other in-flight card has a HIGHER score for this candidate
+            let hasBetterCompetitor = false;
+            for (const otherCard of inFlightCards) {
+              if (otherCard.job.sceneId === card.job.sceneId) continue;
+              const otherTc = extractNormalizedTimecode(otherCard.job.prompt || otherCard.job.sceneId || '');
+              const otherScore = scoreCandidateCard(cand.cardText, otherCard.sceneTag, otherCard.job.prompt, otherTc);
+              if (otherScore > score) {
+                hasBetterCompetitor = true;
+                break;
+              }
+            }
+
+            if (!hasBetterCompetitor) {
+              highestScore = score;
+              bestIdx = i;
+            }
           }
         }
       }
 
-      // Tier 3: Strict Fallback (1x Solo mode ONLY: requires elapsed >= 10s. STRICTLY DISABLED in Parallel mode!)
-      if (bestIdx === -1 && this.maxConcurrentPerBrowser === 1) {
-        const elapsed = Date.now() - card.submittedAt;
-        if (elapsed >= 10000) {
+      // Tier 3: Strict Fallback (Solo mode ONLY or safety timeout after >= 40s)
+      // In parallel mode with multiple cards in-flight, NEVER blindly map by coordinate
+      // unless only 1 card remains in flight or timeout has elapsed!
+      const canUseTier3 = (this.maxConcurrentPerBrowser === 1 || inFlightCards.length === 1);
+      const elapsed = Date.now() - card.submittedAt;
+      const requiredElapsed = canUseTier3 ? 10000 : 40000;
+
+      if (bestIdx === -1 && (canUseTier3 || elapsed >= requiredElapsed)) {
+        if (elapsed >= requiredElapsed) {
           const sortedNew = [...newPool].sort((a, b) => {
             if (a.createdTime && b.createdTime) {
               return new Date(a.createdTime).getTime() - new Date(b.createdTime).getTime();
@@ -3124,17 +3489,15 @@ export class FlowAutomatorPool {
             bestIdx = semanticCandIdx;
           } else {
             // SAFETY GUARD: Before blindly assigning the oldest card, verify it does NOT
-            // contain a [REF:SCN_...] tag belonging to a DIFFERENT known in-flight card.
-            // Without this check, a failed scene (no card) would steal the NEXT scene's card,
-            // causing a cascade off-by-one shift across all subsequent scenes.
+            // contain a [REF:SCN_...] tag or boundSceneId belonging to a DIFFERENT known in-flight card.
             const otherKnownTags = inFlightCards
               .filter(c => c.job.sceneId !== card.job.sceneId)
               .map(c => c.sceneTag.toLowerCase());
             const candidateText = (sortedNew[0]?.cardText || '').toLowerCase();
             const hasForeignRefTag = otherKnownTags.some(t => candidateText.includes(t) || candidateText.includes(`ref:${t}`));
-            if (!hasForeignRefTag) {
-              // Solo Mode 1-to-1 guarantee: With only 1 job in flight on this port,
-              // any newly appeared unconsumed card (with no foreign tag) belongs to this job!
+            const foreignBound = sortedNew[0]?.boundSceneId && sortedNew[0]?.boundSceneId !== card.job.sceneId;
+
+            if (!hasForeignRefTag && !foreignBound) {
               bestIdx = newPool.indexOf(sortedNew[0]);
             } else {
               console.warn(`[FlowAutomator] Tier3 fallback BLOCKED: oldest card belongs to a different in-flight scene (cascade-shift prevention). Scene ${card.job.sceneId} will remain unmatched this poll cycle.`);
@@ -3213,6 +3576,184 @@ export class FlowAutomatorPool {
     }
 
     return harvestedSceneIds;
+  }
+
+  /**
+   * Injects prompt into Google Flow's Slate editor with safe human-like timing gaps:
+   * - Deselects any active card nodes so prompt injection is never placed on an existing card
+   * - 400ms focus gap
+   * - Native CDP text input
+   * - Strict prompt text content verification (prevents stale prompt submission)
+   * - Semantic submit button detection (no fragile CSS hashes)
+   * - Verification of input clearance
+   */
+  /**
+   * Robustly locates the prompt submission button in Google Flow's current UI and dispatches
+   * synthetic pointer/mouse events. Returns button coordinates and metadata.
+   */
+  private async triggerFlowSubmit(page: Page): Promise<{ success: boolean; x?: number; y?: number; label?: string; reason?: string }> {
+    return await page.evaluate(() => {
+      // 1. Locate the active prompt editor
+      const allEditors = (Array.from(
+        document.querySelectorAll('.ProseMirror, [data-slate-editor="true"], div[role="textbox"], [contenteditable="true"]')
+      ) as HTMLElement[]).filter((el) => !el.closest('nav, aside, header'));
+
+      const validEditors = allEditors.filter((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 40 && rect.height > 15;
+      });
+
+      const editor = validEditors.sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom)[0];
+      const editorRect = editor ? editor.getBoundingClientRect() : null;
+
+      // Find the card or container wrapping the editor
+      const container = editor
+        ? (editor.closest('form, [class*="dialog"], [class*="modal"], [class*="card"], [class*="panel"], [class*="box"], [role="dialog"]') ||
+           editor.parentElement?.parentElement?.parentElement?.parentElement ||
+           document.body)
+        : document.body;
+
+      // 2. Gather candidate buttons (inside container first, then on entire page)
+      const allButtons = Array.from(document.querySelectorAll('button, div[role="button"], [tabindex="0"]')) as HTMLElement[];
+
+      interface ScoredCandidate {
+        element: HTMLElement;
+        score: number;
+        rect: DOMRect;
+        label: string;
+      }
+
+      const scored: ScoredCandidate[] = [];
+
+      for (const btn of allButtons) {
+        if (btn.closest('nav, aside, header')) continue;
+
+        // CRITICAL: NEVER consider buttons belonging to existing canvas tiles, cards, or nodes!
+        // This prevents clicking 'retry refresh', 'undo', or 'more options' on failed/existing canvas cards.
+        if (btn.closest('flow-grid-tile-container, flow-tile-container, flow-image-tile, flow-video-tile, flow-error-tile, [data-tile-id], .react-flow__node, [role="gridcell"]')) continue;
+
+        const r = btn.getBoundingClientRect();
+        // Visible and on screen
+        if (r.width === 0 || r.height === 0 || r.bottom < 0 || r.top > window.innerHeight) continue;
+        const style = window.getComputedStyle(btn);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+
+        const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+        const title = (btn.getAttribute('title') || '').toLowerCase();
+        const innerText = (btn.innerText || '').trim().toLowerCase();
+        const iconEl = btn.querySelector('i, span, svg, mat-icon');
+        const iconText = (iconEl ? (iconEl.textContent || '') : '').trim().toLowerCase();
+        const combined = `${aria} ${title} ${innerText} ${iconText}`;
+
+        // STRICT EXCLUSIONS:
+        // - Close / dismiss / cancel / clear / retry / refresh buttons
+        if (/close|cancel|dismiss|clear|delete|remove|collapse|refresh|retry|undo|redo|favorite|more_vert|more options/i.test(combined)) continue;
+
+        // - Media picker / style reference / add buttons ('+' button)
+        if (btn.getAttribute('aria-haspopup') === 'dialog' || /add|ingredient|media|upload|attach|reference/i.test(combined)) continue;
+        if (innerText === '+' || iconText === '+' || innerText === 'add' || iconText === 'add') continue;
+
+        // - Agent mode button / chip
+        if (/^(\+)?\s*agent$/i.test(innerText) || /agent mode/i.test(aria) || btn.classList.contains('agent-mode-chip')) continue;
+
+        // - Model picker pill (e.g. 'Nano Banana 2', 'Imagen', 'Veo')
+        if (/nano|banana|imagen|veo|aspect|ratio|x\d|16:9|9:16|1:1/i.test(combined)) continue;
+
+        // - Credit banners ('Add AI credits')
+        if (/credit|reset monthly|top up/i.test(combined)) continue;
+
+        // - Position filter: If we have an editor, submit button MUST be below or vertically level with the editor
+        if (editorRect && r.bottom < editorRect.top) continue;
+
+        let score = 0;
+
+        // Direct semantic submission label
+        if (/generation|generate|submit|send|create|run|start/i.test(aria + ' ' + title)) {
+          score += 1000;
+        }
+
+        // Arrow or send icon in text/icon
+        if (/arrow_forward|send|forward|play_arrow/i.test(iconText + ' ' + innerText)) {
+          score += 600;
+        }
+
+        // SVG presence
+        const hasSvg = Boolean(btn.querySelector('svg'));
+        if (hasSvg) {
+          score += 250;
+        }
+
+        // Circular or compact action button (width and height roughly equal, 24-65px)
+        if (r.width >= 24 && r.width <= 65 && r.height >= 24 && r.height <= 65) {
+          score += 300;
+        }
+
+        // Inside the prompt container
+        if (container.contains(btn)) {
+          score += 350;
+        }
+
+        // Positioned below editor text (toolbar level)
+        if (editorRect && r.top >= editorRect.bottom - 10) {
+          score += 300;
+        }
+
+        // Right-aligned (submit buttons in Flow are always rightmost in toolbar)
+        if (editorRect && r.right >= editorRect.left + editorRect.width * 0.4) {
+          score += Math.round((r.right / window.innerWidth) * 400);
+        }
+
+        // Check if button or inner SVG has arrow classes or path
+        const svgPaths = Array.from(btn.querySelectorAll('path')).map((p) => p.getAttribute('d') || '');
+        if (svgPaths.some((d) => d.length > 10)) {
+          score += 100;
+        }
+
+        scored.push({ element: btn, score, rect: r, label: combined });
+      }
+
+      if (scored.length === 0) {
+        return { success: false, reason: 'No submit button candidates found' };
+      }
+
+      // Sort by score descending
+      scored.sort((a, b) => b.score - a.score);
+      const best = scored[0];
+
+      const isDisabled =
+        best.element.hasAttribute('disabled') ||
+        best.element.getAttribute('aria-disabled') === 'true' ||
+        best.element.classList.contains('disabled');
+
+      if (isDisabled) {
+        return {
+          success: false,
+          reason: 'Best candidate submit button is disabled',
+          x: Math.round(best.rect.x + best.rect.width / 2),
+          y: Math.round(best.rect.y + best.rect.height / 2),
+          label: best.label,
+        };
+      }
+
+      // Dispatch full sequence of synthetic pointer and mouse events
+      const target = best.element;
+      target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      target.focus();
+
+      const opts = { bubbles: true, cancelable: true, view: window };
+      target.dispatchEvent(new PointerEvent('pointerdown', opts));
+      target.dispatchEvent(new MouseEvent('mousedown', opts));
+      target.dispatchEvent(new PointerEvent('pointerup', opts));
+      target.dispatchEvent(new MouseEvent('mouseup', opts));
+      target.click();
+
+      return {
+        success: true,
+        x: Math.round(best.rect.x + best.rect.width / 2),
+        y: Math.round(best.rect.y + best.rect.height / 2),
+        label: best.label,
+      };
+    }).catch((err) => ({ success: false, reason: err.message }));
   }
 
   /**
@@ -3394,83 +3935,41 @@ export class FlowAutomatorPool {
     console.log('[FlowAutomator] Prompt fully entered. Pausing 1 second before submission...');
     await new Promise((r) => setTimeout(r, 1000));
 
-    // 5. Target and click the submit button via direct semantic selectors and keyboard
-    let submitted = false;
+    // 5. Target and click the submit button via multi-layered dispatch:
+    // Layer 1: In-DOM synthetic events (pointerdown, mousedown, pointerup, click) on highest-scoring submit button
+    // Layer 2: Native Puppeteer OS mouse click on button coordinates
+    // Layer 3: Keyboard 'Enter' press into editor
+    // Layer 4: Keyboard 'Ctrl+Enter' into editor
+    let submitRes = await this.triggerFlowSubmit(page);
+    console.log('[FlowAutomator] Submit trigger result:', JSON.stringify(submitRes));
 
-    for (let btnCheck = 0; btnCheck < 15; btnCheck++) {
-      const submitBtn = await page.evaluate(() => {
-        // Direct match for Google Flow's Angular submit button
-        const directBtn = document.querySelector('button[aria-label="Start generation"], button[type="submit"]') as HTMLElement | null;
-        if (directBtn) {
-          const r = directBtn.getBoundingClientRect();
-          const isDisabled = directBtn.hasAttribute('disabled') || directBtn.getAttribute('aria-disabled') === 'true';
-          return {
-            x: Math.round(r.x + r.width / 2),
-            y: Math.round(r.y + r.height / 2),
-            disabled: isDisabled,
-          };
-        }
-
-        const buttons = (Array.from(document.querySelectorAll('button, div[role="button"]')) as HTMLElement[]).filter(
-          (b) => !b.closest('nav, aside, header')
-        );
-        const bottomButtons = buttons.filter((b) => b.getBoundingClientRect().top > window.innerHeight * 0.35);
-
-        const arrowBtn = bottomButtons.find((b) => {
-          const text = (b.innerText || '').trim();
-          const aria = (b.getAttribute('aria-label') || b.getAttribute('title') || '').toLowerCase();
-          const iconEl = b.querySelector('i, span, svg, mat-icon');
-          const iconText = iconEl ? (iconEl.textContent || '').trim() : '';
-          const hasSvg = Boolean(b.querySelector('svg'));
-
-          const isMediaPicker = b.getAttribute('aria-haspopup') === 'dialog' || iconText === 'add_2' || text.startsWith('add_2') || aria.includes('add media') || aria.includes('ingredient');
-          if (isMediaPicker) return false;
-
-          const hasArrowIcon = iconText.includes('arrow_forward') || iconText.includes('send') || text.includes('arrow_forward') || text.includes('Create') || text.includes('send');
-          const isSubmitRole = aria.includes('generation') || aria.includes('generate') || aria.includes('submit') || aria.includes('send') || aria.includes('create') || aria.includes('run');
-          const rect = b.getBoundingClientRect();
-          const isCircularRightBtn = hasSvg && rect.width < 55 && rect.height < 55;
-
-          return hasArrowIcon || isSubmitRole || isCircularRightBtn;
-        });
-
-        if (!arrowBtn) return null;
-        const r = arrowBtn.getBoundingClientRect();
-        const isDisabled = arrowBtn.hasAttribute('disabled') || arrowBtn.getAttribute('aria-disabled') === 'true';
-        return {
-          x: Math.round(r.x + r.width / 2),
-          y: Math.round(r.y + r.height / 2),
-          disabled: isDisabled,
-        };
-      }).catch(() => null);
-
-      if (submitBtn && !submitBtn.disabled) {
-        // Trigger clean DOM .click() first
-        const clickedViaDom = await page.evaluate(() => {
-          const btn = (document.querySelector('button[aria-label="Start generation"], button[type="submit"]') ||
-            Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('arrow_forward'))) as HTMLElement;
-          if (btn && !btn.hasAttribute('disabled') && btn.getAttribute('aria-disabled') !== 'true') {
-            btn.click();
-            return true;
-          }
-          return false;
-        }).catch(() => false);
-
-        // If DOM click was blocked or didn't fire, fallback to precise mouse click at button coordinates
-        if (!clickedViaDom && submitBtn.x > 0 && submitBtn.y > 0) {
-          await page.mouse.click(submitBtn.x, submitBtn.y).catch(() => {});
-        }
-        submitted = true;
-        console.log('[FlowAutomator] ✓ Clicked Create / Submit button cleanly!');
-        break;
-      }
-
-      await new Promise((r) => setTimeout(r, 200));
+    if (!submitRes.success && submitRes.reason?.includes('disabled')) {
+      console.log('[FlowAutomator] Submit button temporarily disabled, waiting 500ms...');
+      await new Promise((r) => setTimeout(r, 500));
+      submitRes = await this.triggerFlowSubmit(page);
     }
 
-    // 6. Verification loop: Confirm that prompt was submitted and cleared from bottom editor
-    for (let attempt = 0; attempt < 8; attempt++) {
-      await new Promise((r) => setTimeout(r, 500));
+    if (submitRes.x && submitRes.y && submitRes.x > 0 && submitRes.y > 0) {
+      await page.mouse.move(submitRes.x, submitRes.y).catch(() => {});
+      await new Promise((r) => setTimeout(r, 50));
+      await page.mouse.click(submitRes.x, submitRes.y).catch(() => {});
+    }
+
+    // Keyboard submit fallback: Focus editor and send Enter & Ctrl+Enter
+    await page.evaluate(() => {
+      const ed = document.querySelector('.ProseMirror, [data-slate-editor="true"], div[role="textbox"], [contenteditable="true"]') as HTMLElement | null;
+      ed?.focus();
+    }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 100));
+    await page.keyboard.press('Enter').catch(() => {});
+    await new Promise((r) => setTimeout(r, 100));
+    await page.keyboard.down('Control').catch(() => {});
+    await page.keyboard.press('Enter').catch(() => {});
+    await page.keyboard.up('Control').catch(() => {});
+
+    // 6. Verification loop: Confirm prompt was submitted and cleared from bottom editor
+    for (let attempt = 0; attempt < 12; attempt++) {
+      await new Promise((r) => setTimeout(r, 400));
       const status = await page.evaluate(() => {
         const allElements = (Array.from(
           document.querySelectorAll('.ProseMirror, [data-slate-editor="true"], div[role="textbox"], [contenteditable="true"]')
@@ -3505,19 +4004,25 @@ export class FlowAutomatorPool {
         return true;
       }
 
-      // Retry clicking midway if still not cleared
-      if (attempt === 2 || attempt === 4) {
+      // Retry submission on attempts 2, 5, 8 if still not cleared
+      if (attempt === 2 || attempt === 5 || attempt === 8) {
+        console.log(`[FlowAutomator] Re-triggering submission (check ${attempt + 1}/12)...`);
+        const retryRes = await this.triggerFlowSubmit(page);
+        if (retryRes.x && retryRes.y) {
+          await page.mouse.click(retryRes.x, retryRes.y).catch(() => {});
+        }
         await page.evaluate(() => {
-          const btn = (document.querySelector('button[aria-label="Start generation"], button[type="submit"]') ||
-            Array.from(document.querySelectorAll('button')).find((b) => (b.innerText || '').includes('arrow_forward'))) as HTMLElement;
-          if (btn && !btn.hasAttribute('disabled') && btn.getAttribute('aria-disabled') !== 'true') {
-            btn.click();
-          }
+          const ed = document.querySelector('.ProseMirror, [data-slate-editor="true"], div[role="textbox"], [contenteditable="true"]') as HTMLElement | null;
+          ed?.focus();
         }).catch(() => {});
+        await page.keyboard.press('Enter').catch(() => {});
+        await page.keyboard.down('Control').catch(() => {});
+        await page.keyboard.press('Enter').catch(() => {});
+        await page.keyboard.up('Control').catch(() => {});
       }
     }
 
-    // If editor has not cleared after 8 checks, consider submission unconfirmed
+    // If editor has not cleared after 12 checks, consider submission unconfirmed
     console.warn('[FlowAutomator] ⚠️ Prompt editor still contains text after submission attempts.');
     return false;
   }

@@ -71,33 +71,73 @@ class MockHarvestEngine {
     for (const card of inFlightCards) {
       if (availablePool.length === 0) break;
       const initialSet = new Set(card.initialUrls || []);
-      const newPool = availablePool.filter(c => c.src && !initialSet.has(c.src));
+      let newPool = availablePool.filter(c => c.src && !initialSet.has(c.src));
+
+      // Hard exclusion: Never allow matching candidates stamped for a DIFFERENT scene
+      newPool = newPool.filter((cand) => {
+        if (cand.boundSceneId && cand.boundSceneId !== card.job.sceneId) return false;
+        if (cand.boundSceneTag && card.sceneTag && cand.boundSceneTag !== card.sceneTag) return false;
+        if (cand.tileId && card.tileId && cand.tileId !== card.tileId) return false;
+        return true;
+      });
+
       if (newPool.length === 0) continue;
+
       let bestIdx = -1; let highestScore = -1;
       const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
-      if (card.tileId) bestIdx = newPool.findIndex(c => c.tileId && c.tileId === card.tileId);
+
+      // Tier 0: Direct Match by stamped boundSceneId
+      bestIdx = newPool.findIndex((cand) => cand.boundSceneId && cand.boundSceneId === card.job.sceneId);
+
+      // Tier 1: Explicit tileId match
+      if (bestIdx === -1 && card.tileId) {
+        bestIdx = newPool.findIndex(c => c.tileId && c.tileId === card.tileId);
+      }
+
+      // Tier 2: Semantic / tag match with Cross-Talk Competitive Bidding Guard
       if (bestIdx === -1) {
         for (let i = 0; i < newPool.length; i++) {
-          const score = scoreCandidateCard(newPool[i].cardText, card.sceneTag, card.job.prompt, sceneTc);
-          if (score > highestScore && score >= 100) { highestScore = score; bestIdx = i; }
+          const cand = newPool[i];
+          const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
+          if (score > highestScore && score >= 100) {
+            let hasBetterCompetitor = false;
+            for (const otherCard of inFlightCards) {
+              if (otherCard.job.sceneId === card.job.sceneId) continue;
+              const otherTc = extractNormalizedTimecode(otherCard.job.prompt || otherCard.job.sceneId || '');
+              const otherScore = scoreCandidateCard(cand.cardText, otherCard.sceneTag, otherCard.job.prompt, otherTc);
+              if (otherScore > score) {
+                hasBetterCompetitor = true;
+                break;
+              }
+            }
+            if (!hasBetterCompetitor) {
+              highestScore = score;
+              bestIdx = i;
+            }
+          }
         }
       }
-      if (bestIdx === -1 && mode === 'solo') {
-        const elapsed = Date.now() - card.submittedAt;
-        if (elapsed >= 10000) {
-          // SAFETY GUARD (matches production fix): do NOT assign a card that carries a
-          // [REF:SCN_...] tag belonging to a DIFFERENT in-flight scene.
+
+      // Tier 3: Strict Fallback (Solo mode ONLY or safety timeout >= 40s)
+      const canUseTier3 = (mode === 'solo' || inFlightCards.length === 1);
+      const elapsed = Date.now() - card.submittedAt;
+      const requiredElapsed = canUseTier3 ? 10000 : 40000;
+
+      if (bestIdx === -1 && (canUseTier3 || elapsed >= requiredElapsed)) {
+        if (elapsed >= requiredElapsed) {
           const otherKnownTags = inFlightCards
             .filter(c => c.job.sceneId !== card.job.sceneId)
             .map(c => c.sceneTag.toLowerCase());
           const firstPoolCard = newPool[0];
           const firstPoolText = (firstPoolCard?.cardText || '').toLowerCase();
           const hasForeignRefTag = otherKnownTags.some(t => firstPoolText.includes(t) || firstPoolText.includes(`ref:${t}`));
-          if (!hasForeignRefTag && firstPoolCard) {
+          const foreignBound = firstPoolCard?.boundSceneId && firstPoolCard?.boundSceneId !== card.job.sceneId;
+          if (!hasForeignRefTag && !foreignBound && firstPoolCard) {
             bestIdx = newPool.indexOf(firstPoolCard);
           }
         }
       }
+
       if (bestIdx === -1) continue;
       const matchedCand = newPool[bestIdx];
       const poolIdx = availablePool.indexOf(matchedCand);
@@ -128,6 +168,8 @@ function makeCanvasCard(sceneTag, prompt, options = {}) {
   const tagInText = options.includeTag !== false;
   return {
     tileId: options.tileId,
+    boundSceneId: options.boundSceneId,
+    boundSceneTag: options.boundSceneTag,
     src: options.src ?? `https://flow.google.com/img_${sceneTag}.png`,
     cardText: tagInText ? `[ref:${sceneTag.toLowerCase()}] ${prompt.toLowerCase().slice(0,80)}` : prompt.toLowerCase().slice(0,80),
     createdTime: options.createdTime ?? new Date().toISOString(),
@@ -137,7 +179,7 @@ function makeCanvasCard(sceneTag, prompt, options = {}) {
   };
 }
 
-console.log(`\n${BOLD}${CYAN}IMAGE GENERATION SAFETY TEST SUITE - 20 Tests${RESET}\n`);
+console.log(`\n${BOLD}${CYAN}IMAGE GENERATION SAFETY TEST SUITE - 23 Tests${RESET}\n`);
 
 // TEST 1
 section('TEST 1: Basic 1-to-1 Tag Matching (Happy Path)');
@@ -507,6 +549,112 @@ section('TEST 20: End-to-End Pipeline Simulation (Submit -> Harvest -> Place)');
   assertEqual(uiState.get('e2e-scene-5').localImagePath, 'https://flow.google.com/e2e_5.png', 'Scene-5: correct image');
   const allSrcSet = new Set([...matched.values()].map(c => c.src));
   assertEqual(allSrcSet.size, 4, 'All 4 successful scenes have UNIQUE images');
+}
+
+// TEST 21: Parallel Generation with Similar Prompts & Vision Captioning (Real Google Flow DOM Behavior: No Tag in cardText)
+section('TEST 21: Parallel Generation with Similar Prompts (Vision Captioning + DOM Stamping)');
+{
+  const engine = new MockHarvestEngine();
+  // Simulate Lamine Yamal soccer scenes: Highly overlapping prompts
+  const scenes = [
+    { id: 'scene-yamal-01', prompt: 'Lamine Yamal with his mother sitting at Rocafonda pitch, impasto oil painting, golden hour' },
+    { id: 'scene-yamal-02', prompt: 'Lamine Yamal holding a soccer ball on pitch smiling, impasto oil painting, golden hour' },
+    { id: 'scene-yamal-03', prompt: 'Lamine Yamal celebrating goal on pitch with crowd cheering, impasto oil painting, golden hour' },
+  ];
+
+  const inFlightCards = scenes.map(s => {
+    const card = makeCard(s.id, s.prompt);
+    card.tileId = `vg_tile_${card.sceneTag}_12345`;
+    return card;
+  });
+
+  // Google Flow DOM cards: AI vision captions ONLY (NO [ref:...] tags!), but DOM stamped with boundSceneId!
+  const canvasCards = [
+    makeCanvasCard(inFlightCards[0].sceneTag, 'Soccer player woman sitting on green field with child', {
+      src: 'https://flow.google.com/yamal_01.png',
+      includeTag: false,
+      boundSceneId: 'scene-yamal-01',
+      tileId: inFlightCards[0].tileId
+    }),
+    makeCanvasCard(inFlightCards[1].sceneTag, 'Young soccer player holding football on stadium grass', {
+      src: 'https://flow.google.com/yamal_02.png',
+      includeTag: false,
+      boundSceneId: 'scene-yamal-02',
+      tileId: inFlightCards[1].tileId
+    }),
+    makeCanvasCard(inFlightCards[2].sceneTag, 'Soccer player celebrating with arms raised and cheering audience', {
+      src: 'https://flow.google.com/yamal_03.png',
+      includeTag: false,
+      boundSceneId: 'scene-yamal-03',
+      tileId: inFlightCards[2].tileId
+    }),
+  ];
+
+  const { matched, unmatched } = engine.matchCards(inFlightCards, canvasCards, 'parallel');
+  assertEqual(matched.size, 3, 'All 3 parallel scenes matched');
+  assertEqual(unmatched.length, 0, 'No unmatched scenes');
+  assertEqual(matched.get('scene-yamal-01')?.src, 'https://flow.google.com/yamal_01.png', 'Scene 1 gets its exact stamped image');
+  assertEqual(matched.get('scene-yamal-02')?.src, 'https://flow.google.com/yamal_02.png', 'Scene 2 gets its exact stamped image');
+  assertEqual(matched.get('scene-yamal-03')?.src, 'https://flow.google.com/yamal_03.png', 'Scene 3 gets its exact stamped image');
+}
+
+// TEST 22: Parallel Out-of-Order Generation (Scene 3 completes while Scene 1 and 2 are still rendering)
+section('TEST 22: Parallel Out-of-Order Completion (Preventing Cross-Talk Stealing)');
+{
+  const engine = new MockHarvestEngine();
+  const scenes = [
+    { id: 'scene-fast-01', prompt: 'Cinematic sunset ocean waves crash' },
+    { id: 'scene-fast-02', prompt: 'Cinematic sunset ocean lighthouse dusk' },
+    { id: 'scene-fast-03', prompt: 'Cinematic sunset ocean sailboat horizon' },
+  ];
+
+  const inFlightCards = scenes.map(s => {
+    const card = makeCard(s.id, s.prompt);
+    card.tileId = `vg_tile_${card.sceneTag}_9999`;
+    return card;
+  });
+
+  // ONLY Scene 3 is ready on canvas!
+  const canvasCards = [
+    makeCanvasCard(inFlightCards[2].sceneTag, 'Sailboat on water at sunset', {
+      src: 'https://flow.google.com/boat_sunset.png',
+      includeTag: false,
+      boundSceneId: 'scene-fast-03',
+      tileId: inFlightCards[2].tileId
+    }),
+  ];
+
+  // Match: Card 1 and Card 2 must NOT steal Scene 3's card!
+  const { matched, unmatched } = engine.matchCards(inFlightCards, canvasCards, 'parallel');
+  assertEqual(matched.size, 1, 'Only 1 scene matched');
+  assertEqual(matched.has('scene-fast-01'), false, 'Scene 1 did NOT steal Scene 3 card');
+  assertEqual(matched.has('scene-fast-02'), false, 'Scene 2 did NOT steal Scene 3 card');
+  assertEqual(matched.get('scene-fast-03')?.src, 'https://flow.google.com/boat_sunset.png', 'Scene 3 matched correctly out-of-order');
+}
+
+// TEST 23: Coordinate Tier 3 Fallback Suppressed in Parallel Mode with Multiple Cards In-Flight
+section('TEST 23: Coordinate Fallback Suppressed in Parallel Mode (No Premature Shuffling)');
+{
+  const engine = new MockHarvestEngine();
+  const scenes = [
+    { id: 'scene-tail-01', prompt: 'Abstract vibrant neon geometric patterns' },
+    { id: 'scene-tail-02', prompt: 'Abstract subtle pastel geometric patterns' },
+  ];
+
+  // 15 seconds elapsed (past 10s solo threshold, but under 40s parallel safety timeout)
+  const inFlightCards = scenes.map(s => makeCard(s.id, s.prompt, { elapsed: 15000 }));
+
+  // Un-stamped card with low overlap
+  const canvasCards = [
+    makeCanvasCard('SCN_UNKNOWN', 'completely unrelated texture artwork', {
+      src: 'https://flow.google.com/unrelated.png',
+      includeTag: false,
+    }),
+  ];
+
+  const { matched, unmatched } = engine.matchCards(inFlightCards, canvasCards, 'parallel');
+  assertEqual(matched.size, 0, 'No cards prematurely matched via Tier 3 coordinate fallback in parallel mode');
+  assertEqual(unmatched.length, 2, 'Both scenes safely remain in-flight waiting for real results');
 }
 
 // Summary

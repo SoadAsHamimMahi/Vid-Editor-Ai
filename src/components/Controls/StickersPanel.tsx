@@ -12,7 +12,8 @@ import {
   ArrowUpRight,
   Target,
   DollarSign,
-  Volume2
+  Volume2,
+  Clock
 } from 'lucide-react';
 
 interface StickerItem {
@@ -216,21 +217,56 @@ const CAPCUT_STICKERS: StickerItem[] = [
 
 export const StickersPanel: React.FC = () => {
   const { 
+    project,
     currentTime, 
     addOverlayClip,
   } = useProjectStore();
 
   const [categoryFilter, setCategoryFilter] = useState<'all' | 'social' | 'audio_waves' | 'pointers' | 'alerts' | 'emojis'>('all');
+  const [targetTrack, setTargetTrack] = useState<'auto' | 'V2' | 'V3' | 'V4' | 'V5'>('auto');
+  const [durationPreset, setDurationPreset] = useState<'5' | '15' | '30' | 'till_end'>('5');
   const [addedToast, setAddedToast] = useState<string | null>(null);
 
+  // Total project duration for "Till End" calculation (handles 48 min videos)
+  const totalDuration = Math.max(
+    30,
+    project.scenes.reduce((acc, s) => acc + s.durationInSeconds, 0),
+    project.metadata.audioDuration || 0
+  );
+
   const handleAddStickerToTimeline = (sticker: StickerItem) => {
+    // Determine effective duration
+    const dur = durationPreset === 'till_end'
+      ? Math.max(1, totalDuration - currentTime)
+      : parseFloat(durationPreset);
+
+    // Auto-detect track if set to 'auto' so consecutive stickers never collide
+    let trackToUse: 'V2' | 'V3' | 'V4' | 'V5' = 'V2';
+    if (targetTrack !== 'auto') {
+      trackToUse = targetTrack;
+    } else {
+      const existing = project.metadata.overlayClips || [];
+      const isOccupied = (t: string) => existing.some((c) =>
+        c.track === t && (
+          (currentTime >= c.startTime && currentTime < c.startTime + c.duration) ||
+          (currentTime + dur > c.startTime && currentTime + dur <= c.startTime + c.duration) ||
+          (currentTime <= c.startTime && currentTime + dur >= c.startTime + c.duration)
+        )
+      );
+
+      if (!isOccupied('V2')) trackToUse = 'V2';
+      else if (!isOccupied('V3')) trackToUse = 'V3';
+      else if (!isOccupied('V4')) trackToUse = 'V4';
+      else trackToUse = 'V5';
+    }
+
     addOverlayClip({
       name: sticker.name,
       filePath: sticker.svgDataUri || '',
       mediaType: 'image',
-      track: 'V2',
+      track: trackToUse,
       startTime: currentTime,
-      duration: 5.0,
+      duration: dur,
       opacity: 1.0,
       volume: 0,
       stickerId: sticker.stickerId,
@@ -240,7 +276,9 @@ export const StickersPanel: React.FC = () => {
         scale: sticker.defaultScale ?? 0.85,
       }
     });
-    setAddedToast(`✓ Added "${sticker.name}" to Track V2!`);
+
+    const durLabel = durationPreset === 'till_end' ? 'Till Video End' : `${dur}s`;
+    setAddedToast(`✓ Added "${sticker.name}" to ${trackToUse} (${durLabel})!`);
     setTimeout(() => setAddedToast(null), 3500);
   };
 
@@ -324,6 +362,62 @@ export const StickersPanel: React.FC = () => {
             {cat === 'audio_waves' ? '🌊 Voice Waves' : cat}
           </button>
         ))}
+      </div>
+
+      {/* Target Track & Duration Quick Bar */}
+      <div className="px-3 py-2 border-b border-[#242131] bg-[#13121b] space-y-1.5">
+        {/* Track Selection */}
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] text-slate-400 font-medium flex items-center gap-1">
+            <Layers className="w-3 h-3 text-cyan-400" />
+            <span>Target Track:</span>
+          </span>
+          <div className="flex items-center gap-1">
+            {(['auto', 'V2', 'V3', 'V4', 'V5'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTargetTrack(t)}
+                className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold transition-all cursor-pointer ${
+                  targetTrack === t
+                    ? 'bg-cyan-500 text-black shadow-xs'
+                    : 'bg-[#1f1d2b] hover:bg-[#282638] text-slate-400 hover:text-slate-200'
+                }`}
+                title={t === 'auto' ? '⚡ Auto: selects next available free track to avoid overlapping' : `Add directly to ${t}`}
+              >
+                {t === 'auto' ? '⚡ Auto' : t}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Duration Selection */}
+        <div className="flex items-center justify-between">
+          <span className="text-[10px] text-slate-400 font-medium flex items-center gap-1">
+            <Clock className="w-3 h-3 text-purple-400" />
+            <span>Duration:</span>
+          </span>
+          <div className="flex items-center gap-1">
+            {[
+              { id: '5', label: '5s' },
+              { id: '15', label: '15s' },
+              { id: '30', label: '30s' },
+              { id: 'till_end', label: 'Till End ⏩' },
+            ].map((d) => (
+              <button
+                key={d.id}
+                onClick={() => setDurationPreset(d.id as any)}
+                className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold transition-all cursor-pointer ${
+                  durationPreset === d.id
+                    ? 'bg-purple-500 text-white shadow-xs'
+                    : 'bg-[#1f1d2b] hover:bg-[#282638] text-slate-400 hover:text-slate-200'
+                }`}
+                title={d.id === 'till_end' ? 'Run sticker all the way to video end' : `${d.label} duration`}
+              >
+                {d.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       {/* Sticker Cards Grid */}

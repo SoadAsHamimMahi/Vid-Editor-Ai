@@ -8,6 +8,7 @@ interface SubtitlesProps {
   captionStyle?: CaptionStyle;
   autoEmojiEnabled?: boolean;
   captionPosition?: { x: number; y: number };
+  captionScale?: number;
 }
 
 const EMOJI_KEYWORD_MAP: Record<string, string> = {
@@ -65,9 +66,6 @@ function groupWordsIntoChunks(rawWords: WordTimestamp[], captionStyle: CaptionSt
     'reels_neon_glow'
   ].includes(captionStyle);
 
-  const targetWords = isCompact ? 3 : 5;
-  const maxWords = isCompact ? 4 : 7;
-
   const chunks: SubtitleChunk[] = [];
   let currentChunkWords: WordTimestamp[] = [];
 
@@ -77,23 +75,49 @@ function groupWordsIntoChunks(rawWords: WordTimestamp[], captionStyle: CaptionSt
 
     const isLastWord = i === words.length - 1;
     const nextWord = !isLastWord ? words[i + 1] : null;
+    const nextNextWord = i + 2 < words.length ? words[i + 2] : null;
 
-    // Boundary conditions:
-    // 1. Natural sentence punctuation: . ? ! । , ; :
-    const hasPunctuation = /[.!?।,;:]$/.test(w.word.trim());
-    const isStrongPunctuation = /[.!?।]/.test(w.word.trim());
-    // 2. Audible pause between this word and next word > 0.35s
-    const hasPause = nextWord ? (nextWord.start - w.end >= 0.35) : false;
-    // 3. Length constraints
-    const isTarget = currentChunkWords.length >= targetWords;
-    const isMax = currentChunkWords.length >= maxWords;
+    const wText = w.word.trim();
+    // Strong sentence end (. ? ! ।)
+    const isSentenceEnd = /[.!?।]$/.test(wText);
+    // Clause separator (, ; : - —)
+    const isClauseEnd = /[,;:\-—–]$/.test(wText);
+    // Audible pause (> 0.28s) between spoken words
+    const hasAudioPause = nextWord ? (nextWord.start - w.end >= 0.28) : false;
 
-    if (
-      isLastWord ||
-      isMax ||
-      (currentChunkWords.length >= 2 && isStrongPunctuation) ||
-      (isTarget && (hasPunctuation || hasPause))
-    ) {
+    // Look ahead 1-2 words: is a clause or sentence break coming up right away?
+    const breakComingSoon = 
+      (nextWord && /[,;:\-—–.!?।]$/.test(nextWord.word.trim())) ||
+      (nextNextWord && /[,;:\-—–.!?।]$/.test(nextNextWord.word.trim()));
+
+    // Natural phrase starter words for splitting long clauses cleanly without awkward mid-sentence breaks
+    const nextIsPhraseStarter = nextWord && /^(to|and|but|or|that|which|because|although|when|while|if|with|for|as|so|then)$/i.test(nextWord.word.trim());
+
+    const minWordsForClause = isCompact ? 2 : 3;
+    const maxWords = isCompact ? 5 : 9;
+    const targetWords = isCompact ? 4 : 6;
+
+    let shouldBreak = false;
+    if (isLastWord) {
+      shouldBreak = true;
+    } else if (isSentenceEnd) {
+      // Always end chunk on full sentence boundary so sentences NEVER bleed together
+      shouldBreak = true;
+    } else if (isClauseEnd && currentChunkWords.length >= minWordsForClause) {
+      // Natural clause boundary (comma, semicolon, dash)
+      shouldBreak = true;
+    } else if (hasAudioPause && currentChunkWords.length >= minWordsForClause) {
+      // Natural breath or pause in speech
+      shouldBreak = true;
+    } else if (currentChunkWords.length >= maxWords && !breakComingSoon) {
+      // Upper limit reached, but only break if punctuation isn't arriving within 1-2 words
+      shouldBreak = true;
+    } else if (currentChunkWords.length >= targetWords && nextIsPhraseStarter && !breakComingSoon) {
+      // Break naturally before conjunctions/prepositions
+      shouldBreak = true;
+    }
+
+    if (shouldBreak) {
       chunks.push({
         words: currentChunkWords,
         start: currentChunkWords[0].start,
@@ -120,6 +144,7 @@ export const Subtitles: React.FC<SubtitlesProps> = ({
   captionStyle = 'mrbeast_impact',
   autoEmojiEnabled = true,
   captionPosition,
+  captionScale = 1.0,
 }) => {
   const frame = useCurrentFrame();
   const { fps, width, height } = useVideoConfig();
@@ -138,10 +163,11 @@ export const Subtitles: React.FC<SubtitlesProps> = ({
   }
 
   // Find the active sentence chunk currently being spoken
+  // Starts strictly when speech begins (c.start) so upcoming sentences never show early
   const activeChunk = chunks.find((c, idx) => {
     const nextChunk = chunks[idx + 1];
-    const chunkEnd = nextChunk ? Math.min(nextChunk.start, c.end + 0.35) : c.end + 0.4;
-    return currentTime >= c.start - 0.1 && currentTime <= chunkEnd;
+    const chunkEnd = nextChunk ? nextChunk.start : c.end + 0.45;
+    return currentTime >= c.start && currentTime <= chunkEnd;
   });
 
   if (!activeChunk || activeChunk.words.length === 0) {
@@ -172,7 +198,8 @@ export const Subtitles: React.FC<SubtitlesProps> = ({
         position: 'absolute',
         bottom: `${baseBottom + posY}%`,
         left: `calc(50% + ${posX}%)`,
-        transform: 'translateX(-50%)',
+        transform: `translateX(-50%) scale(${captionScale || 1.0})`,
+        transformOrigin: 'center bottom',
         width: '90%',
         maxWidth: isVertical ? '92%' : '1200px',
         display: 'flex',
@@ -194,6 +221,48 @@ function renderStyledCaptions(
   autoEmojiEnabled: boolean = true
 ) {
   switch (style) {
+    // 0. PLAIN BOLD WHITE OUTLINE (Classic Documentary & Video Essay - Pure white with heavy black stroke)
+    case 'plain_bold_outline':
+    case 'plain_text':
+      return (
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            justifyContent: 'center',
+            alignItems: 'center',
+            gap: '6px 14px',
+            textAlign: 'center',
+            maxWidth: '92%',
+          }}
+        >
+          {words.map((w, idx) => {
+            const isActive = currentTime >= w.start && currentTime <= w.end;
+            return (
+              <span
+                key={`${w.word}-${idx}`}
+                style={{
+                  position: 'relative',
+                  fontFamily: '"Montserrat", "Arial Rounded MT Bold", "Nunito", "Poppins", system-ui, sans-serif',
+                  fontSize: '44px',
+                  fontWeight: 900,
+                  color: '#ffffff',
+                  letterSpacing: '0.01em',
+                  WebkitTextStroke: '4.5px #000000',
+                  paintOrder: 'stroke fill',
+                  textShadow: '0 2px 4px rgba(0,0,0,0.95), 0 4px 14px rgba(0,0,0,0.85)',
+                  transform: isActive ? 'scale(1.05) translateY(-2px)' : 'scale(1.0)',
+                  transition: 'transform 0.08s ease-out',
+                  display: 'inline-block',
+                }}
+              >
+                {w.word}
+              </span>
+            );
+          })}
+        </div>
+      );
+
     // 1. MRBEAST IMPACT VIRAL (Heavy 3.5px stroke, neon lime/yellow active pop, 3D shadow)
     case 'mrbeast_impact':
       return (

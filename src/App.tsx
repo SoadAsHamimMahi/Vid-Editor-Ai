@@ -17,9 +17,37 @@ import { BatchSceneDeleteModal } from './components/Controls/BatchSceneDeleteMod
 import { CloudVideoModal } from './components/Controls/CloudVideoModal';
 import { McpServerModal } from './components/Controls/McpServerModal';
 import { VoiceDesignerModal } from './components/VoiceStudio/VoiceDesignerModal';
+import { PolicyViolationFixModal } from './components/Controls/PolicyViolationFixModal';
+import { AgenticStudioModal } from './components/Controls/AgenticStudioModal';
 import { HomePage } from './components/Home/HomePage';
 import { VoiceStudioPage } from './components/VoiceStudio/VoiceStudioPage';
 import { useProjectStore } from './store/useProjectStore';
+class PanelErrorBoundary extends React.Component<{ name: string; children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
+  state = { hasError: false, error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error(`[PanelErrorBoundary: ${this.props.name}]`, error, info.componentStack);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex-1 p-4 bg-red-950/40 border border-red-500/30 rounded-lg text-xs text-red-300 flex flex-col justify-center items-center gap-2">
+          <span className="font-bold">⚠️ Panel Error: {this.props.name}</span>
+          <span className="text-[11px] text-slate-400">{this.state.error?.message}</span>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null })}
+            className="px-2.5 py-1 bg-red-800/60 hover:bg-red-700 text-white rounded text-[10px] font-bold"
+          >
+            Retry Panel
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 export const App: React.FC = () => {
   const { 
@@ -284,29 +312,38 @@ export const App: React.FC = () => {
       </div>
     );
   }
-
   // Full CapCut Video Editing Studio
   return (
     <div className="flex flex-col h-screen w-screen bg-[#121215] text-slate-100 select-none overflow-hidden font-sans">
       {/* 1. Unified Pro Top Header Bar */}
-      <Header onOpenAudioImporter={() => setAudioModalOpen(true)} />
+      <PanelErrorBoundary name="Top Header">
+        <Header onOpenAudioImporter={() => setAudioModalOpen(true)} />
+      </PanelErrorBoundary>
 
       {/* 2. Main 3-Panel Pro Workspace */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel: Media Asset Explorer & Google Flow Generator */}
-        <MediaExplorer />
+        <PanelErrorBoundary name="Media Explorer">
+          <MediaExplorer />
+        </PanelErrorBoundary>
 
         {/* Center Panel: Pro Player Viewport */}
         <div className="flex-1 h-full overflow-hidden">
-          <VideoPreview />
+          <PanelErrorBoundary name="Video Preview">
+            <VideoPreview />
+          </PanelErrorBoundary>
         </div>
 
         {/* Right Panel: Pro Property Inspector */}
-        <SceneInspector />
+        <PanelErrorBoundary name="Scene Inspector">
+          <SceneInspector />
+        </PanelErrorBoundary>
       </div>
 
       {/* 4. Bottom Multi-Track NLE Timeline */}
-      <TimelineTrack />
+      <PanelErrorBoundary name="Timeline">
+        <TimelineTrack />
+      </PanelErrorBoundary>
 
       {/* Modals & Dialogs */}
       <ExportModal />
@@ -349,6 +386,8 @@ export const App: React.FC = () => {
         isOpen={isVoiceDesignerModalOpen}
         onClose={() => setIsVoiceDesignerModalOpen(false)}
       />
+      <PolicyViolationFixModal />
+      <AgenticStudioModal />
     </div>
   );
 };

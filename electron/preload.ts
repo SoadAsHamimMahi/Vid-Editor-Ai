@@ -14,6 +14,9 @@ const electronAPI = {
   spawnChromeInstance: (port: number) => ipcRenderer.invoke('cdp:spawn-instance', port),
   connectPort: (port: number) => ipcRenderer.invoke('cdp:connect-port', port),
   closeChromeInstance: (port: number) => ipcRenderer.invoke('cdp:close-instance', port),
+  addCdpPort: (port: number) => ipcRenderer.invoke('cdp:add-port', port),
+  removeCdpPort: (port: number) => ipcRenderer.invoke('cdp:remove-port', port),
+  getCdpPorts: () => ipcRenderer.invoke('cdp:get-ports'),
   enqueueGeneration: (sceneId: string, prompt: string, projectId?: string, settings?: any) => ipcRenderer.invoke('cdp:enqueue-generation', sceneId, prompt, projectId, settings),
   batchGenerate: (scenes: { id: string; prompt: string }[], projectId?: string, settings?: any) => ipcRenderer.invoke('cdp:batch-generate', scenes, projectId, settings),
   batchGenerateVideos: (scenes: { id: string; prompt: string }[], projectId?: string, settings?: any) => ipcRenderer.invoke('cdp:batch-generate-videos', scenes, projectId, settings),
@@ -51,6 +54,8 @@ const electronAPI = {
   segmentText: (scriptText: string, duration: number, fps: number = 30) => ipcRenderer.invoke('audio:segment-text', scriptText, duration, fps),
   transcribeAudioFile: (audioPath: string, apiKey?: string, provider?: 'gemini' | 'openai' | 'groq' | 'local', fps?: number, userProvidedScript?: string) =>
     ipcRenderer.invoke('audio:transcribe-file', audioPath, apiKey, provider, fps, userProvidedScript),
+  transcribeAudioRange: (audioPath: string, startTime: number, duration: number, apiKey?: string, provider?: 'gemini' | 'openai' | 'groq' | 'local', fps?: number) =>
+    ipcRenderer.invoke('audio:transcribe-range', audioPath, startTime, duration, apiKey, provider, fps),
   generateVoiceScenes: (audioPath: string, stylePreset?: string, apiKey?: string, provider?: 'gemini' | 'openai' | 'groq' | 'local', fps?: number, userProvidedScript?: string, customStyleModifier?: string) =>
     ipcRenderer.invoke('audio:voice-to-scenes', audioPath, stylePreset, apiKey, provider, fps, userProvidedScript, customStyleModifier),
   alignScenesToVoice: (audioPath: string, scenes: any[], apiKey?: string, provider?: 'openai' | 'groq' | 'local', fps?: number, userProvidedScript?: string) =>
@@ -119,6 +124,11 @@ const electronAPI = {
   saveVoiceRecord: (record: any) => ipcRenderer.invoke('tts:save-history', record),
   deleteVoiceRecord: (id: string) => ipcRenderer.invoke('tts:delete-history', id),
   clearVoiceHistory: () => ipcRenderer.invoke('tts:clear-history'),
+  onTTSProgress: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('tts:progress', handler);
+    return () => ipcRenderer.removeListener('tts:progress', handler);
+  },
 
   // Cloud AI Video (Colab Wan 2.1 / LTX-Video)
   colabSetTunnelUrl: (url: string) => ipcRenderer.invoke('colab:set-tunnel-url', url),
@@ -139,6 +149,27 @@ const electronAPI = {
     const handler = (_event: any, data: any) => callback(data);
     ipcRenderer.on('mcp:project-updated', handler);
     return () => ipcRenderer.removeListener('mcp:project-updated', handler);
+  },
+
+  // Autonomous Multi-Agent Gemini Studio
+  startAgenticWorkflow: (config: any) => ipcRenderer.invoke('agentic-studio:start', config),
+  pauseAgenticWorkflow: () => ipcRenderer.invoke('agentic-studio:pause'),
+  resumeAgenticWorkflow: () => ipcRenderer.invoke('agentic-studio:resume'),
+  cancelAgenticWorkflow: () => ipcRenderer.invoke('agentic-studio:cancel'),
+  approveAgenticScript: (editedScript?: string) => ipcRenderer.invoke('agentic-studio:approve-script', editedScript),
+  getAgenticChannels: () => ipcRenderer.invoke('agentic-studio:get-channels'),
+  saveAgenticChannels: (profiles: any[]) => ipcRenderer.invoke('agentic-studio:save-channels', profiles),
+  getAgenticKeyPool: () => ipcRenderer.invoke('agentic-studio:get-key-pool'),
+  saveAgenticKeyPool: (keys: string[]) => ipcRenderer.invoke('agentic-studio:save-key-pool', keys),
+  onAgenticProgress: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('agentic-studio:progress', handler);
+    return () => ipcRenderer.removeListener('agentic-studio:progress', handler);
+  },
+  onAgenticLog: (callback: (data: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('agentic-studio:log', handler);
+    return () => ipcRenderer.removeListener('agentic-studio:log', handler);
   },
 };
 

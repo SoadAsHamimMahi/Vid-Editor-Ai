@@ -183,14 +183,14 @@ const PRESET_BLENDS: Record<string, VoiceBlendDef> = {
 };
 
 const BROADCAST_STUDIO_FILTER = [
-  'highpass=f=75:poles=2',
-  'equalizer=f=120:width_type=q:width=1.4:g=2.2',
-  'equalizer=f=480:width_type=q:width=1.8:g=-2.0',
-  'equalizer=f=3400:width_type=q:width=1.3:g=2.2',
-  'equalizer=f=7200:width_type=q:width=2.5:g=-1.8',
-  'equalizer=f=10500:width_type=h:g=2.2',
-  'acompressor=threshold=0.12:ratio=2.5:attack=10:release=120:makeup=1.5',
-  'loudnorm=I=-14.5:TP=-0.5:LRA=8'
+  'highpass=f=50:poles=2',
+  'equalizer=f=105:width_type=q:width=1.1:g=3.2',
+  'equalizer=f=380:width_type=q:width=1.5:g=-2.2',
+  'equalizer=f=3400:width_type=q:width=1.2:g=1.0',
+  'equalizer=f=7500:width_type=q:width=2.0:g=-2.0',
+  'equalizer=f=10000:width_type=h:width=2500:g=1.0',
+  'acompressor=threshold=0.12:ratio=2.2:attack=15:release=160:makeup=1.8',
+  'loudnorm=I=-14.5:TP=-1.2:LRA=4'
 ].join(',');
 
 export class KokoroService {

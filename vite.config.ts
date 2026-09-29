@@ -28,6 +28,9 @@ const electronAPI = {
   spawnChromeInstance: (port) => ipcRenderer.invoke('cdp:spawn-instance', port),
   connectPort: (port) => ipcRenderer.invoke('cdp:connect-port', port),
   closeChromeInstance: (port) => ipcRenderer.invoke('cdp:close-instance', port),
+  addCdpPort: (port) => ipcRenderer.invoke('cdp:add-port', port),
+  removeCdpPort: (port) => ipcRenderer.invoke('cdp:remove-port', port),
+  getCdpPorts: () => ipcRenderer.invoke('cdp:get-ports'),
   enqueueGeneration: (sceneId, prompt, projectId, settings) => ipcRenderer.invoke('cdp:enqueue-generation', sceneId, prompt, projectId, settings),
   batchGenerate: (scenes, projectId, settings) => ipcRenderer.invoke('cdp:batch-generate', scenes, projectId, settings),
   batchGenerateVideos: (scenes, projectId, settings) => ipcRenderer.invoke('cdp:batch-generate-videos', scenes, projectId, settings),
@@ -61,6 +64,8 @@ const electronAPI = {
   segmentText: (scriptText, duration, fps = 30) => ipcRenderer.invoke('audio:segment-text', scriptText, duration, fps),
   transcribeAudioFile: (audioPath, apiKey, provider, fps, userProvidedScript) =>
     ipcRenderer.invoke('audio:transcribe-file', audioPath, apiKey, provider, fps, userProvidedScript),
+  transcribeAudioRange: (audioPath, startTime, duration, apiKey, provider, fps) =>
+    ipcRenderer.invoke('audio:transcribe-range', audioPath, startTime, duration, apiKey, provider, fps),
   generateVoiceScenes: (audioPath, stylePreset, apiKey, provider, fps, userProvidedScript, customStyleModifier) =>
     ipcRenderer.invoke('audio:voice-to-scenes', audioPath, stylePreset, apiKey, provider, fps, userProvidedScript, customStyleModifier),
   alignScenesToVoice: (audioPath, scenes, apiKey, provider, fps, userProvidedScript) =>
@@ -226,5 +231,9 @@ export default defineConfig({
   },
   server: {
     port: 5173
+  },
+  build: {
+    minify: false,
+    sourcemap: true
   }
 })

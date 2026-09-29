@@ -277,7 +277,7 @@ export class EdgeTtsService {
     escaped = escaped.replace(/\[\/?(?:mood|mode|emotion|tone|style)\]/gi, '');
 
     // Clean remaining emotion, acting, and sound cue tags
-    escaped = escaped.replace(/\[\/?(?:whisper(?:ing)?|angry|anger|cheerful|happy|joyful|sad|sorrow|terrified|fear|scared|dramatic|excited|calm|curious|sarcastic|laugh(?:ter|ing)?|sigh(?:ing)?|cough(?:ing)?|chuckle|gasp(?:ing)?|groan(?:ing)?|snicker|snort|shout(?:ing)?|screaming|crying|sob(?:bing)?|narration|story|neutral|serious|mysterious|hopeful|gloomy|romantic|suspense(?:ful)?|urgent|melancholic|intense|gentle|grief|bored|shocked|proud|playful|loving|frustrated|confused|applause|silence|break|cheering|music|sound|sfx)\]/gi, '');
+    escaped = escaped.replace(/\[\/?(?:whisper(?:ing)?|angry|anger|cheerful|happy|joyful|sad|sorrow|terrified|fear|scared|dramatic|excited|calm|curious|sarcastic|laugh(?:ter|ing)?|sigh(?:ing)?|cough(?:ing)?|chuckle|gasp(?:ing)?|groan(?:ing)?|snicker|snort|shout(?:ing)?|screaming|yell(?:ing)?|bellow|crying|sob(?:bing)?|narration|story|neutral|serious|mysterious|hopeful|inspiring|inspirational|triumphant|victory|uplifting|eerie|ominous|creepy|intriguing|nostalgic|nostalgia|reminiscing|reminiscent|reflective|wistful|empathetic|empathy|compassionate|compassion|sympathetic|caring|tender|affectionate|relieved|relief|reassured|disgusted|disgust|contempt|scornful|repulsed|revolted|breathless|panting|out of breath|heavy breathing|winded|panicked|panic|frantic|hysterical|desperate|hesitant|hesitation|nervous|trembling|quavering|timid|uncertain|stammer|stutter|clears throat|clear throat|clearing throat|throat clearing|throat clear|sniffle|sniffling|gulp|gulping|swallow|swallows|yawn(?:s|ing)?|sleepy|exhausted|humming|hum|hums|cackle|gloomy|romantic|suspense(?:ful)?|urgent|melancholic|intense|gentle|grief|bored|shocked|proud|playful|loving|frustrated|confused|applause|silence|break|cheering|music|sound|sfx)\]/gi, '');
     escaped = escaped.replace(/\[\s*[^\]\n]{1,80}\s*\]/g, ' ');
     escaped = escaped.replace(/\(\s*(?:speak|voice|tone|emotion|whisper|sigh|gasp|pause|sound|music|cue|delivery|style|acting|slowly|gentle|warm|soft|sad|smile|reflective|strong|deep|fade|building)[^)\n]{0,60}\)/gi, ' ');
 
@@ -317,7 +317,7 @@ export class EdgeTtsService {
 
     // Calibrate defaults for premium documentary voices (118 - 126 WPM standard)
     if (isMarcus) {
-      if (!options.pitch || options.pitch === 0) options.pitch = -26;
+      if (!options.pitch || options.pitch === 0) options.pitch = -7; // Calibrated safe deep baritone (prevents vocoder phase-smearing at -26Hz)
       if (!options.rate || options.rate === 1.0) options.rate = 0.90;
       if (!options.prosodyPacing) options.prosodyPacing = 'story';
     } else if (isBrian) {
@@ -387,23 +387,39 @@ export class EdgeTtsService {
     } else if (activeEmotion === 'sad') {
       if (!isAlreadySlow) baseRate *= 0.92;
       basePitch -= 1;
-    } else if (activeEmotion === 'terrified') {
+    } else if (activeEmotion === 'terrified' || activeEmotion === 'panicked') {
       baseRate *= 1.12;
       basePitch += 4;
-    } else if (activeEmotion === 'dramatic') {
-      if (!isAlreadySlow) baseRate *= 0.94;
-      basePitch -= 1;
-    } else if (activeEmotion === 'calm') {
+    } else if (activeEmotion === 'dramatic' || activeEmotion === 'mysterious') {
+      if (!isAlreadySlow) baseRate *= 0.93;
+      basePitch -= 2;
+    } else if (activeEmotion === 'calm' || activeEmotion === 'relieved' || activeEmotion === 'empathetic') {
       if (!isAlreadySlow) baseRate *= 0.96;
       basePitch -= 1;
+    } else if (activeEmotion === 'hopeful') {
+      baseRate *= 1.04;
+      basePitch += 2;
+    } else if (activeEmotion === 'nostalgic') {
+      if (!isAlreadySlow) baseRate *= 0.94;
+      basePitch -= 1;
+    } else if (activeEmotion === 'shouting') {
+      baseRate *= 1.12;
+      basePitch += 5;
+    } else if (activeEmotion === 'breathless') {
+      baseRate *= 1.14;
+      basePitch += 2;
+    } else if (activeEmotion === 'hesitant') {
+      if (!isAlreadySlow) baseRate *= 0.91;
+      basePitch += 1;
+    } else if (activeEmotion === 'disgusted') {
+      baseRate *= 1.04;
+      basePitch += 1;
     }
 
-    // Protect consonant intelligibility:
-    // 1. Never let neural vocoder drop below -2Hz for generic voices
-    // 2. EXCEPTION: Marcus (-26Hz) and Julian Midnight (-8Hz) use chest resonance
-    const isDeepBaritone = voice.includes('BrianNeural') || voice.includes('ChristopherNeural');
-    const minPitch = (isMarcus || isJulianMidnight || (isDeepBaritone && Math.abs(basePitch) > 5)) ? -50 : (isDeepBaritone ? -3 : -2);
-    basePitch = Math.max(minPitch, Math.min(isMarcus ? 4 : 6, basePitch));
+    // Protect consonant intelligibility & neural vocoder stability:
+    // Never let neural vocoder drop below -8Hz (extreme negative pitch triggers phase-vocoder flanging/tremolo)
+    const minPitch = -8;
+    basePitch = Math.max(minPitch, Math.min(isMarcus ? 2 : 12, basePitch));
 
     // 3. Minimum rate 0.85x so words are articulate and natural (never dragged out or muddy)
     baseRate = Math.max(0.85, Math.min(1.25, baseRate));
@@ -605,9 +621,10 @@ export class EdgeTtsService {
           const idx = i + bIdx;
           if (!seg.text.trim()) return;
 
-          // Clamp combined pitch
-          const minPitchFloor = isMarcus ? -32 : -8;
-          const maxPitchCeil = isMarcus ? 4 : 6;
+          // Clamp combined pitch within safe neural vocoder threshold (-8Hz to +3Hz for Marcus, +8Hz for general)
+          // (Prevents phase-vocoder metallic tremolo/warble distortion on deep voices)
+          const minPitchFloor = -8;
+          const maxPitchCeil = isMarcus ? 3 : 8;
           const finalPitch = Math.max(minPitchFloor, Math.min(maxPitchCeil, basePitchHz + seg.pitchDeltaHz));
           // Clamp combined rate
           const finalRatePct = Math.max(-25, Math.min(15, baseRatePct + seg.rateDeltaPct));
@@ -621,13 +638,13 @@ export class EdgeTtsService {
 
           await this.synthesizeWithPythonInline(seg.text, voice, rateStr, pitchStr, rawFile, volumeStr);
 
-          // Trim both leading and trailing TTS silence so speech starts cleanly and explicit pauses are exact
+          // Trim both leading and trailing TTS silence cleanly without truncating soft consonants or trailing vocal fry
           if (fs.existsSync(rawFile)) {
             try {
               await new Promise((res, rej) => {
                 const p = spawn(ffmpegExe, [
                   '-y', '-i', rawFile,
-                  '-af', 'silenceremove=stop_periods=-1:stop_duration=0.04:stop_threshold=-40dB',
+                  '-af', 'silenceremove=stop_periods=-1:stop_duration=0.12:stop_threshold=-48dB',
                   '-b:a', '48k', trimFile
                 ]);
                 p.on('close', (c) => (c === 0 && fs.existsSync(trimFile) && fs.statSync(trimFile).size > 0)
@@ -728,7 +745,7 @@ export class EdgeTtsService {
                 await new Promise((res, rej) => {
                   const p = spawn(ffmpegExe, [
                     '-y', '-i', segFile,
-                    '-af', 'silenceremove=stop_periods=-1:stop_duration=0.04:stop_threshold=-40dB',
+                    '-af', 'silenceremove=stop_periods=-1:stop_duration=0.12:stop_threshold=-48dB',
                     '-b:a', '48k', trimmedFile
                   ]);
                   p.on('close', (c) => c === 0 && fs.existsSync(trimmedFile) && (fs.statSync(trimmedFile)).size > 0

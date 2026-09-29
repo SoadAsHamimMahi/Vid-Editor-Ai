@@ -28,9 +28,11 @@ import {
   TTSGenerationRequest,
   TTSGenerationResult,
   GeneratedVoiceRecord,
+  TTSProgressData,
   AudioMasteringPreset,
   MultiSpeakerRequest,
-  PronunciationRule
+  PronunciationRule,
+  WordTimestamp
 } from '../types';
 import { analyzeAudioBeats } from '../utils/beatDetector';
 import { getExactAudioDuration } from '../utils/audioDuration';
@@ -53,6 +55,7 @@ import { DEFAULT_BUILTIN_VOICES } from '../utils/builtinVoices';
 import { detectEmotionFromText, cleanSpeechText, cleanSubtitleText } from '../utils/textSanitizer';
 import { validateVoiceText } from '../utils/voiceLimits';
 import { auditProjectMedia, applyRelinkedMediaToProject } from '../utils/mediaAuditor';
+import { formatFailedScenesToPromptBatch } from '../utils/promptSafetySanitizer';
 
 export interface GenerationProgressTracker {
   isActive: boolean;
@@ -86,6 +89,7 @@ interface ProjectState {
   audioStudioModalOpen: boolean;
   isMcpModalOpen: boolean;
   isVoiceDesignerModalOpen: boolean;
+  isAgenticStudioModalOpen: boolean;
   isProcessingAudio: boolean;
   activeRibbonTab: 'media' | 'audio' | 'text' | 'stickers' | 'effects' | 'transitions' | 'filters' | 'director';
   inspectorTab: 'details' | 'visual' | 'luts' | 'audio' | 'captions';
@@ -94,6 +98,8 @@ interface ProjectState {
   setAudioStudioModalOpen: (open: boolean) => void;
   setIsMcpModalOpen: (open: boolean) => void;
   setIsVoiceDesignerModalOpen: (open: boolean) => void;
+  setIsAgenticStudioModalOpen: (open: boolean) => void;
+  applyAgenticStudioResult: (result: any) => Promise<void>;
   setIsProcessingAudio: (processing: boolean) => void;
   setActiveRibbonTab: (tab: 'media' | 'audio' | 'text' | 'stickers' | 'effects' | 'transitions' | 'filters' | 'director') => void;
   setInspectorTab: (tab: 'details' | 'visual' | 'luts' | 'audio' | 'captions') => void;
@@ -116,6 +122,8 @@ interface ProjectState {
   activeVoiceAudio: GeneratedVoiceRecord | null;
   isGeneratingTTS: boolean;
   ttsProgressMessage: string | null;
+  ttsProgressData: TTSProgressData | null;
+  setTTSProgress: (data: TTSProgressData | null) => void;
   lastGeneratedTTSAudioPath: string | null;
   setActiveVoiceProfile: (profile: VoiceProfile | null) => void;
   loadVoiceProfiles: () => Promise<VoiceProfile[]>;
@@ -132,6 +140,10 @@ interface ProjectState {
   directVocalScript: (script: string, style?: string) => Promise<string>;
   voiceMasteringPreset: AudioMasteringPreset;
   setVoiceMasteringPreset: (preset: AudioMasteringPreset) => void;
+  f5Quality: 'standard' | 'ultra_master' | 'cinema_studio';
+  setF5Quality: (quality: 'standard' | 'ultra_master' | 'cinema_studio') => void;
+  enableNaturalBreaths: boolean;
+  setEnableNaturalBreaths: (enabled: boolean) => void;
   pronunciationRules: PronunciationRule[];
   setPronunciationRules: (rules: PronunciationRule[]) => void;
   sendVoiceoverToTimeline: (audioPath: string, scriptText: string, duration?: number, mode?: 'replace_main' | 'insert_at_playhead') => Promise<void>;
@@ -164,6 +176,8 @@ interface ProjectState {
   setIsPlaying: (playing: boolean) => void;
   setTimelineZoom: (zoom: number) => void;
   setBrowsers: (browsers: BrowserInstanceInfo[]) => void;
+  addCdpPort: (port: number) => Promise<void>;
+  removeCdpPort: (port: number) => Promise<void>;
   checkCdpStatus: () => Promise<void>;
   setRenderProgress: (progress: Partial<RenderProgress>) => void;
   setExportModalOpen: (open: boolean) => void;
@@ -179,10 +193,16 @@ interface ProjectState {
   openPromptExport: (data?: any) => void;
   customPromptImportModalOpen: boolean;
   setCustomPromptImportModalOpen: (open: boolean) => void;
+  policyFixModalOpen: boolean;
+  setPolicyFixModalOpen: (open: boolean) => void;
   gapCheckerModalOpen: boolean;
   setGapCheckerModalOpen: (open: boolean) => void;
   batchSceneDeleteModalOpen: boolean;
   setBatchSceneDeleteModalOpen: (open: boolean) => void;
+
+  getFailedScenes: () => SceneSegment[];
+  getFailedPromptsText: () => string;
+  copyFailedPromptsToClipboard: () => Promise<number>;
 
   // Prompt Manifest Actions (Paste-based accumulated workflow)
   importPromptBatch: (
@@ -199,9 +219,10 @@ interface ProjectState {
   setAspectRatio: (aspectRatio: AspectRatio) => void;
   setCaptionStyle: (style: CaptionStyle) => void;
   setCaptionPosition: (position: { x: number; y: number }) => void;
+  setCaptionScale: (scale: number) => void;
   setBgMusic: (bgMusicPath?: string, volume?: number, audioDucking?: boolean, duration?: number) => void;
-  toggleTrackMute: (track: 'v1' | 'v2' | 'v3' | 'a1' | 'a2' | 'a3' | 't1') => void;
-  setTrackMute: (track: 'v1' | 'v2' | 'v3' | 'a1' | 'a2' | 'a3' | 't1', muted: boolean) => void;
+  toggleTrackMute: (track: 'v1' | 'v2' | 'v3' | 'v4' | 'v5' | 'a1' | 'a2' | 'a3' | 't1') => void;
+  setTrackMute: (track: 'v1' | 'v2' | 'v3' | 'v4' | 'v5' | 'a1' | 'a2' | 'a3' | 't1', muted: boolean) => void;
 
   // Global Persistent API Keys (Workable across all projects until deleted)
   globalApiKeys: {
@@ -217,13 +238,15 @@ interface ProjectState {
   // Project Media Library Assets
   addMediaAsset: (asset: Omit<MediaAsset, 'id' | 'addedAt'>) => void;
   removeMediaAsset: (id: string) => void;
-  addMediaToTimeline: (assetId: string, targetTrack?: 'V1' | 'V2' | 'V3' | 'A1' | 'A2' | 'A3' | 'A4', dropTime?: number) => void;
+  addMediaToTimeline: (assetId: string, targetTrack?: 'V1' | 'V2' | 'V3' | 'V4' | 'V5' | 'A1' | 'A2' | 'A3' | 'A4', dropTime?: number) => void;
 
-  // Overlay Media Clips (Track V2, V3)
+  // Overlay Media Clips (Track V2, V3, V4, V5)
+  selectedOverlayClipId: string | null;
+  setSelectedOverlayClipId: (id: string | null) => void;
   addOverlayClip: (clip: Omit<OverlayClip, 'id'>) => void;
-  updateOverlayClip: (id: string, updates: Partial<OverlayClip>) => void;
+  updateOverlayClip: (id: string, updates: Partial<OverlayClip>, skipSave?: boolean) => void;
   deleteOverlayClip: (id: string) => void;
-  moveOverlayClip: (id: string, newStartTime: number) => void;
+  moveOverlayClip: (id: string, newStartTime: number, skipSave?: boolean) => void;
 
   // Freeform Audio Clips & Editing
   addAudioClip: (clip: Omit<AudioClip, 'id'>) => void;
@@ -332,6 +355,7 @@ interface ProjectState {
   isTranscribingSubtitles: boolean;
   setIsTranscribingSubtitles: (transcribing: boolean) => void;
   autoGenerateSubtitlesFromVoiceover: (audioPath?: string) => Promise<{ success: boolean; wordsCount?: number; error?: string }>;
+  regenerateUntranscribedSubtitles: (targetSceneIds?: string[]) => Promise<{ success: boolean; wordsCount?: number; filledScenes?: number; error?: string }>;
   clearAllSubtitles: () => void;
   resetAudioEngine: () => Promise<void>;
 }
@@ -356,16 +380,35 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
   selectedSceneId: null,
   selectedSceneIds: [],
+  selectedOverlayClipId: null,
+  setSelectedOverlayClipId: (id) => set({ selectedOverlayClipId: id }),
   currentTime: 0,
   isPlaying: false,
   viewMode: 'home',
   projectSummaries: [],
   isLoadingProjects: false,
   timelineZoom: 60,
-  browsers: [
-    { port: 9222, connected: false, activeJobs: 0 },
-    { port: 9223, connected: false, activeJobs: 0 },
-  ],
+  browsers: (() => {
+    try {
+      const saved = typeof window !== 'undefined' ? localStorage.getItem('cdp_ports') : null;
+      if (saved) {
+        const ports: number[] = JSON.parse(saved);
+        if (Array.isArray(ports) && ports.length > 0) {
+          return ports.map((port, idx) => ({
+            port,
+            connected: false,
+            activeJobs: 0,
+            enabled: true,
+            name: `Browser ${idx + 1}`,
+          }));
+        }
+      }
+    } catch {}
+    return [
+      { port: 9222, connected: false, activeJobs: 0, enabled: true, name: 'Browser 1' },
+      { port: 9223, connected: false, activeJobs: 0, enabled: true, name: 'Browser 2' },
+    ];
+  })(),
   renderProgress: { status: 'idle', percent: 0 },
   exportModalOpen: false,
   scriptDirectorModalOpen: false,
@@ -379,6 +422,117 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   setIsMcpModalOpen: (open) => set({ isMcpModalOpen: open }),
   isVoiceDesignerModalOpen: false,
   setIsVoiceDesignerModalOpen: (open) => set({ isVoiceDesignerModalOpen: open }),
+  isAgenticStudioModalOpen: false,
+  setIsAgenticStudioModalOpen: (open) => set({ isAgenticStudioModalOpen: open }),
+  applyAgenticStudioResult: async (result: any) => {
+    const { project } = get();
+    if (!result || !result.scenes || !Array.isArray(result.scenes)) return;
+
+    let cumulativeStart = 0;
+    const newScenes: SceneSegment[] = result.scenes.map((sc: any, idx: number) => {
+      const dur = typeof sc.estimatedDuration === 'number' && sc.estimatedDuration > 0 ? sc.estimatedDuration : 4.5;
+      const sceneStart = cumulativeStart;
+      const sceneEnd = +(sceneStart + dur).toFixed(3);
+
+      // Subtitles mapping: Match Whisper subtitles or generate word timestamps from sentence
+      let sceneSubtitles: WordTimestamp[] = [];
+      if (Array.isArray(result.subtitles) && result.subtitles.length > 0) {
+        const matched = result.subtitles.filter(
+          (sub: any) => (sub.startTime >= sceneStart && sub.startTime < sceneEnd) ||
+                        (sub.endTime > sceneStart && sub.endTime <= sceneEnd)
+        );
+        if (matched.length > 0) {
+          sceneSubtitles = matched.map((m: any) => ({
+            word: m.text,
+            start: m.startTime,
+            end: m.endTime,
+          }));
+        }
+      }
+
+      if (sceneSubtitles.length === 0 && sc.sentence) {
+        const rawWords = sc.sentence.trim().split(/\s+/).filter(Boolean);
+        if (rawWords.length > 0) {
+          const wDur = dur / rawWords.length;
+          sceneSubtitles = rawWords.map((w: string, wIdx: number) => ({
+            word: w,
+            start: +(sceneStart + wIdx * wDur).toFixed(3),
+            end: +(sceneStart + (wIdx + 1) * wDur).toFixed(3),
+          }));
+        }
+      }
+
+      const sceneSeg: SceneSegment = {
+        id: `scene_${Date.now()}_${idx}`,
+        order: idx,
+        startInSeconds: sceneStart,
+        durationInSeconds: dur,
+        prompt: sc.prompt || sc.sentence || '',
+        mediaType: 'image',
+        imageUrl: sc.imageUrl,
+        localImagePath: sc.localImagePath,
+        motionType: sc.motionType || getMotionForIndex(idx, project.metadata?.motionRhythm || 'dynamic_alternating'),
+        transitionType: 'cross_dissolve',
+        transitionDuration: 0.5,
+        status: (sc.localImagePath || sc.imageUrl) ? 'ready' : 'pending',
+        subtitles: sceneSubtitles,
+      };
+      cumulativeStart += dur;
+      return sceneSeg;
+    });
+
+    // Handle synthesized voiceover audio track
+    let updatedAudioClips = [...(project.metadata.audioClips || [])];
+    const updatedMediaAssets = [...(project.metadata.mediaAssets || [])];
+
+    if (result.voiceoverAudioPath) {
+      const fileName = result.voiceoverAudioPath.split(/[\\/]/).pop() || 'Studio Voiceover.mp3';
+      const voiceClip: AudioClip = {
+        id: `voice-${Date.now()}`,
+        name: fileName,
+        filePath: result.voiceoverAudioPath,
+        track: 'A1',
+        startTime: 0,
+        duration: cumulativeStart,
+        volume: 1.0,
+        category: 'voiceover',
+      };
+
+      // Replace existing A1 track voice clips
+      updatedAudioClips = updatedAudioClips.filter((c) => c.track !== 'A1');
+      updatedAudioClips.push(voiceClip);
+
+      if (!updatedMediaAssets.some((m) => m.path === result.voiceoverAudioPath)) {
+        updatedMediaAssets.push({
+          id: `media-${Date.now()}`,
+          name: fileName,
+          type: 'voiceover',
+          path: result.voiceoverAudioPath,
+          duration: cumulativeStart,
+          addedAt: Date.now(),
+        });
+      }
+    }
+
+    const updatedProject: Project = {
+      ...project,
+      metadata: {
+        ...project.metadata,
+        title: project.metadata.title === 'Untitled Project' && result.script ? 'Autonomous Video Project' : project.metadata.title,
+        aspectRatio: result.aspectRatio || project.metadata.aspectRatio || '16:9',
+        audioPath: result.voiceoverAudioPath || project.metadata.audioPath,
+        audioClips: updatedAudioClips,
+        mediaAssets: updatedMediaAssets,
+        scriptText: result.script || project.metadata.scriptText,
+        audioDuration: cumulativeStart,
+        updatedAt: Date.now(),
+      },
+      scenes: newScenes,
+    };
+
+    set({ project: updatedProject, currentTime: 0, activeRibbonTab: 'media' });
+    await get().saveCurrentProject();
+  },
   isProcessingAudio: false,
   setIsProcessingAudio: (processing) => set({ isProcessingAudio: processing }),
   isTranscribingSubtitles: false,
@@ -578,6 +732,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   activeVoiceAudio: null,
   isGeneratingTTS: false,
   ttsProgressMessage: null,
+  ttsProgressData: null,
+  setTTSProgress: (data) => set({ ttsProgressData: data }),
   lastGeneratedTTSAudioPath: null,
   setActiveVoiceProfile: (profile) => set({ activeVoiceProfile: profile }),
   flowGenerationMode: 'image',
@@ -1001,19 +1157,91 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
   setIsPlaying: (playing) => set({ isPlaying: playing }),
   setTimelineZoom: (zoom) => set({ timelineZoom: Math.max(15, Math.min(250, zoom)) }),
-  setBrowsers: (browsers) => set({ browsers }),
+  setBrowsers: (browsers) => {
+    set({ browsers });
+    try {
+      localStorage.setItem('cdp_ports', JSON.stringify(browsers.map((b) => b.port)));
+    } catch {}
+  },
+  addCdpPort: async (port: number) => {
+    const p = Math.round(Number(port));
+    if (!Number.isInteger(p) || p < 1024 || p > 65535) return;
+    const { browsers } = get();
+    if (browsers.some((b) => b.port === p)) return;
+
+    const newBrowser: BrowserInstanceInfo = {
+      port: p,
+      connected: false,
+      activeJobs: 0,
+      enabled: true,
+      name: `Browser ${browsers.length + 1}`,
+    };
+    const updated = [...browsers, newBrowser];
+    set({ browsers: updated });
+    try {
+      localStorage.setItem('cdp_ports', JSON.stringify(updated.map((b) => b.port)));
+    } catch {}
+
+    if (window.electronAPI?.addCdpPort) {
+      await window.electronAPI.addCdpPort(p).catch(() => {});
+    }
+    await get().checkCdpStatus();
+  },
+  removeCdpPort: async (port: number) => {
+    const { browsers } = get();
+    if (window.electronAPI?.closeChromeInstance) {
+      await window.electronAPI.closeChromeInstance(port).catch(() => {});
+    }
+
+    const updated = browsers.filter((b) => b.port !== port);
+    const safeUpdated = updated.length > 0 ? updated : [{ port: 9222, connected: false, activeJobs: 0, enabled: true, name: 'Browser 1' }];
+    set({ browsers: safeUpdated });
+    try {
+      localStorage.setItem('cdp_ports', JSON.stringify(safeUpdated.map((b) => b.port)));
+    } catch {}
+
+    if (window.electronAPI?.removeCdpPort) {
+      await window.electronAPI.removeCdpPort(port).catch(() => {});
+    }
+    await get().checkCdpStatus();
+  },
   checkCdpStatus: async () => {
     try {
       if (window.electronAPI?.checkCdpStatus) {
         const statuses = await window.electronAPI.checkCdpStatus();
         const currentBrowsers = get().browsers;
-        const updated = currentBrowsers.map((b, idx) => {
+
+        // Auto-merge any active ports discovered by backend
+        const knownPorts = new Set(currentBrowsers.map((b) => b.port));
+        const extra: BrowserInstanceInfo[] = [];
+        (statuses || []).forEach((s: any) => {
+          if (!knownPorts.has(s.port)) {
+            extra.push({
+              port: s.port,
+              name: `Browser ${currentBrowsers.length + extra.length + 1}`,
+              enabled: true,
+              connected: !!s.connected,
+              activeJobs: 0,
+              hasProjectOpen: s.hasProjectOpen,
+              browserOpen: s.browserOpen,
+              credits: s.credits,
+              creditsText: s.creditsText,
+              email: s.email,
+              lastChecked: Date.now(),
+            });
+          }
+        });
+
+        const all = [...currentBrowsers, ...extra];
+        const updated = all.map((b, idx) => {
           const match = statuses.find((s: any) => s.port === b.port);
           return {
             ...b,
             name: b.name || `Browser ${idx + 1}`,
             enabled: b.enabled !== undefined ? b.enabled : true,
             connected: match ? match.connected : false,
+            hasProjectOpen: match ? match.hasProjectOpen : false,
+            browserOpen: match ? match.browserOpen : false,
             credits: match && match.credits !== undefined ? match.credits : b.credits,
             creditsText: match && match.creditsText !== undefined ? match.creditsText : b.creditsText,
             email: match && match.email !== undefined ? match.email : b.email,
@@ -1021,6 +1249,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           };
         });
         set({ browsers: updated });
+        try {
+          localStorage.setItem('cdp_ports', JSON.stringify(updated.map((b) => b.port)));
+        } catch {}
       }
     } catch (err) {
       console.warn('[Store] checkCdpStatus error:', err);
@@ -1045,19 +1276,272 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
   customPromptImportModalOpen: false,
   setCustomPromptImportModalOpen: (open) => set({ customPromptImportModalOpen: open }),
+  policyFixModalOpen: false,
+  setPolicyFixModalOpen: (open) => set({ policyFixModalOpen: open }),
   gapCheckerModalOpen: false,
   setGapCheckerModalOpen: (open) => set({ gapCheckerModalOpen: open }),
   batchSceneDeleteModalOpen: false,
   setBatchSceneDeleteModalOpen: (open) => set({ batchSceneDeleteModalOpen: open }),
 
+  getFailedScenes: () => {
+    const { project, flowSettings, flowGenerationMode } = get();
+    const isVideo = flowGenerationMode === 'video' || flowSettings.mode === 'video';
+    return project.scenes.filter((s) => 
+      s.status === 'error' || 
+      (isVideo ? (!s.localVideoPath && s.status !== 'ready') : (!s.localImagePath && s.status !== 'ready'))
+    );
+  },
+  getFailedPromptsText: () => {
+    const failed = get().getFailedScenes();
+    return formatFailedScenesToPromptBatch(failed);
+  },
+  copyFailedPromptsToClipboard: async () => {
+    const failed = get().getFailedScenes();
+    if (failed.length === 0) return 0;
+    const text = formatFailedScenesToPromptBatch(failed);
+    await navigator.clipboard.writeText(text);
+    return failed.length;
+  },
+
   // ─── Global Persistent API Key Pool (Workable until deleted) ───
   voiceMasteringPreset: 'broadcast_studio' as AudioMasteringPreset,
   setVoiceMasteringPreset: (preset) => set({ voiceMasteringPreset: preset }),
+  f5Quality: 'ultra_master' as 'standard' | 'ultra_master' | 'cinema_studio',
+  setF5Quality: (quality) => set({ f5Quality: quality }),
+  enableNaturalBreaths: false,
+  setEnableNaturalBreaths: (enabled) => set({ enableNaturalBreaths: enabled }),
   pronunciationRules: [
-    { id: 'rule-ai', pattern: 'AI', replacement: 'এআই' },
-    { id: 'rule-chatgpt', pattern: 'ChatGPT', replacement: 'চ্যাটজিপিটি' },
-    { id: 'rule-buet', pattern: 'BUET', replacement: 'বুয়েট' },
-    { id: 'rule-nasa', pattern: 'NASA', replacement: 'নাসা' },
+    // ── Lionel Messi name chain ──────────────────────────────────────────────────
+    { id: 'rule-lionel-andres-messi', pattern: 'Lionel Andrés Messi', replacement: 'Leonel Ahndress Messi' },
+    { id: 'rule-lionel-andres-messi-plain', pattern: 'Lionel Andres Messi', replacement: 'Leonel Ahndress Messi' },
+    { id: 'rule-lionel-andres',       pattern: 'Lionel Andrés',        replacement: 'Leonel Ahndress' },
+    { id: 'rule-lionel-andres-plain', pattern: 'Lionel Andres',        replacement: 'Leonel Ahndress' },
+    { id: 'rule-lionel-messi',        pattern: 'Lionel Messi',         replacement: 'Leonel Messi' },
+    { id: 'rule-lionel',              pattern: 'Lionel',               replacement: 'Leonel' },
+    { id: 'rule-andres',              pattern: 'Andrés',               replacement: 'Ahndress' },
+    { id: 'rule-andres-plain',        pattern: 'Andres',               replacement: 'Ahndress' },
+    // ── Jorge & Family ────────────────────────────────────────────────────────────
+    { id: 'rule-jorge-messi',         pattern: 'Jorge Messi',          replacement: 'Horhay Messi' },
+    { id: 'rule-jorge',               pattern: 'Jorge',                replacement: 'Horhay' },
+    { id: 'rule-whore-hay-dot',       pattern: 'Whore. Hay',           replacement: 'Horhay' },
+    { id: 'rule-whore-hay-comma',     pattern: 'whore, Hay',           replacement: 'Horhay' },
+    { id: 'rule-whore-hay-space',     pattern: 'whore hay',            replacement: 'Horhay' },
+    { id: 'rule-hoare-hay',           pattern: 'Hoare, Hay',           replacement: 'Horhay' },
+    { id: 'rule-hoare-hey',           pattern: 'Hoare, Hey',           replacement: 'Horhay' },
+    { id: 'rule-told-hoare-hey',      pattern: 'told Hoare, Hey',      replacement: 'told Horhay' },
+    { id: 'rule-hor-hays',            pattern: "Hor, Hay's",           replacement: "Horhay's" },
+    { id: 'rule-whore-walked',        pattern: 'whenever whore hay walked', replacement: 'whenever Horhay walked' },
+    { id: 'rule-hoare-alone',         pattern: 'Hoare',                replacement: 'Horhay' },
+    { id: 'rule-whore-standalone',    pattern: 'Whore.',               replacement: 'Horhay.' },
+    // ── Club Abanderado Grandoli & Rosario ────────────────────────────────────────
+    { id: 'rule-club-grandoli',       pattern: 'Club Abanderado Grandoli', replacement: 'Club Abanderado Grandoli' },
+    { id: 'rule-abanderado-grandoli', pattern: 'Abanderado Grandoli', replacement: 'Abanderado Grandoli' },
+    { id: 'rule-grandoli',            pattern: 'Grandoli',             replacement: 'Grandoli' },
+    { id: 'rule-grandoli-mistranscribe', pattern: 'Club Ap-Ban de Arachdogran de Ocala', replacement: 'Club Abanderado Grandoli' },
+    { id: 'rule-apban-alone',         pattern: 'Club Ap-Ban',          replacement: 'Club Abanderado' },
+    { id: 'rule-arachdogran',         pattern: 'Arachdogran de Ocala', replacement: 'Grandoli' },
+    { id: 'rule-salvador-aparicio',   pattern: 'Salvador Aparicio',    replacement: 'Salvador Ahpareesio' },
+    { id: 'rule-aparicio',            pattern: 'Aparicio',             replacement: 'Ahpareesio' },
+    { id: 'rule-aparicio-mistranscribe', pattern: 'Akpa Urii Cedo',    replacement: 'Ahpareesio' },
+    { id: 'rule-akpa-urii',           pattern: 'Akpa Urii',            replacement: 'Ahpareesio' },
+    { id: 'rule-cuccittini-full',     pattern: 'Celia Oliveira de Cuccittini', replacement: 'Sehlia Oliveira de Koochiteenee' },
+    { id: 'rule-cuccittini-short',    pattern: 'Celia Oliveira D.',    replacement: 'Sehlia Oliveira de Koochiteenee' },
+    { id: 'rule-cuccittini',          pattern: 'Cuccittini',           replacement: 'Koochiteenee' },
+    { id: 'rule-cuccittini-mis1',     pattern: 'Coo-Chee T. Nee',      replacement: 'Koochiteenee' },
+    { id: 'rule-cuccittini-mis2',     pattern: 'Coo-Chee T.',          replacement: 'Koochiteenee' },
+    { id: 'rule-cuccittini-mis3',     pattern: 'Coo Chee Tis Nee',     replacement: 'Koochiteenee' },
+    { id: 'rule-grandmother-celia',   pattern: 'Grandmother Celia',    replacement: 'Grandmother Sehlia' },
+    { id: 'rule-celia',               pattern: 'Celia',                replacement: 'Sehlia' },
+    { id: 'rule-las-heras',           pattern: 'Las Heras',            replacement: 'Lahs Airahs' },
+    { id: 'rule-las-jarras',          pattern: 'Las Jarras',           replacement: 'Lahs Airahs' },
+    { id: 'rule-las-harras',          pattern: 'las harras',           replacement: 'Lahs Airahs' },
+    { id: 'rule-la-bajada',           pattern: 'La Bajada',            replacement: 'La Bahadah' },
+    { id: 'rule-rosario',             pattern: 'Rosario',              replacement: 'Rosario' },
+    // ── FC Barcelona & Catalunya ──────────────────────────────────────────────────
+    { id: 'rule-la-masia',            pattern: 'La Masia',             replacement: 'La Maseea' },
+    { id: 'rule-la-masia-accent',     pattern: 'La Masía',             replacement: 'La Maseea' },
+    { id: 'rule-la-masia-mis',        pattern: 'At Le Mans, si. Ah',   replacement: 'At La Maseea' },
+    { id: 'rule-le-mans-si',          pattern: 'Le Mans, si',          replacement: 'La Maseea' },
+    { id: 'rule-carles-rexach',       pattern: 'Carles Rexach',        replacement: 'Carles Rehsack' },
+    { id: 'rule-charly-rexach',       pattern: 'Charly Rexach',        replacement: 'Charly Rehsack' },
+    { id: 'rule-rexach',              pattern: 'Rexach',               replacement: 'Rehsack' },
+    { id: 'rule-rexach-mis1',         pattern: 'Carls Ray, Shaq',      replacement: 'Carles Rehsack' },
+    { id: 'rule-rexach-mis2',         pattern: 'ray shack',            replacement: 'Rehsack' },
+    { id: 'rule-rexach-mis3',         pattern: 'Ray, Shaq',            replacement: 'Rehsack' },
+    { id: 'rule-minguella-full',      pattern: 'Josep Maria Minguella', replacement: 'Zhozep Maria Meengelya' },
+    { id: 'rule-minguella',           pattern: 'Minguella',            replacement: 'Meengelya' },
+    { id: 'rule-minguella-mis',       pattern: 'Joe Zepma, Ri, Amin, Gi, Ya', replacement: 'Zhozep Maria Meengelya' },
+    { id: 'rule-minguella-mis-short', pattern: 'Joe Zepma',            replacement: 'Zhozep Maria Meengelya' },
+    { id: 'rule-montjuic',            pattern: 'Montjuïc',             replacement: 'Monzhooek' },
+    { id: 'rule-montjuic-plain',      pattern: 'Montjuic',             replacement: 'Monzhooek' },
+    { id: 'rule-montjuic-mis',        pattern: 'Mon, Joux, Icke',      replacement: 'Monzhooek' },
+    { id: 'rule-mini-estadi',         pattern: 'Mini Estadi',          replacement: 'Meenee Estahdee' },
+    { id: 'rule-mini-estadi-mis',     pattern: 'Miniez, THD',          replacement: 'Meenee Estahdee' },
+    { id: 'rule-miniez-alone',        pattern: 'Miniez',               replacement: 'Meenee Estahdee' },
+    { id: 'rule-pompeia-club',        pattern: 'Pompeia Tennis Club',  replacement: 'Pompeia Tennis Club' },
+    { id: 'rule-pompeia',             pattern: 'Pompeia',              replacement: 'Pompeia' },
+    { id: 'rule-camp-nou',            pattern: 'Camp Nou',             replacement: 'Camp Noh' },
+    { id: 'rule-camp-nou-mis',        pattern: 'The Camp No',          replacement: 'The Camp Noh' },
+    { id: 'rule-albacete',            pattern: 'Albacete',             replacement: 'Albahseteh' },
+    { id: 'rule-albacete-mis',        pattern: 'Al, bah, Sicti',       replacement: 'Albahseteh' },
+    { id: 'rule-ronaldinho',          pattern: 'Ronaldinho',           replacement: 'Ronaldeenyo' },
+    { id: 'rule-ronaldinho-mis',      pattern: 'Ronald Dean Yeo',      replacement: 'Ronaldeenyo' },
+    { id: 'rule-ronald-dean-yo',      pattern: 'ronald dean yo',       replacement: 'Ronaldeenyo' },
+    { id: 'rule-ronald-dean',         pattern: 'Ronald Dean',          replacement: 'Ronaldeenyo' },
+    { id: 'rule-el-clasico',          pattern: 'El Clásico',           replacement: 'El Klaseeko' },
+    { id: 'rule-el-clasico-plain',    pattern: 'El Clasico',           replacement: 'El Klaseeko' },
+    { id: 'rule-el-clasico-mis',      pattern: 'El Claw, C',           replacement: 'El Klaseeko' },
+    { id: 'rule-madridistas',         pattern: 'Madridistas',          replacement: 'Madreedeestas' },
+    { id: 'rule-madridistas-mis',     pattern: 'Ma, Dree, D.E.S., Taz', replacement: 'Madreedeestas' },
+    { id: 'rule-pecho-frio',          pattern: 'Pecho frío',           replacement: 'Pehcho Freeoh' },
+    { id: 'rule-pecho-frio-plain',    pattern: 'Pecho frio',           replacement: 'Pehcho Freeoh' },
+    { id: 'rule-pecho-frio-mis1',     pattern: 'P. Chofri, O.',        replacement: 'Pehcho Freeoh' },
+    { id: 'rule-pecho-frio-mis2',     pattern: 'Pecho chofri',         replacement: 'Pehcho Freeoh' },
+    { id: 'rule-pecho-free-o',        pattern: 'Pecho free o',         replacement: 'Pehcho Freeoh' },
+    { id: 'rule-chofri',              pattern: 'Chofri',               replacement: 'Freeoh' },
+    { id: 'rule-puede-ser-hoy',       pattern: 'Puede ser hoy, abuela', replacement: 'Pwehdeh sehr oy, ahbwehlah' },
+    { id: 'rule-puede-ser-hoy-mis',   pattern: 'Pwik deserwai a pwekla', replacement: 'Pwehdeh sehr oy, ahbwehlah' },
+    { id: 'rule-ya-esta',             pattern: 'Ya está',              replacement: 'Yah esstah' },
+    { id: 'rule-ya-esta-plain',       pattern: 'Ya esta',              replacement: 'Yah esstah' },
+    { id: 'rule-ya-esta-mis',         pattern: 'Yais, ta',             replacement: 'Yah esstah' },
+    { id: 'rule-no-te-vayas-lio',     pattern: 'No te vayas, Lio',     replacement: 'Noh teh Vahyahs, Leeoh' },
+    { id: 'rule-yerba-mate',          pattern: 'yerba mate',           replacement: 'yerba mahteh' },
+    { id: 'rule-sipping-mate',        pattern: 'sipping mate',         replacement: 'sipping mahteh' },
+    { id: 'rule-sipping-ma-tis',      pattern: 'sipping ma Tis set their gourds', replacement: 'sipping mahteh, set their gourds' },
+    { id: 'rule-warm-ma-tea',         pattern: 'warm ma tea',          replacement: 'warm mahteh' },
+    { id: 'rule-ma-tea',              pattern: 'ma tea',               replacement: 'mahteh' },
+    { id: 'rule-drinking-mate',       pattern: 'drinking mate',        replacement: 'drinking mahteh' },
+    { id: 'rule-pique-fabregas-mis',  pattern: 'Gerard P., Kay and Seskfa, Bragas', replacement: 'Zherar Peekay and Sesk Fahbregas' },
+    { id: 'rule-gerard-pique-mis',    pattern: 'Gerard P., Kay',       replacement: 'Zherar Peekay' },
+    { id: 'rule-piquet',              pattern: 'Gerard Piqué',         replacement: 'Zherar Peekay' },
+    { id: 'rule-piquet-plain',        pattern: 'Gerard Pique',         replacement: 'Zherar Peekay' },
+    { id: 'rule-pique',               pattern: 'Piqué',                replacement: 'Peekay' },
+    { id: 'rule-pique-plain',         pattern: 'Pique',                replacement: 'Peekay' },
+    { id: 'rule-fabregas-mis',        pattern: 'Seskfa, Bragas',       replacement: 'Sesk Fahbregas' },
+    { id: 'rule-fabregas',            pattern: 'Cesc Fàbregas',        replacement: 'Sesk Fahbregas' },
+    { id: 'rule-fabregas-plain-full', pattern: 'Cesc Fabregas',        replacement: 'Sesk Fahbregas' },
+    { id: 'rule-fabregas-accent',     pattern: 'Fàbregas',             replacement: 'Fahbregas' },
+    { id: 'rule-fabregas-plain',      pattern: 'Fabregas',             replacement: 'Fahbregas' },
+    { id: 'rule-el-mudo',             pattern: 'El Mudo',              replacement: 'El Moodo' },
+    { id: 'rule-el-mudo-mis',         pattern: 'El Mou, Do',           replacement: 'El Moodo' },
+    { id: 'rule-copa-catalunya-mis',  pattern: 'Copica, to Lugna',     replacement: 'Copa Katalunya' },
+    { id: 'rule-copa-catalunya',      pattern: 'Copa Catalunya',       replacement: 'Copa Katalunya' },
+    { id: 'rule-copa-america',        pattern: 'Copa América',         replacement: 'Copa Amehreeka' },
+    { id: 'rule-copa-america-plain',  pattern: 'Copa America',         replacement: 'Copa Amehreeka' },
+    { id: 'rule-copa-ama-rica',       pattern: 'Copa AMA RICA',        replacement: 'Copa Amehreeka' },
+    { id: 'rule-chylon-penalties',    pattern: 'Chylon Penalties',     replacement: 'Cheelay on penalties' },
+    { id: 'rule-chylon',              pattern: 'Chylon',               replacement: 'Cheelay' },
+    { id: 'rule-di-maria',            pattern: 'Ángel Di María',       replacement: 'Anhel Dee Maria' },
+    { id: 'rule-di-maria-plain',      pattern: 'Angel Di Maria',       replacement: 'Anhel Dee Maria' },
+    { id: 'rule-di-maria-short',      pattern: 'Di María',             replacement: 'Dee Maria' },
+    { id: 'rule-di-maria-short-plain', pattern: 'Di Maria',            replacement: 'Dee Maria' },
+    { id: 'rule-di-maria-mis1',       pattern: 'An Hel die Maria',     replacement: 'Anhel Dee Maria' },
+    { id: 'rule-di-maria-mis2',       pattern: 'An Hel Di Maria',      replacement: 'Anhel Dee Maria' },
+    { id: 'rule-an-hel',              pattern: 'An Hel',               replacement: 'Anhel' },
+    { id: 'rule-montiel',             pattern: 'Gonzalo Montiel',      replacement: 'Gonzahlo Monteeel' },
+    { id: 'rule-montiel-short',       pattern: 'Montiel',              replacement: 'Monteeel' },
+    { id: 'rule-montiel-mis',         pattern: 'Gan Zah, Loman, T, L', replacement: 'Gonzahlo Monteeel' },
+    { id: 'rule-gan-zah-loman',       pattern: 'Gan Zah, Loman',       replacement: 'Gonzahlo Monteeel' },
+    { id: 'rule-mbappe-full',         pattern: 'Kylian Mbappé',        replacement: 'Keelean Embapay' },
+    { id: 'rule-mbappe-full-plain',   pattern: 'Kylian Mbappe',        replacement: 'Keelean Embapay' },
+    { id: 'rule-mbappe',              pattern: 'Mbappé',               replacement: 'Embapay' },
+    { id: 'rule-mbappe-plain',        pattern: 'Mbappe',               replacement: 'Embapay' },
+    { id: 'rule-mbappe-mis-answered', pattern: 'M. Baugh pay-answered', replacement: 'Embapay answered' },
+    { id: 'rule-mbappe-mis1',         pattern: 'M. Baugh pay',         replacement: 'Embapay' },
+    { id: 'rule-baugh-pay',           pattern: 'Baugh pay',            replacement: 'Embapay' },
+    { id: 'rule-lloris',              pattern: 'Hugo Lloris',          replacement: 'Oogo Lorees' },
+    { id: 'rule-lloris-short',        pattern: 'Lloris',               replacement: 'Lorees' },
+    { id: 'rule-lloris-mis',          pattern: 'Hugo Lyo, Riz',        replacement: 'Oogo Lorees' },
+    { id: 'rule-boateng-full',        pattern: 'Jérôme Boateng',       replacement: 'Zherohm Bohteng' },
+    { id: 'rule-boateng-full-plain',  pattern: 'Jerome Boateng',       replacement: 'Zherohm Bohteng' },
+    { id: 'rule-boateng',             pattern: 'Boateng',              replacement: 'Bohteng' },
+    { id: 'rule-boateng-mis-beau',    pattern: 'Jacques Rome, beau. A tang', replacement: 'Zherohm Bohteng' },
+    { id: 'rule-boateng-mis1',        pattern: 'Jacques Rome, Boating', replacement: 'Zherohm Bohteng' },
+    { id: 'rule-boateng-mis2',        pattern: 'Jacques Rome',         replacement: 'Zherohm Bohteng' },
+    { id: 'rule-boating-possessive',  pattern: "Boating's",            replacement: "Bohteng's" },
+    { id: 'rule-boating',             pattern: 'Boating',              replacement: 'Bohteng' },
+    { id: 'rule-neuer-full',          pattern: 'Manuel Neuer',         replacement: 'Manuel Noyer' },
+    { id: 'rule-neuer',               pattern: 'Neuer',                replacement: 'Noyer' },
+    { id: 'rule-neuer-mis1',          pattern: 'Manuel Noy',           replacement: 'Manuel Noyer' },
+    { id: 'rule-gotze',               pattern: 'Mario Götze',          replacement: 'Mario Gohtzeh' },
+    { id: 'rule-gotze-plain',         pattern: 'Mario Gotze',          replacement: 'Mario Gohtzeh' },
+    { id: 'rule-eto-o',               pattern: "Eto'o",                replacement: 'Eto' },
+    { id: 'rule-henry-eto-o',         pattern: "Henry and Eto'o",      replacement: 'Ahnree and Eto' },
+    { id: 'rule-henry-eto-o-mis',     pattern: 'Henry and Ito-o',      replacement: 'Ahnree and Eto' },
+    { id: 'rule-eto-o-mis',           pattern: 'Ito-o',                replacement: 'Eto' },
+    { id: 'rule-thierry-henry',       pattern: 'Thierry Henry',        replacement: 'Teeary Ahnree' },
+    { id: 'rule-bisht',               pattern: 'bisht',                replacement: 'beesht' },
+    { id: 'rule-besht',               pattern: 'besht',                replacement: 'beesht' },
+    { id: 'rule-ballon-dor',          pattern: "Ballon d'Or",          replacement: 'Ballon Dor' },
+    { id: 'rule-ballon-dor-mis',      pattern: 'Ba Lawn Door',         replacement: 'Ballon Dor' },
+    { id: 'rule-maquina-87',          pattern: 'La Máquina del 87',    replacement: 'La Mahkeena del eighty-seven' },
+    { id: 'rule-maquina-87-plain',    pattern: 'La Maquina del 87',    replacement: 'La Mahkeena del eighty-seven' },
+    { id: 'rule-maquina-mis',         pattern: 'La Monqueen Adele',    replacement: 'La Mahkeena del eighty-seven' },
+    { id: 'rule-el-espanol',          pattern: 'El Español',           replacement: 'El Espanyol' },
+    { id: 'rule-el-espanol-plain',    pattern: 'El Espanol',           replacement: 'El Espanyol' },
+    { id: 'rule-el-espanol-mis',      pattern: 'Iles Ponyol',          replacement: 'El Espanyol' },
+    { id: 'rule-guardiola-full',      pattern: 'Pep Guardiola',        replacement: 'Pep Gwardiola' },
+    { id: 'rule-guardiola',           pattern: 'Guardiola',            replacement: 'Gwardiola' },
+    { id: 'rule-schwarzstein-full',   pattern: 'Diego Schwarzstein',   replacement: 'Diego Shvartshtine' },
+    { id: 'rule-schwarzstein',        pattern: 'Schwarzstein',         replacement: 'Shvartshtine' },
+    { id: 'rule-schwarzstein-mis',    pattern: 'Schwarstein',          replacement: 'Shvartshtine' },
+    { id: 'rule-bayern-munich',       pattern: 'Bayern Munich',        replacement: 'Bayern Myoonik' },
+    { id: 'rule-real-madrid',         pattern: 'Real Madrid',          replacement: 'Real Madrid' },
+    { id: 'rule-lusail',              pattern: 'Lusail',               replacement: 'Loosail' },
+    { id: 'rule-maracana',            pattern: 'Maracanã',             replacement: 'Marakanah' },
+    { id: 'rule-maracana-plain',      pattern: 'Maracana',             replacement: 'Marakanah' },
+    { id: 'rule-parana',              pattern: 'Paraná River',         replacement: 'Parana River' },
+    { id: 'rule-parana-plain',        pattern: 'Parana River',         replacement: 'Parana River' },
+    { id: 'rule-parana-short',        pattern: 'Paraná',               replacement: 'Parana' },
+    { id: 'rule-parana-short-plain',  pattern: 'Parana',               replacement: 'Parana' },
+    { id: 'rule-gerd-muller',         pattern: 'Gerd Müller',          replacement: 'Gairt Myooler' },
+    { id: 'rule-gerd-muller-plain',   pattern: 'Gerd Muller',          replacement: 'Gairt Myooler' },
+    { id: 'rule-scaloni',             pattern: 'Lionel Scaloni',       replacement: 'Leonel Skahlohnee' },
+    { id: 'rule-scaloni-short',       pattern: 'Scaloni',              replacement: 'Skahlohnee' },
+    { id: 'rule-antonella',           pattern: 'Antonella',            replacement: 'Antonela' },
+    { id: 'rule-antonela',            pattern: 'Antonela',             replacement: 'Antonela' },
+    { id: 'rule-obelisco',            pattern: 'Obelisco',             replacement: 'Obelisco' },
+    { id: 'rule-newells',             pattern: "Newell's Old Boys",    replacement: 'Newells Old Boys' },
+    { id: 'rule-newells-short',       pattern: "Newell's",             replacement: 'Newells' },
+    { id: 'rule-newells-plain',       pattern: 'Newells Old Boys',     replacement: 'Newells Old Boys' },
+    { id: 'rule-river-plate',         pattern: 'River Plate',          replacement: 'River Plate' },
+    { id: 'rule-tiki-taka',           pattern: 'tiki-taka',            replacement: 'Teekeetahka' },
+    { id: 'rule-tiki-taka-space',     pattern: 'tiki taka',            replacement: 'Teekeetahka' },
+    { id: 'rule-sextuple',            pattern: 'sextuple',             replacement: 'sekstoopuhl' },
+    // ── Lamine Yamal & Teammates ───────────────────────────────────────────────────
+    { id: 'rule-lamine-yamal-full',   pattern: 'Lamine Yamal Nasraoui Ebana', replacement: 'Luhmeen Yamal Nasrawee Ebana' },
+    { id: 'rule-lamine-yamal',        pattern: 'Lamine Yamal',         replacement: 'Luhmeen Yamal' },
+    { id: 'rule-lamine',              pattern: 'Lamine',               replacement: 'Luhmeen' },
+    { id: 'rule-sheila-ebana',        pattern: 'Sheila Ebana',         replacement: 'Shayla Ebana' },
+    { id: 'rule-mounir-nasraoui',     pattern: 'Mounir Nasraoui',      replacement: 'Muneer Nasrawee' },
+    { id: 'rule-nasraoui',            pattern: 'Nasraoui',             replacement: 'Nasrawee' },
+    { id: 'rule-esplugues',           pattern: 'Esplugues de Llobregat', replacement: 'Esplugas deh Lyobregat' },
+    { id: 'rule-granollers',          pattern: 'Granollers',           replacement: 'Granoyers' },
+    { id: 'rule-mataro',              pattern: 'Mataró',               replacement: 'Mahtaro' },
+    { id: 'rule-mataro-plain',        pattern: 'Mataro',               replacement: 'Mahtaro' },
+    { id: 'rule-ferran-torres',       pattern: 'Ferran Torres',        replacement: 'Ferran Torres' },
+    { id: 'rule-xavi',                pattern: 'Xavi',                 replacement: 'Shahvee' },
+    { id: 'rule-iniesta',             pattern: 'Iniesta',              replacement: 'Eeneestah' },
+    // ── London & Historical Documentary Phonetic Corrections ───────────────────────
+    { id: 'rule-river-thames',        pattern: 'River Thames',         replacement: 'River Temz' },
+    { id: 'rule-thames',              pattern: 'Thames',               replacement: 'Temz' },
+    { id: 'rule-bazalgette',          pattern: 'Bazalgette',           replacement: 'Bazeljet' },
+    { id: 'rule-cholera',             pattern: 'Cholera',              replacement: 'Kolera' },
+    { id: 'rule-cholera-lc',          pattern: 'cholera',              replacement: 'kolera' },
+    { id: 'rule-gardyloo',            pattern: 'gardyloo',             replacement: 'gardyloo' },
+    { id: 'rule-privies',             pattern: 'privies',              replacement: 'prihveez' },
+    { id: 'rule-privy',               pattern: 'privy',                replacement: 'prihvee' },
+    { id: 'rule-harington',           pattern: 'Harington',            replacement: 'Harrington' },
+    { id: 'rule-miasma',              pattern: 'miasma',               replacement: 'myazmuh' },
+    { id: 'rule-cesspit',             pattern: 'cesspit',              replacement: 'sesspit' },
+    { id: 'rule-cistern',             pattern: 'cistern',              replacement: 'sistern' },
+    { id: 'rule-edinburgh',           pattern: 'Edinburgh',            replacement: 'Edinburuh' },
+    { id: 'rule-mps',                 pattern: 'MPs',                  replacement: "M-P's" },
+    // ── English Tech Acronym Expansions ───────────────────────────────────────────
+    { id: 'rule-ai',      pattern: 'AI',      replacement: 'A-I', caseSensitive: true },
+    { id: 'rule-chatgpt', pattern: 'ChatGPT', replacement: 'Chat G-P-T' },
+    { id: 'rule-buet',    pattern: 'BUET',    replacement: 'B-U-E-T' },
+    { id: 'rule-nasa',    pattern: 'NASA',    replacement: 'NASA' },
   ],
   setPronunciationRules: (rules) => set({ pronunciationRules: rules }),
 
@@ -1233,7 +1717,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           return {
             ...scene,
             prompt: newPrompt,
-            status: hasMedia ? ('ready' as const) : (scene.status || 'pending'),
+            status: hasMedia ? ('ready' as const) : ('pending' as const),
+            errorMessage: undefined,
             localImagePath: scene.localImagePath,
             imageUrl: scene.imageUrl || (scene.localImagePath ? `media://${scene.localImagePath.replace(/\\/g, '/')}` : undefined),
             localVideoPath: scene.localVideoPath,
@@ -1588,6 +2073,21 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     get().saveCurrentProject();
   },
 
+  setCaptionScale: (scale) => {
+    const clamped = Math.max(0.5, Math.min(2.5, +(scale).toFixed(2)));
+    set((state) => ({
+      project: {
+        ...state.project,
+        metadata: {
+          ...state.project.metadata,
+          captionScale: clamped,
+          updatedAt: Date.now(),
+        },
+      },
+    }));
+    get().saveCurrentProject();
+  },
+
   autoGenerateSubtitlesFromVoiceover: async (audioPath?: string) => {
     const { project } = get();
     const targetAudio =
@@ -1656,7 +2156,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
         return {
           ...scene,
-          subtitles: sceneWords,
+          subtitles: sceneWords.length > 0 ? sceneWords : (scene.subtitles || []),
         };
       });
 
@@ -1687,6 +2187,164 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       return {
         success: false,
         error: err.message || 'Speech transcription failed.',
+      };
+    } finally {
+      set({ isTranscribingSubtitles: false });
+    }
+  },
+
+  regenerateUntranscribedSubtitles: async (targetSceneIds?: string[]) => {
+    const { project } = get();
+    const targetAudio =
+      project.metadata.audioPath ||
+      project.metadata.audioClips?.find((c) => c.track === 'A1' || c.category === 'voiceover')?.filePath ||
+      project.metadata.mediaAssets?.find((m) => m.type === 'voiceover')?.path;
+
+    if (!targetAudio) {
+      return { success: false, error: 'No voiceover audio found on Track A1 or project assets.' };
+    }
+
+    // Determine target scenes that need transcription
+    const candidateScenes = targetSceneIds && targetSceneIds.length > 0
+      ? project.scenes.filter((s) => targetSceneIds.includes(s.id))
+      : project.scenes.filter((s) => !s.subtitles || s.subtitles.length === 0);
+
+    if (candidateScenes.length === 0) {
+      return { success: true, wordsCount: 0, filledScenes: 0 };
+    }
+
+    set({ isTranscribingSubtitles: true });
+    try {
+      if (!window.electronAPI?.transcribeAudioRange && !window.electronAPI?.transcribeAudioFile) {
+        return { success: false, error: 'Audio transcription is not available in this environment.' };
+      }
+
+      const settings = window.electronAPI.getSettings ? await window.electronAPI.getSettings() : {};
+      const geminiKey = settings?.geminiApiKey;
+      const groqKey = settings?.groqApiKey;
+      const openaiKey = settings?.openaiApiKey;
+
+      let provider: 'groq' | 'openai' | 'gemini' = 'gemini';
+      let apiKey: string | undefined = geminiKey;
+      if (groqKey) {
+        provider = 'groq';
+        apiKey = groqKey;
+      } else if (openaiKey) {
+        provider = 'openai';
+        apiKey = openaiKey;
+      }
+
+      // Group candidate scenes into contiguous time clusters to minimize API requests
+      const sortedCandidates = [...candidateScenes].sort((a, b) => a.startInSeconds - b.startInSeconds);
+
+      interface TimeCluster {
+        scenes: typeof candidateScenes;
+        start: number;
+        end: number;
+      }
+
+      const clusters: TimeCluster[] = [];
+      for (const scene of sortedCandidates) {
+        const sceneStart = scene.startInSeconds;
+        const sceneEnd = scene.startInSeconds + scene.durationInSeconds;
+        const lastCluster = clusters[clusters.length - 1];
+
+        // If adjacent or small gap (< 3.0s) and total cluster duration <= 180s, merge
+        if (lastCluster && sceneStart - lastCluster.end < 3.0 && (sceneEnd - lastCluster.start) <= 180) {
+          lastCluster.scenes.push(scene);
+          lastCluster.end = Math.max(lastCluster.end, sceneEnd);
+        } else {
+          clusters.push({
+            scenes: [scene],
+            start: sceneStart,
+            end: sceneEnd,
+          });
+        }
+      }
+
+      let totalNewWords = 0;
+      let filledScenesCount = 0;
+      const updatedScenes = [...project.scenes];
+
+      // Process each cluster with safe timing to prevent rate limits
+      for (let i = 0; i < clusters.length; i++) {
+        const cluster = clusters[i];
+        const dur = +(cluster.end - cluster.start).toFixed(3);
+        if (dur <= 0.2) continue;
+
+        console.log(`[Subtitles] Regenerating untranscribed area ${i + 1}/${clusters.length}: ${cluster.start.toFixed(1)}s to ${cluster.end.toFixed(1)}s (${cluster.scenes.length} scenes)...`);
+
+        let result: any = null;
+        if (window.electronAPI.transcribeAudioRange) {
+          result = await window.electronAPI.transcribeAudioRange(
+            targetAudio,
+            cluster.start,
+            dur,
+            apiKey,
+            provider,
+            project.metadata.fps || 30
+          );
+        }
+
+        if (result && result.words && result.words.length > 0) {
+          const clusterWords = result.words;
+          totalNewWords += clusterWords.length;
+
+          for (const s of cluster.scenes) {
+            const sStart = s.startInSeconds;
+            const sEnd = s.startInSeconds + s.durationInSeconds;
+            const sWords = clusterWords.filter(
+              (w: any) => w.start >= sStart - 0.2 && w.start < sEnd
+            );
+            if (sWords.length > 0) {
+              const idx = updatedScenes.findIndex((item) => item.id === s.id);
+              if (idx !== -1) {
+                updatedScenes[idx] = {
+                  ...updatedScenes[idx],
+                  subtitles: sWords,
+                };
+                filledScenesCount++;
+              }
+            }
+          }
+        }
+
+        // Polite pause between clusters to strictly obey Groq rate limits
+        if (i < clusters.length - 1) {
+          await new Promise((r) => setTimeout(r, 3200));
+        }
+      }
+
+      const updatedMetadata = {
+        ...project.metadata,
+        captionStyle: (project.metadata.captionStyle && project.metadata.captionStyle !== 'none')
+          ? project.metadata.captionStyle
+          : ('documentary' as const),
+        updatedAt: Date.now(),
+      };
+
+      set({
+        project: {
+          ...project,
+          scenes: updatedScenes,
+          metadata: updatedMetadata,
+        },
+      });
+
+      get().saveCurrentProject();
+
+      return {
+        success: true,
+        wordsCount: totalNewWords,
+        filledScenes: filledScenesCount,
+      };
+    } catch (err: any) {
+      console.error('Failed to regenerate untranscribed subtitles:', err);
+      return {
+        success: false,
+        error: err.message || 'Regeneration failed.',
+        wordsCount: 0,
+        filledScenes: 0,
       };
     } finally {
       set({ isTranscribingSubtitles: false });
@@ -1825,8 +2483,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
     const placementTime = dropTime !== undefined ? Math.max(0, dropTime) : currentTime;
 
-    // 1. Overlay Video & Image Tracks (V2, V3)
-    if (targetTrack === 'V2' || targetTrack === 'V3') {
+    // 1. Overlay Video & Image Tracks (V2, V3, V4, V5)
+    if (targetTrack === 'V2' || targetTrack === 'V3' || targetTrack === 'V4' || targetTrack === 'V5') {
       const isVideo = asset.type === 'video' || asset.path.toLowerCase().endsWith('.mp4') || asset.path.toLowerCase().endsWith('.mov') || asset.path.toLowerCase().endsWith('.webm');
       get().addOverlayClip({
         name: asset.name,
@@ -1969,6 +2627,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const existing = state.project.metadata.overlayClips || [];
       const currentMutes = state.project.metadata.trackMutes || {};
       return {
+        selectedOverlayClipId: newClip.id,
         project: {
           ...state.project,
           metadata: {
@@ -1986,7 +2645,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     get().saveCurrentProject();
   },
 
-  updateOverlayClip: (id, updates) => {
+  updateOverlayClip: (id, updates, skipSave = false) => {
     set((state) => {
       const existing = state.project.metadata.overlayClips || [];
       const updated = existing.map((c) => (c.id === id ? { ...c, ...updates } : c));
@@ -2001,7 +2660,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         },
       };
     });
-    get().saveCurrentProject();
+    if (!skipSave) {
+      get().saveCurrentProject();
+    }
   },
 
   deleteOverlayClip: (id) => {
@@ -2009,6 +2670,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       const existing = state.project.metadata.overlayClips || [];
       const remaining = existing.filter((c) => c.id !== id);
       return {
+        selectedOverlayClipId: state.selectedOverlayClipId === id ? null : state.selectedOverlayClipId,
         project: {
           ...state.project,
           metadata: {
@@ -2022,7 +2684,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     get().saveCurrentProject();
   },
 
-  moveOverlayClip: (id, newStartTime) => {
+  moveOverlayClip: (id, newStartTime, skipSave = false) => {
     set((state) => {
       const existing = state.project.metadata.overlayClips || [];
       const updated = existing.map((c) =>
@@ -2039,7 +2701,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         },
       };
     });
-    get().saveCurrentProject();
+    if (!skipSave) {
+      get().saveCurrentProject();
+    }
   },
 
   // Freeform Audio Clips
@@ -3054,10 +3718,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   autoRemapPlacements: async () => {
-    const { project, updateScene, setProject } = get();
+    const { project, updateScene, setProject, pushUndoSnapshot } = get();
     if (!window.electronAPI?.autoRemapCanvasPlacements) {
       return { remappedCount: 0, summary: 'Electron API unavailable.' };
     }
+    pushUndoSnapshot('Auto-Remap Canvas Placements');
 
     try {
       const res = await window.electronAPI.autoRemapCanvasPlacements(
@@ -3828,11 +4493,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   autoArrangeExistingScenes: () => {
-    const { project, setProject } = get();
+    const { project, setProject, pushUndoSnapshot } = get();
     const scenes = [...project.scenes];
     if (scenes.length === 0) {
       return { count: 0, warnings: ['Timeline has no scenes to sort.'] };
     }
+
+    pushUndoSnapshot('Sort Timeline Chronologically');
 
     const trueAudioDuration = 
       project.metadata.mediaAssets?.find((a) => a.type === 'voiceover' && a.duration)?.duration ||
@@ -3893,8 +4560,11 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         }
       }
 
-      const words = (item.scene.prompt || '').split(/\s+/).filter(Boolean);
-      const totalWords = words.length || 1;
+      const bracketMatch = (item.scene.prompt || '').match(/\[(.*?)\]/);
+      const speechWords = bracketMatch ? bracketMatch[1].trim().split(/\s+/).filter(Boolean) : [];
+      const rawWords = (item.scene.prompt || '').split(/\s+/).filter(Boolean);
+      const wordsToUse = speechWords.length > 0 ? speechWords : (item.scene.subtitles && item.scene.subtitles.length > 0 ? item.scene.subtitles.map(s => s.word) : rawWords);
+      const totalWords = wordsToUse.length || 1;
       const wordDur = Math.max(0.24, dur / totalWords);
 
       return {
@@ -3902,12 +4572,12 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         order: idx, // Sequential 0, 1, 2, ... N-1
         startInSeconds: start,
         durationInSeconds: dur,
-        subtitles: item.scene.subtitles && item.scene.subtitles.length > 0
-          ? item.scene.subtitles.map((sub, sIdx) => {
+        subtitles: wordsToUse.length > 0
+          ? wordsToUse.map((word, sIdx) => {
               const wStart = Math.min(start + dur - 0.1, start + sIdx * wordDur);
               const wEnd = Math.min(start + dur, wStart + wordDur * 0.95);
               return {
-                word: sub.word,
+                word,
                 start: +(Math.round(wStart * fps) / fps).toFixed(3),
                 end: +(Math.round(wEnd * fps) / fps).toFixed(3),
               };
@@ -3935,7 +4605,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   alignScenesToVoiceover: async (options) => {
-    const { project, setProject } = get();
+    const { project, setProject, pushUndoSnapshot } = get();
     if (!window.electronAPI?.alignScenesToVoice) {
       return { success: false, count: 0, method: 'none', message: 'Electron API is not available in browser mode.' };
     }
@@ -3943,6 +4613,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!project.scenes || project.scenes.length === 0) {
       return { success: false, count: 0, method: 'none', message: 'No scenes in timeline to align.' };
     }
+
+    pushUndoSnapshot('Align Scenes to Voiceover');
 
     // Resolve voiceover audio path
     const voiceAsset = project.metadata.mediaAssets?.find((a) => a.type === 'voiceover' && a.path);
@@ -4191,13 +4863,30 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
             ? 'Chatterbox'
             : 'Neural';
 
-        set({ ttsProgressMessage: `Synthesizing with ${engineLabel}...` });
+        set({ 
+          ttsProgressMessage: `Synthesizing with ${engineLabel}...`,
+          ttsProgressData: { percent: 2, elapsedSec: 0, message: `Starting synthesis with ${engineLabel}...` }
+        });
+
+        // Register live TTS progress listener
+        let unlistenProgress: (() => void) | undefined;
+        if (window.electronAPI?.onTTSProgress) {
+          unlistenProgress = window.electronAPI.onTTSProgress((prog: TTSProgressData) => {
+            set((s) => ({
+              ttsProgressData: prog,
+              ttsProgressMessage: prog.chunk && prog.total
+                ? `Synthesizing chunk ${prog.chunk}/${prog.total} (${prog.percent.toFixed(0)}%)`
+                : prog.message || s.ttsProgressMessage,
+            }));
+          });
+        }
 
         // Apply pronunciation rules
         let cleanText = req.text;
         for (const rule of get().pronunciationRules) {
           if (rule.pattern && rule.replacement) {
-            const regex = new RegExp(`\\b${rule.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, rule.caseSensitive ? 'g' : 'gi');
+            const escaped = rule.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, rule.caseSensitive ? 'gu' : 'giu');
             cleanText = cleanText.replace(regex, rule.replacement);
           }
         }
@@ -4209,18 +4898,25 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         // Enforce character limit for selected voice engine
         const limitCheck = validateVoiceText(speechCleanText, req.engine);
         if (!limitCheck.isValid) {
-          set({ isGeneratingTTS: false, ttsProgressMessage: null });
+          if (unlistenProgress) unlistenProgress();
+          set({ isGeneratingTTS: false, ttsProgressMessage: null, ttsProgressData: null });
           return {
             success: false,
             error: limitCheck.errorMessage || `Script exceeds the ${limitCheck.maxChars} character limit for this voice model.`,
           };
         }
 
-        // Auto-inject apiKey from global store if not supplied
         const effectiveReq: TTSGenerationRequest = {
           ...req,
           text: speechCleanText,
           emotion: effectiveEmotion,
+          f5Quality: req.f5Quality || get().f5Quality,
+          odeSteps: req.odeSteps || (
+            (req.f5Quality || get().f5Quality) === 'cinema_studio' ? 64 :
+            (req.f5Quality || get().f5Quality) === 'ultra_master' ? 48 : 32
+          ),
+          enableNaturalBreaths: req.enableNaturalBreaths ?? get().enableNaturalBreaths,
+          seed: req.seed,
           masteringPreset: req.masteringPreset || get().voiceMasteringPreset,
           apiKey:
             req.apiKey ||
@@ -4234,31 +4930,39 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
               : undefined),
         };
 
-        const result: TTSGenerationResult = await window.electronAPI.generateSpeech(effectiveReq);
-        if (result.success && result.audioPath) {
-          if (result.record) {
-            set((s) => ({
-              voiceHistory: [result.record!, ...s.voiceHistory.filter((r) => r.id !== result.record!.id)],
-              activeVoiceAudio: result.record,
-              lastGeneratedTTSAudioPath: result.audioPath,
-              isGeneratingTTS: false,
-              ttsProgressMessage: null,
-            }));
+        try {
+          const result: TTSGenerationResult = await window.electronAPI.generateSpeech(effectiveReq);
+          if (unlistenProgress) unlistenProgress();
+
+          if (result.success && result.audioPath) {
+            if (result.record) {
+              set((s) => ({
+                voiceHistory: [result.record!, ...s.voiceHistory.filter((r) => r.id !== result.record!.id)],
+                activeVoiceAudio: result.record,
+                lastGeneratedTTSAudioPath: result.audioPath,
+                isGeneratingTTS: false,
+                ttsProgressMessage: null,
+                ttsProgressData: null,
+              }));
+            } else {
+              set({
+                lastGeneratedTTSAudioPath: result.audioPath,
+                isGeneratingTTS: false,
+                ttsProgressMessage: null,
+                ttsProgressData: null,
+              });
+            }
+            return result;
           } else {
-            set({
-              lastGeneratedTTSAudioPath: result.audioPath,
-              isGeneratingTTS: false,
-              ttsProgressMessage: null,
-            });
+            throw new Error(result.error || 'Failed to generate voiceover audio.');
           }
-          return result;
-        } else {
-          throw new Error(result.error || 'Failed to generate voiceover audio.');
+        } finally {
+          if (unlistenProgress) unlistenProgress();
         }
       }
       throw new Error('TTS API is not available.');
     } catch (err: any) {
-      set({ isGeneratingTTS: false, ttsProgressMessage: null });
+      set({ isGeneratingTTS: false, ttsProgressMessage: null, ttsProgressData: null });
       return { success: false, error: err.message };
     }
   },
@@ -4284,7 +4988,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         let cleanScript = req.script;
         for (const rule of get().pronunciationRules) {
           if (rule.pattern && rule.replacement) {
-            const regex = new RegExp(`\\b${rule.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, rule.caseSensitive ? 'g' : 'gi');
+            const escaped = rule.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, rule.caseSensitive ? 'gu' : 'giu');
             cleanScript = cleanScript.replace(regex, rule.replacement);
           }
         }

@@ -54,7 +54,9 @@ export const SceneInspector: React.FC = () => {
     clearSceneImage,
     applyDynamicMotionToAllScenes,
     applyMotionRhythmToAllScenes,
-    animateSceneToVideo
+    animateSceneToVideo,
+    regenerateUntranscribedSubtitles,
+    isTranscribingSubtitles,
   } = useProjectStore();
 
   const [isPullingSingle, setIsPullingSingle] = useState(false);
@@ -943,6 +945,7 @@ export const SceneInspector: React.FC = () => {
                   <option value="kinetic_bounce">🟢 Kinetic Green Bounce (Badge Pop)</option>
                 </optgroup>
                 <optgroup label="✨ Aesthetic & Editorial">
+                  <option value="plain_bold_outline">🖋️ Plain Bold Outline (White + Black Stroke)</option>
                   <option value="ali_abdaal">☕ Ali Abdaal Minimalist Pill (Frosted Capsule)</option>
                   <option value="vox_documentary">📰 Vox Editorial Highlighter (Yellow Box)</option>
                   <option value="cinematic_gold">🎬 Cinematic Gold Foil (Luxury Film)</option>
@@ -957,20 +960,99 @@ export const SceneInspector: React.FC = () => {
               </select>
             </div>
 
-            {selectedScene && (
-              <div className="pt-2 border-t border-[#26262e] space-y-1">
-                <div className="text-[11px] font-semibold text-slate-400">Scene Subtitle Timestamps</div>
-                <div className="max-h-48 overflow-y-auto bg-[#141417] rounded p-2 border border-[#26262e] space-y-1 font-mono text-[10px]">
-                  {selectedScene.subtitles.map((w, i) => (
-                    <div key={i} className="flex items-center justify-between text-slate-300">
-                      <span className="text-slate-100 font-sans">{w.word}</span>
-                      <span className="text-slate-500">{w.start.toFixed(2)}s - {w.end.toFixed(2)}s</span>
-                    </div>
-                  ))}
-                  {selectedScene.subtitles.length === 0 && (
-                    <div className="text-slate-500 italic py-2 text-center">No words for this scene</div>
+            {/* Font Size / Scale Slider */}
+            <div className="space-y-1.5 bg-[#141418] p-2.5 rounded-lg border border-[#24242c]">
+              <div className="flex justify-between items-center text-[11px] text-slate-300">
+                <span className="flex items-center gap-1.5 font-medium">
+                  <Type className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Caption Font Size</span>
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-cyan-400 font-semibold text-xs">
+                    {Math.round((project.metadata.captionScale ?? 1.0) * 100)}%
+                  </span>
+                  {project.metadata.captionScale !== undefined && project.metadata.captionScale !== 1.0 && (
+                    <button
+                      type="button"
+                      onClick={() => useProjectStore.getState().setCaptionScale(1.0)}
+                      className="text-[10px] text-slate-400 hover:text-slate-200 underline"
+                    >
+                      Reset
+                    </button>
                   )}
                 </div>
+              </div>
+              <input
+                type="range"
+                min="0.5"
+                max="2.5"
+                step="0.05"
+                value={project.metadata.captionScale ?? 1.0}
+                onChange={(e) => useProjectStore.getState().setCaptionScale(parseFloat(e.target.value))}
+                className="w-full h-1 bg-[#26262e] rounded cursor-pointer accent-cyan-400"
+              />
+              <div className="flex justify-between text-[9px] text-slate-500 font-mono">
+                <span>50%</span>
+                <span>100% (Default)</span>
+                <span>250%</span>
+              </div>
+            </div>
+
+            {selectedScene && (
+              <div className="pt-2 border-t border-[#26262e] space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-[11px] font-semibold text-slate-400">Scene Subtitle Timestamps</div>
+                  <button
+                    onClick={async () => {
+                      await regenerateUntranscribedSubtitles([selectedScene.id]);
+                    }}
+                    disabled={isTranscribingSubtitles}
+                    className="px-2 py-0.5 rounded bg-cyan-950/70 hover:bg-cyan-900 border border-cyan-500/40 text-cyan-300 text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-all disabled:opacity-50"
+                    title="Transcribe or regenerate captions for this specific scene"
+                  >
+                    {isTranscribingSubtitles ? <Loader2 className="w-2.5 h-2.5 animate-spin" /> : <Zap className="w-2.5 h-2.5" />}
+                    <span>{selectedScene.subtitles && selectedScene.subtitles.length > 0 ? 'Re-transcribe Scene' : 'Transcribe This Scene'}</span>
+                  </button>
+                </div>
+
+                <div className="max-h-48 overflow-y-auto bg-[#141417] rounded p-2 border border-[#26262e] space-y-1 font-mono text-[10px]">
+                  {selectedScene.subtitles && selectedScene.subtitles.length > 0 ? (
+                    selectedScene.subtitles.map((w, i) => (
+                      <div key={i} className="flex items-center justify-between text-slate-300">
+                        <span className="text-slate-100 font-sans">{w.word}</span>
+                        <span className="text-slate-500">{w.start.toFixed(2)}s - {w.end.toFixed(2)}s</span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-slate-400 italic py-3 text-center flex flex-col items-center gap-2">
+                      <span className="text-amber-400 text-xs font-semibold">⚠️ No captions generated for this scene</span>
+                      <button
+                        onClick={async () => {
+                          await regenerateUntranscribedSubtitles([selectedScene.id]);
+                        }}
+                        disabled={isTranscribingSubtitles}
+                        className="px-3 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] flex items-center gap-1.5 shadow cursor-pointer transition-all"
+                      >
+                        {isTranscribingSubtitles ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+                        <span>Transcribe This Scene Now</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* If there are any untranscribed scenes on timeline, show batch regeneration button */}
+                {project.scenes.filter((s) => !s.subtitles || s.subtitles.length === 0).length > 0 && (
+                  <button
+                    onClick={async () => {
+                      await regenerateUntranscribedSubtitles();
+                    }}
+                    disabled={isTranscribingSubtitles}
+                    className="w-full py-1.5 rounded-lg bg-amber-950/60 hover:bg-amber-900 border border-amber-500/40 text-amber-300 text-[10px] font-bold flex items-center justify-center gap-1.5 cursor-pointer transition-all disabled:opacity-50"
+                  >
+                    {isTranscribingSubtitles ? <Loader2 className="w-3 h-3 animate-spin text-amber-400" /> : <Zap className="w-3 h-3 text-amber-400" />}
+                    <span>Regenerate Untranscribed Area ({project.scenes.filter((s) => !s.subtitles || s.subtitles.length === 0).length} Scenes)</span>
+                  </button>
+                )}
               </div>
             )}
           </div>

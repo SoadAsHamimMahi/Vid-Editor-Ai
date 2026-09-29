@@ -101,6 +101,111 @@ const EMOTION_LOOKUP: Record<string, string> = {
   convincing: 'confident',
   trust: 'confident',
 
+  // Hopeful / Inspiring / Triumphant
+  hopeful: 'hopeful',
+  inspiring: 'hopeful',
+  inspirational: 'hopeful',
+  triumphant: 'hopeful',
+  victory: 'hopeful',
+
+  // Mysterious / Eerie / Ominous
+  mysterious: 'mysterious',
+  mystery: 'mysterious',
+  eerie: 'mysterious',
+  ominous: 'mysterious',
+  creepy: 'mysterious',
+  dark: 'mysterious',
+  intriguing: 'mysterious',
+
+  // Nostalgic / Reminiscing
+  nostalgic: 'nostalgic',
+  nostalgia: 'nostalgic',
+  reminiscing: 'nostalgic',
+  reminiscent: 'nostalgic',
+  reflective: 'nostalgic',
+  wistful: 'nostalgic',
+
+  // Empathetic / Compassionate
+  empathetic: 'empathetic',
+  empathy: 'empathetic',
+  compassionate: 'empathetic',
+  compassion: 'empathetic',
+  sympathetic: 'empathetic',
+  caring: 'empathetic',
+  tender: 'empathetic',
+  loving: 'empathetic',
+  affectionate: 'empathetic',
+
+  // Relieved
+  relieved: 'relieved',
+  relief: 'relieved',
+  reassured: 'relieved',
+
+  // Disgusted / Contempt
+  disgusted: 'disgusted',
+  disgust: 'disgusted',
+  contempt: 'disgusted',
+  scornful: 'disgusted',
+  repulsed: 'disgusted',
+  revolted: 'disgusted',
+
+  // Shouting / Yelling / Screaming
+  shout: 'shouting',
+  shouting: 'shouting',
+  yell: 'shouting',
+  yelling: 'shouting',
+  scream: 'shouting',
+  screaming: 'shouting',
+  bellow: 'shouting',
+  loud: 'shouting',
+
+  // Breathless / Panting / Out of Breath
+  breathless: 'breathless',
+  panting: 'breathless',
+  'out of breath': 'breathless',
+  'heavy breathing': 'breathless',
+  winded: 'breathless',
+
+  // Panicked / Frantic
+  panicked: 'panicked',
+  frantic: 'panicked',
+  hysterical: 'panicked',
+  desperate: 'panicked',
+
+  // Hesitant / Nervous / Trembling
+  hesitant: 'hesitant',
+  hesitation: 'hesitant',
+  nervous: 'hesitant',
+  trembling: 'hesitant',
+  quavering: 'hesitant',
+  timid: 'hesitant',
+  uncertain: 'hesitant',
+  stammer: 'hesitant',
+  stutter: 'hesitant',
+
+  // Paralinguistic Audio Cues
+  'clears throat': 'clears_throat',
+  'clear throat': 'clears_throat',
+  'clearing throat': 'clears_throat',
+  'throat clearing': 'clears_throat',
+  sniffle: 'sniffle',
+  sniffling: 'sniffle',
+  gulp: 'gulp',
+  gulping: 'gulp',
+  swallow: 'gulp',
+  swallows: 'gulp',
+  yawn: 'yawn',
+  yawns: 'yawn',
+  yawning: 'yawn',
+  sleepy: 'yawn',
+  exhausted: 'yawn',
+  humming: 'humming',
+  hum: 'humming',
+  hums: 'humming',
+  cackle: 'cackle',
+  chuckle: 'cackle',
+  snicker: 'cackle',
+
   // Neutral
   neutral: 'neutral',
   normal: 'neutral',
@@ -160,6 +265,238 @@ export function detectEmotionFromText(text: string, fallbackEmotion?: string): s
 export function insertBreathMarkers(text: string): string {
   if (!text) return '';
   return text.replace(/([;:])\s+(?=[A-Za-z])/g, '$1 — ');
+}export const BACKEND_PHONETIC_RULES: Array<{ pattern: RegExp; replacement: string }> = [
+  // 1. Lionel Messi name chain
+  { pattern: /(?<![\p{L}\p{N}])Lionel\s+Andr[eé]s\s+Messi(?![\p{L}\p{N}])/giu, replacement: 'Leonel Ahndress Messi' },
+  { pattern: /(?<![\p{L}\p{N}])Lionel\s+Andr[eé]s(?![\p{L}\p{N}])/giu, replacement: 'Leonel Ahndress' },
+  { pattern: /(?<![\p{L}\p{N}])Andr[eé]s(?![\p{L}\p{N}])/giu, replacement: 'Ahndress' },
+  { pattern: /(?<![\p{L}\p{N}])Lionel\s+Messi(?![\p{L}\p{N}])/giu, replacement: 'Leonel Messi' },
+  { pattern: /(?<![\p{L}\p{N}])Lionel(?![\p{L}\p{N}])/giu, replacement: 'Leonel' },
+
+  // 2. Jorge & Father
+  { pattern: /(?<![\p{L}\p{N}])Jorge\s+Messi(?![\p{L}\p{N}])/giu, replacement: 'Horhay Messi' },
+  { pattern: /(?<![\p{L}\p{N}])Jorge(?![\p{L}\p{N}])/giu, replacement: 'Horhay' },
+  { pattern: /(?<![\p{L}\p{N}])[Ww]hore[.,\s]+(?:[Hh]ay|[Hh]ey)(?![\p{L}\p{N}])/gu, replacement: 'Horhay' },
+  { pattern: /(?<![\p{L}\p{N}])[Hh]oare[.,\s]+(?:[Hh]ay|[Hh]ey)(?![\p{L}\p{N}])/gu, replacement: 'Horhay' },
+  { pattern: /(?<![\p{L}\p{N}])[Hh]or[.,\s]+[Hh]ay('?s)?(?![\p{L}\p{N}])/gu, replacement: 'Horhay$1' },
+  { pattern: /(?<![\p{L}\p{N}])told\s+Hoare[,\s]+(?:Hey|Hay)(?![\p{L}\p{N}])/giu, replacement: 'told Horhay' },
+  { pattern: /(?<![\p{L}\p{N}])whenever\s+whore\s+hay\s+walked(?![\p{L}\p{N}])/giu, replacement: 'whenever Horhay walked' },
+  { pattern: /(?<![\p{L}\p{N}])[Hh]oare(?![\p{L}\p{N}])/gu, replacement: 'Horhay' },
+  { pattern: /(?<![\p{L}\p{N}])[Ww]hore(?=[,\s.]|$)/gu, replacement: 'Horhay' },
+  { pattern: /(?<![\p{L}\p{N}])Hay(?=\s+(?:took|went|knew|stayed|said|and\s+Lionel|'s\s+patience|trapped))\b/gu, replacement: 'Horhay' },
+
+  // 3. Grandoli & Boyhood Club
+  { pattern: /(?<![\p{L}\p{N}])Club\s+Ap[- ]?Ban\s+de\s+Arachdogran\s+de\s+Ocala(?![\p{L}\p{N}])/giu, replacement: 'Club Abanderado Grandoli' },
+  { pattern: /(?<![\p{L}\p{N}])Ap[- ]?Ban\s+de\s+Arachdogran\s+de\s+Ocala(?![\p{L}\p{N}])/giu, replacement: 'Abanderado Grandoli' },
+  { pattern: /(?<![\p{L}\p{N}])Arachdogran\s+de\s+Ocala(?![\p{L}\p{N}])/giu, replacement: 'Grandoli' },
+  { pattern: /(?<![\p{L}\p{N}])Club\s+Ap[- ]?Ban(?![\p{L}\p{N}])/giu, replacement: 'Club Abanderado' },
+  { pattern: /(?<![\p{L}\p{N}])Club\s+Abanderado\s+Grandoli(?![\p{L}\p{N}])/giu, replacement: 'Club Abanderado Grandoli' },
+  { pattern: /(?<![\p{L}\p{N}])Abanderado\s+Grandoli(?![\p{L}\p{N}])/giu, replacement: 'Abanderado Grandoli' },
+  { pattern: /(?<![\p{L}\p{N}])Grandoli(?![\p{L}\p{N}])/giu, replacement: 'Grandoli' },
+
+  // 4. Salvador Aparicio
+  { pattern: /(?<![\p{L}\p{N}])Salvador\s+Aparicio(?![\p{L}\p{N}])/giu, replacement: 'Salvador Ahpareesio' },
+  { pattern: /(?<![\p{L}\p{N}])Akpa\s+Urii\s+Cedo(?![\p{L}\p{N}])/giu, replacement: 'Ahpareesio' },
+  { pattern: /(?<![\p{L}\p{N}])Akpa\s+Urii(?![\p{L}\p{N}])/giu, replacement: 'Ahpareesio' },
+  { pattern: /(?<![\p{L}\p{N}])Aparicio(?![\p{L}\p{N}])/giu, replacement: 'Ahpareesio' },
+
+  // 5. Cuccittini & Celia
+  { pattern: /(?<![\p{L}\p{N}])Celia\s+Oliveira\s+D[.,\s]+Coo[- ]Chee\s+T[.,\s]+Nee\.?(?![\p{L}\p{N}])/giu, replacement: 'Sehlia Oliveira de Koochiteenee' },
+  { pattern: /(?<![\p{L}\p{N}])Celia\s+Oliveira\s+de\s+Cuccittini(?![\p{L}\p{N}])/giu, replacement: 'Sehlia Oliveira de Koochiteenee' },
+  { pattern: /(?<![\p{L}\p{N}])Celia\s+Olivera\s+de\s+Cuccittini(?![\p{L}\p{N}])/giu, replacement: 'Sehlia Oliveira de Koochiteenee' },
+  { pattern: /(?<![\p{L}\p{N}])Celia\s+Oliveira\s+D\.?(?![\p{L}\p{N}])/giu, replacement: 'Sehlia Oliveira de Koochiteenee' },
+  { pattern: /(?<![\p{L}\p{N}])Cuccittini(?![\p{L}\p{N}])/giu, replacement: 'Koochiteenee' },
+  { pattern: /(?<![\p{L}\p{N}])Coo[- ]Chee\s+T\.?\s*Nee(?![\p{L}\p{N}])/giu, replacement: 'Koochiteenee' },
+  { pattern: /(?<![\p{L}\p{N}])Coo[- ]Chee\s+T\.?(?![\p{L}\p{N}])/giu, replacement: 'Koochiteenee' },
+  { pattern: /(?<![\p{L}\p{N}])Coo\s+Chee\s+Tis\s+Nee(?![\p{L}\p{N}])/giu, replacement: 'Koochiteenee' },
+  { pattern: /(?<![\p{L}\p{N}])Grandmother\s+Celia(?![\p{L}\p{N}])/giu, replacement: 'Grandmother Sehlia' },
+  { pattern: /(?<![\p{L}\p{N}])Celia(?![\p{L}\p{N}])/giu, replacement: 'Sehlia' },
+
+  // 6. Las Heras & Rosario & La Bajada
+  { pattern: /(?<![\p{L}\p{N}])Las\s+Heras(?![\p{L}\p{N}])/giu, replacement: 'Lahs Airahs' },
+  { pattern: /(?<![\p{L}\p{N}])Las\s+Jarras(?![\p{L}\p{N}])/giu, replacement: 'Lahs Airahs' },
+  { pattern: /(?<![\p{L}\p{N}])las\s+harras(?![\p{L}\p{N}])/giu, replacement: 'Lahs Airahs' },
+  { pattern: /(?<![\p{L}\p{N}])La\s+Bajada(?![\p{L}\p{N}])/giu, replacement: 'La Bahadah' },
+  { pattern: /(?<![\p{L}\p{N}])Rosario(?![\p{L}\p{N}])/giu, replacement: 'Rosario' },
+
+  // 7. La Masia
+  { pattern: /(?<![\p{L}\p{N}])At\s+Le\s+Mans[,\s]+si[.\s]+Ah(?![\p{L}\p{N}])/giu, replacement: 'At La Maseea' },
+  { pattern: /(?<![\p{L}\p{N}])Le\s+Mans[,\s]+si[.\s]+Ah(?![\p{L}\p{N}])/giu, replacement: 'La Maseea' },
+  { pattern: /(?<![\p{L}\p{N}])Le\s+Mans[,\s]+si(?![\p{L}\p{N}])/giu, replacement: 'La Maseea' },
+  { pattern: /(?<![\p{L}\p{N}])La\s+Mas[ií]a(?![\p{L}\p{N}])/giu, replacement: 'La Maseea' },
+
+  // 8. Carles Rexach
+  { pattern: /(?<![\p{L}\p{N}])Carls\s+Ray[,\s]+Shaq(?![\p{L}\p{N}])/giu, replacement: 'Carles Rehsack' },
+  { pattern: /(?<![\p{L}\p{N}])Carles\s+Rexach(?![\p{L}\p{N}])/giu, replacement: 'Carles Rehsack' },
+  { pattern: /(?<![\p{L}\p{N}])Charly\s+Rexach(?![\p{L}\p{N}])/giu, replacement: 'Charly Rehsack' },
+  { pattern: /(?<![\p{L}\p{N}])Ray[,\s]+Shaq(?![\p{L}\p{N}])/giu, replacement: 'Rehsack' },
+  { pattern: /(?<![\p{L}\p{N}])ray\s+shack(?![\p{L}\p{N}])/giu, replacement: 'Rehsack' },
+  { pattern: /(?<![\p{L}\p{N}])Rexach(?![\p{L}\p{N}])/giu, replacement: 'Rehsack' },
+
+  // 9. Josep Maria Minguella
+  { pattern: /(?<![\p{L}\p{N}])Joe\s+Zepma[,\s]+Ri[,\s]+Amin[,\s]+Gi[,\s]+Ya(?![\p{L}\p{N}])/giu, replacement: 'Zhozep Maria Meengelya' },
+  { pattern: /(?<![\p{L}\p{N}])Joe\s+Zepma(?:[\s,]+Ri[\s,]+Amin[\s,]+Gi[\s,]+Lugna)?(?![\p{L}\p{N}])/giu, replacement: 'Zhozep Maria Meengelya' },
+  { pattern: /(?<![\p{L}\p{N}])Josep\s+Maria\s+Minguella(?![\p{L}\p{N}])/giu, replacement: 'Zhozep Maria Meengelya' },
+  { pattern: /(?<![\p{L}\p{N}])Minguella(?![\p{L}\p{N}])/giu, replacement: 'Meengelya' },
+
+  // 10. Venues: Montjuïc, Mini Estadi, Pompeia, Camp Nou
+  { pattern: /(?<![\p{L}\p{N}])Mon[,\s]+Joux[,\s]+Icke(?![\p{L}\p{N}])/giu, replacement: 'Monzhooek' },
+  { pattern: /(?<![\p{L}\p{N}])Montju[iï]c(?![\p{L}\p{N}])/giu, replacement: 'Monzhooek' },
+  { pattern: /(?<![\p{L}\p{N}])Miniez[,\s]+THD(?![\p{L}\p{N}])/giu, replacement: 'Meenee Estahdee' },
+  { pattern: /(?<![\p{L}\p{N}])Miniez(?![\p{L}\p{N}])/giu, replacement: 'Meenee Estahdee' },
+  { pattern: /(?<![\p{L}\p{N}])Mini\s+Estadi(?![\p{L}\p{N}])/giu, replacement: 'Meenee Estahdee' },
+  { pattern: /(?<![\p{L}\p{N}])Pompeia\s+Tennis\s+Club(?![\p{L}\p{N}])/giu, replacement: 'Pompeia Tennis Club' },
+  { pattern: /(?<![\p{L}\p{N}])Pompeia(?![\p{L}\p{N}])/giu, replacement: 'Pompeia' },
+  { pattern: /(?<![\p{L}\p{N}])Camp\s+Nou(?![\p{L}\p{N}])/giu, replacement: 'Camp Noh' },
+  { pattern: /(?<![\p{L}\p{N}])The\s+Camp\s+No(?:\s+Oh)?(?![\p{L}\p{N}])/giu, replacement: 'The Camp Noh' },
+
+  // 11. Albacete & Copa Catalunya
+  { pattern: /(?<![\p{L}\p{N}])Copica[,\s]+to\s+Lugna(?![\p{L}\p{N}])/giu, replacement: 'Copa Katalunya' },
+  { pattern: /(?<![\p{L}\p{N}])Copa\s+Catalunya(?![\p{L}\p{N}])/giu, replacement: 'Copa Katalunya' },
+  { pattern: /(?<![\p{L}\p{N}])Al[,\s]+bah[,\s]+Sicti(?![\p{L}\p{N}])/giu, replacement: 'Albahseteh' },
+  { pattern: /(?<![\p{L}\p{N}])Albacete(?![\p{L}\p{N}])/giu, replacement: 'Albahseteh' },
+
+  // 12. Ronaldinho, Samuel Eto'o, Madridistas, El Clásico
+  { pattern: /(?<![\p{L}\p{N}])Ronald\s+Dean\s+(?:Yeo|Yo)(?![\p{L}\p{N}])/giu, replacement: 'Ronaldeenyo' },
+  { pattern: /(?<![\p{L}\p{N}])Ronald\s+Dean(?![\p{L}\p{N}])/giu, replacement: 'Ronaldeenyo' },
+  { pattern: /(?<![\p{L}\p{N}])Ronaldinho(?![\p{L}\p{N}])/giu, replacement: 'Ronaldeenyo' },
+  { pattern: /(?<![\p{L}\p{N}])Henry\s+and\s+Ito-o(?![\p{L}\p{N}])/giu, replacement: 'Ahnree and Eto' },
+  { pattern: /(?<![\p{L}\p{N}])Ito-o(?![\p{L}\p{N}])/giu, replacement: 'Eto' },
+  { pattern: /(?<![\p{L}\p{N}])Samuel\s+Eto['’]o(?![\p{L}\p{N}])/giu, replacement: 'Samuel Eto' },
+  { pattern: /(?<![\p{L}\p{N}])Eto['’]o(?![\p{L}\p{N}])/giu, replacement: 'Eto' },
+  { pattern: /(?<![\p{L}\p{N}])Ma[,\s]+Dree[,\s]+D\.?E\.?S\.?[,\s]+Taz(?![\p{L}\p{N}])/giu, replacement: 'Madreedeestas' },
+  { pattern: /(?<![\p{L}\p{N}])Madridistas(?![\p{L}\p{N}])/giu, replacement: 'Madreedeestas' },
+  { pattern: /(?<![\p{L}\p{N}])El\s+Claw[,\s]+C(?![\p{L}\p{N}])/giu, replacement: 'El Klaseeko' },
+  { pattern: /(?<![\p{L}\p{N}])El\s+Cl[aá]sico(?![\p{L}\p{N}])/giu, replacement: 'El Klaseeko' },
+
+  // 13. Gerard Piqué & Cesc Fàbregas & El Mudo
+  { pattern: /(?<![\p{L}\p{N}])Gerard\s+P\.[,\s]+Kay\s+and\s+Seskfa[,\s]+Bragas(?![\p{L}\p{N}])/giu, replacement: 'Zherar Peekay and Sesk Fahbregas' },
+  { pattern: /(?<![\p{L}\p{N}])Gerard\s+P\.[,\s]+Kay(?![\p{L}\p{N}])/giu, replacement: 'Zherar Peekay' },
+  { pattern: /(?<![\p{L}\p{N}])Gerard\s+Piqu[eé](?![\p{L}\p{N}])/giu, replacement: 'Zherar Peekay' },
+  { pattern: /(?<![\p{L}\p{N}])P\.[,\s]+Kay(?![\p{L}\p{N}])/giu, replacement: 'Peekay' },
+  { pattern: /(?<![\p{L}\p{N}])Piqu[eé](?![\p{L}\p{N}])/giu, replacement: 'Peekay' },
+  { pattern: /(?<![\p{L}\p{N}])Kay\s+and\s+Seskfa[,\s]+Bragas(?![\p{L}\p{N}])/giu, replacement: 'Peekay and Sesk Fahbregas' },
+  { pattern: /(?<![\p{L}\p{N}])Seskfa[,\s]+Bragas(?![\p{L}\p{N}])/giu, replacement: 'Sesk Fahbregas' },
+  { pattern: /(?<![\p{L}\p{N}])Cesc\s+F[aà]bregas(?![\p{L}\p{N}])/giu, replacement: 'Sesk Fahbregas' },
+  { pattern: /(?<![\p{L}\p{N}])F[aà]bregas(?![\p{L}\p{N}])/giu, replacement: 'Fahbregas' },
+  { pattern: /(?<![\p{L}\p{N}])El\s+Mou[,\s]+Do(?![\p{L}\p{N}])/giu, replacement: 'El Moodo' },
+  { pattern: /(?<![\p{L}\p{N}])El\s+Mudo(?![\p{L}\p{N}])/giu, replacement: 'El Moodo' },
+
+  // 14. Ballon d'Or, Copa América, Chile
+  { pattern: /(?<![\p{L}\p{N}])Ba\s+Lawn\s+Door(?![\p{L}\p{N}])/giu, replacement: 'Ballon Dor' },
+  { pattern: /(?<![\p{L}\p{N}])Ballon\s+d['’]Or(?![\p{L}\p{N}])/giu, replacement: 'Ballon Dor' },
+  { pattern: /(?<![\p{L}\p{N}])Copa\s+AMA\s+RICA(?![\p{L}\p{N}])/giu, replacement: 'Copa Amehreeka' },
+  { pattern: /(?<![\p{L}\p{N}])Copa\s+Am[eé]rica(?![\p{L}\p{N}])/giu, replacement: 'Copa Amehreeka' },
+  { pattern: /(?<![\p{L}\p{N}])Chylon\s+Penalties(?![\p{L}\p{N}])/giu, replacement: 'Cheelay on penalties' },
+  { pattern: /(?<![\p{L}\p{N}])Chylon(?![\p{L}\p{N}])/giu, replacement: 'Cheelay' },
+
+  // 15. Jérôme Boateng & Manuel Neuer
+  { pattern: /(?<![\p{L}\p{N}])Jacques\s+Rome[,\s]+beau\.?\s*A\s*tang(?![\p{L}\p{N}])/giu, replacement: 'Zherohm Bohteng' },
+  { pattern: /(?<![\p{L}\p{N}])Jacques\s+Rome[,\s]+Boating(?![\p{L}\p{N}])/giu, replacement: 'Zherohm Bohteng' },
+  { pattern: /(?<![\p{L}\p{N}])Jacques\s+Rome(?![\p{L}\p{N}])/giu, replacement: 'Zherohm Bohteng' },
+  { pattern: /(?<![\p{L}\p{N}])J[eé]r[oô]me\s+Boateng(?![\p{L}\p{N}])/giu, replacement: 'Zherohm Bohteng' },
+  { pattern: /(?<![\p{L}\p{N}])Boating('s)?(?![\p{L}\p{N}])/giu, replacement: 'Bohteng$1' },
+  { pattern: /(?<![\p{L}\p{N}])Boateng(?![\p{L}\p{N}])/giu, replacement: 'Bohteng' },
+  { pattern: /(?<![\p{L}\p{N}])Manuel\s+Noy(?:[,\s]*er)?(?![\p{L}\p{N}])/giu, replacement: 'Manuel Noyer' },
+  { pattern: /(?<![\p{L}\p{N}])Manuel\s+Neuer(?![\p{L}\p{N}])/giu, replacement: 'Manuel Noyer' },
+  { pattern: /(?<![\p{L}\p{N}])Neuer(?![\p{L}\p{N}])/giu, replacement: 'Noyer' },
+
+  // 16. Hugo Lloris & Mbappé
+  { pattern: /(?<![\p{L}\p{N}])Hugo\s+Lyo[,\s]+Riz(?![\p{L}\p{N}])/giu, replacement: 'Oogo Lorees' },
+  { pattern: /(?<![\p{L}\p{N}])Hugo\s+Lloris(?![\p{L}\p{N}])/giu, replacement: 'Oogo Lorees' },
+  { pattern: /(?<![\p{L}\p{N}])Lloris(?![\p{L}\p{N}])/giu, replacement: 'Lorees' },
+  { pattern: /(?<![\p{L}\p{N}])M\.\s+Baugh\s+pay-answered(?![\p{L}\p{N}])/giu, replacement: 'Embapay answered' },
+  { pattern: /(?<![\p{L}\p{N}])M\.\s+Baugh\s+pay(?![\p{L}\p{N}])/giu, replacement: 'Embapay' },
+  { pattern: /(?<![\p{L}\p{N}])Baugh\s+pay-answered(?![\p{L}\p{N}])/giu, replacement: 'Embapay answered' },
+  { pattern: /(?<![\p{L}\p{N}])Baugh\s+pay(?![\p{L}\p{N}])/giu, replacement: 'Embapay' },
+  { pattern: /(?<![\p{L}\p{N}])Kylian\s+Mbapp[eé](?![\p{L}\p{N}])/giu, replacement: 'Keelean Embapay' },
+  { pattern: /(?<![\p{L}\p{N}])Mbapp[eé](?![\p{L}\p{N}])/giu, replacement: 'Embapay' },
+
+  // 17. Argentine Slurs & Cultural Terms (El Español, Pecho frío, Mate)
+  { pattern: /(?<![\p{L}\p{N}])Iles\s+Ponyol(?![\p{L}\p{N}])/giu, replacement: 'El Espanyol' },
+  { pattern: /(?<![\p{L}\p{N}])El\s+Espa[nñ]ol(?![\p{L}\p{N}])/giu, replacement: 'El Espanyol' },
+  { pattern: /(?<![\p{L}\p{N}])P\.\s+Chofri[,\s]+O\.?(?![\p{L}\p{N}])/giu, replacement: 'Pehcho Freeoh' },
+  { pattern: /(?<![\p{L}\p{N}])Pecho\s+chofri(?![\p{L}\p{N}])/giu, replacement: 'Pehcho Freeoh' },
+  { pattern: /(?<![\p{L}\p{N}])Pecho\s+fr[ií]o(?![\p{L}\p{N}])/giu, replacement: 'Pehcho Freeoh' },
+  { pattern: /(?<![\p{L}\p{N}])Pecho\s+free\s+o(?![\p{L}\p{N}])/giu, replacement: 'Pehcho Freeoh' },
+  { pattern: /(?<![\p{L}\p{N}])Chofri(?![\p{L}\p{N}])/giu, replacement: 'Freeoh' },
+  { pattern: /(?<![\p{L}\p{N}])The\s+parents\s+sipping\s+ma\s+Tis(?![\p{L}\p{N}])/giu, replacement: 'The parents sipping mahteh' },
+  { pattern: /(?<![\p{L}\p{N}])sipping\s+ma\s+Tis(?![\p{L}\p{N}])/giu, replacement: 'sipping mahteh' },
+  { pattern: /(?<![\p{L}\p{N}])ma\s+Tis\s+set\s+their\s+gourds(?![\p{L}\p{N}])/giu, replacement: 'mahteh, set their gourds' },
+  { pattern: /(?<![\p{L}\p{N}])(?:warm\s+)?ma\s+tea(?![\p{L}\p{N}])/giu, replacement: 'warm mahteh' },
+  { pattern: /(?<![\p{L}\p{N}])yerba\s+mate(?![\p{L}\p{N}])/giu, replacement: 'yerba mahteh' },
+  { pattern: /(?<![\p{L}\p{N}])sipping\s+(?:warm\s+)?mate(?![\p{L}\p{N}])/giu, replacement: 'sipping mahteh' },
+  { pattern: /(?<![\p{L}\p{N}])drinking\s+mate(?![\p{L}\p{N}])/giu, replacement: 'drinking mahteh' },
+
+  // 18. World Cup Climax: Gonzalo Montiel, Ángel Di María, Puede ser hoy abuela, Ya está
+  { pattern: /(?<![\p{L}\p{N}])Gan\s+Zah[,\s]+Loman[,\s]+T[,\s]+L(?![\p{L}\p{N}])/giu, replacement: 'Gonzahlo Monteeel' },
+  { pattern: /(?<![\p{L}\p{N}])Gan\s+Zah[,\s]+Loman(?![\p{L}\p{N}])/giu, replacement: 'Gonzahlo Monteeel' },
+  { pattern: /(?<![\p{L}\p{N}])Gonzalo\s+Montiel(?![\p{L}\p{N}])/giu, replacement: 'Gonzahlo Monteeel' },
+  { pattern: /(?<![\p{L}\p{N}])Montiel(?![\p{L}\p{N}])/giu, replacement: 'Monteeel' },
+  { pattern: /(?<![\p{L}\p{N}])An\s+Hel\s+d(?:ie|i)\s+Maria(?![\p{L}\p{N}])/giu, replacement: 'Anhel Dee Maria' },
+  { pattern: /(?<![\p{L}\p{N}])[AÁ]ngel\s+Di\s+Mar[íi]a(?![\p{L}\p{N}])/giu, replacement: 'Anhel Dee Maria' },
+  { pattern: /(?<![\p{L}\p{N}])Di\s+Mar[íi]a(?![\p{L}\p{N}])/giu, replacement: 'Dee Maria' },
+  { pattern: /(?<![\p{L}\p{N}])An\s+Hel(?![\p{L}\p{N}])/giu, replacement: 'Anhel' },
+  { pattern: /(?<![\p{L}\p{N}])Pwik\s+deserwai\s+a\s+pwekla(?![\p{L}\p{N}])/giu, replacement: 'Pwehdeh sehr oy, ahbwehlah' },
+  { pattern: /(?<![\p{L}\p{N}])Puede\s+ser\s+hoy[,\s]+abuela(?![\p{L}\p{N}])/giu, replacement: 'Pwehdeh sehr oy, ahbwehlah' },
+  { pattern: /(?<![\p{L}\p{N}])Yais[,\s]+ta(?![\p{L}\p{N}])/giu, replacement: 'Yah esstah' },
+  { pattern: /(?<![\p{L}\p{N}])Ya\s+est[aá](?![\p{L}\p{N}])/giu, replacement: 'Yah esstah' },
+
+  // 19. Additional Managers & Proper Names
+  { pattern: /(?<![\p{L}\p{N}])Diego\s+Schwarzstein(?![\p{L}\p{N}])/giu, replacement: 'Diego Shvartshtine' },
+  { pattern: /(?<![\p{L}\p{N}])Schwarzstein(?![\p{L}\p{N}])/giu, replacement: 'Shvartshtine' },
+  { pattern: /(?<![\p{L}\p{N}])Schwarstein(?![\p{L}\p{N}])/giu, replacement: 'Shvartshtine' },
+  { pattern: /(?<![\p{L}\p{N}])Pep\s+Guardiola(?![\p{L}\p{N}])/giu, replacement: 'Pep Gwardiola' },
+  { pattern: /(?<![\p{L}\p{N}])Guardiola(?![\p{L}\p{N}])/giu, replacement: 'Gwardiola' },
+  { pattern: /(?<![\p{L}\p{N}])La\s+M[aá]quina\s+del\s+87(?![\p{L}\p{N}])/giu, replacement: 'La Mahkeena del eighty-seven' },
+  { pattern: /(?<![\p{L}\p{N}])La\s+Monqueen\s+Adele(?![\p{L}\p{N}])/giu, replacement: 'La Mahkeena del eighty-seven' },
+  { pattern: /(?<![\p{L}\p{N}])Thierry\s+Henry(?![\p{L}\p{N}])/giu, replacement: 'Teeary Ahnree' },
+  { pattern: /(?<![\p{L}\p{N}])b[ie]sht(?![\p{L}\p{N}])/giu, replacement: 'beesht' },
+  { pattern: /(?<![\p{L}\p{N}])Bayern\s+Munich(?![\p{L}\p{N}])/giu, replacement: 'Bayern Myoonik' },
+  { pattern: /(?<![\p{L}\p{N}])Real\s+Madrid(?![\p{L}\p{N}])/giu, replacement: 'Real Madrid' },
+  { pattern: /(?<![\p{L}\p{N}])Lusail(?![\p{L}\p{N}])/giu, replacement: 'Loosail' },
+  { pattern: /(?<![\p{L}\p{N}])Maracan[aã](?![\p{L}\p{N}])/giu, replacement: 'Marakanah' },
+  { pattern: /(?<![\p{L}\p{N}])Gerd\s+M[uü]ller(?![\p{L}\p{N}])/giu, replacement: 'Gairt Myooler' },
+  { pattern: /(?<![\p{L}\p{N}])Lionel\s+Scaloni(?![\p{L}\p{N}])/giu, replacement: 'Leonel Skahlohnee' },
+  { pattern: /(?<![\p{L}\p{N}])Scaloni(?![\p{L}\p{N}])/giu, replacement: 'Skahlohnee' },
+  { pattern: /(?<![\p{L}\p{N}])Antonella(?![\p{L}\p{N}])/giu, replacement: 'Antonela' },
+  { pattern: /(?<![\p{L}\p{N}])Antonela(?![\p{L}\p{N}])/giu, replacement: 'Antonela' },
+  { pattern: /(?<![\p{L}\p{N}])[oO]belisco(?![\p{L}\p{N}])/giu, replacement: 'Obelisco' },
+  { pattern: /(?<![\p{L}\p{N}])Paran[aá]\s+River(?![\p{L}\p{N}])/giu, replacement: 'Parana River' },
+  { pattern: /(?<![\p{L}\p{N}])Paran[aá](?![\p{L}\p{N}])/giu, replacement: 'Parana' },
+  { pattern: /(?<![\p{L}\p{N}])Newell['’]s\s+Old\s+Boys(?![\p{L}\p{N}])/giu, replacement: 'Newells Old Boys' },
+  { pattern: /(?<![\p{L}\p{N}])Newell['’]s(?![\p{L}\p{N}])/giu, replacement: 'Newells' },
+  { pattern: /(?<![\p{L}\p{N}])River\s+Plate(?![\p{L}\p{N}])/giu, replacement: 'River Plate' },
+  { pattern: /(?<![\p{L}\p{N}])tiki[-,s]+taka(?![\p{L}\p{N}])/giu, replacement: 'Teekeetahka' },
+  { pattern: /(?<![\p{L}\p{N}])sextuple(?![\p{L}\p{N}])/giu, replacement: 'sekstoopuhl' },
+
+  // 20. Lamine Yamal & Football Teammates
+  { pattern: /(?<![\p{L}\p{N}])Lamine\s+Yamal\s+Nasraoui\s+Ebana(?![\p{L}\p{N}])/giu, replacement: 'Luhmeen Yamal Nasrawee Ebana' },
+  { pattern: /(?<![\p{L}\p{N}])Lamine\s+Yamal(?![\p{L}\p{N}])/giu, replacement: 'Luhmeen Yamal' },
+  { pattern: /(?<![\p{L}\p{N}])Lamine(?![\p{L}\p{N}])/giu, replacement: 'Luhmeen' },
+  { pattern: /(?<![\p{L}\p{N}])Sheila\s+Ebana(?![\p{L}\p{N}])/giu, replacement: 'Shayla Ebana' },
+  { pattern: /(?<![\p{L}\p{N}])Ebana(?![\p{L}\p{N}])/giu, replacement: 'Ebana' },
+  { pattern: /(?<![\p{L}\p{N}])Mounir\s+Nasraoui(?![\p{L}\p{N}])/giu, replacement: 'Muneer Nasrawee' },
+  { pattern: /(?<![\p{L}\p{N}])Nasraoui(?![\p{L}\p{N}])/giu, replacement: 'Nasrawee' },
+  { pattern: /(?<![\p{L}\p{N}])Esplugues\s+de\s+Llobregat(?![\p{L}\p{N}])/giu, replacement: 'Esplugas deh Lyobregat' },
+  { pattern: /(?<![\p{L}\p{N}])Granollers(?![\p{L}\p{N}])/giu, replacement: 'Granoyers' },
+  { pattern: /(?<![\p{L}\p{N}])Rocafonda(?![\p{L}\p{N}])/giu, replacement: 'Rocafonda' },
+  { pattern: /(?<![\p{L}\p{N}])Matar[oó](?![\p{L}\p{N}])/giu, replacement: 'Mahtaro' },
+  { pattern: /(?<![\p{L}\p{N}])F[aá]tima(?![\p{L}\p{N}])/giu, replacement: 'Fatima' },
+  { pattern: /(?<![\p{L}\p{N}])Ferran\s+Torres(?![\p{L}\p{N}])/giu, replacement: 'Ferran Torres' },
+  { pattern: /(?<![\p{L}\p{N}])Xavi(?![\p{L}\p{N}])/giu, replacement: 'Shahvee' },
+  { pattern: /(?<![\p{L}\p{N}])Iniesta(?![\p{L}\p{N}])/giu, replacement: 'Eeneestah' }
+];
+
+export function applyBackendPhonetics(text: string): string {
+  if (!text) return '';
+  let res = text;
+  for (const entry of BACKEND_PHONETIC_RULES) {
+    entry.pattern.lastIndex = 0;
+    res = res.replace(entry.pattern, entry.replacement);
+    entry.pattern.lastIndex = 0;
+  }
+  return res;
 }
 
 /**
@@ -169,7 +506,7 @@ export function insertBreathMarkers(text: string): string {
  */
 export function cleanSpeechText(
   rawText: string,
-  options?: { preservePauses?: boolean; insertBreaths?: boolean; useSsmlBreaks?: boolean }
+  options?: { preservePauses?: boolean; insertBreaths?: boolean; useSsmlBreaks?: boolean; preservePauseTags?: boolean }
 ): string {
   if (!rawText) return '';
 
@@ -195,6 +532,10 @@ export function cleanSpeechText(
     const unit = p2;
     const sec = val ? (unit === 'ms' ? parseFloat(val) / 1000 : parseFloat(val)) : 1.0;
     const clampedSec = Math.max(0.1, Math.min(5.0, isNaN(sec) ? 1.0 : sec));
+
+    if (options?.preservePauseTags) {
+      return ` [pause: ${clampedSec.toFixed(2)}s] `;
+    }
 
     if (options?.useSsmlBreaks) {
       return `<break time="${clampedSec.toFixed(1)}s" />`;
@@ -230,7 +571,26 @@ export function cleanSpeechText(
     'serious', 'mysterious', 'hopeful', 'gloomy', 'romantic', 'suspense', 'suspenseful',
     'urgent', 'melancholic', 'intense', 'gentle', 'grief', 'bored', 'shocked', 'proud',
     'playful', 'loving', 'frustrated', 'confused', 'applause', 'silence', 'break',
-    'cheering', 'music', 'sound', 'sfx'
+    'cheering', 'music', 'sound', 'sfx',
+    // New Narrative & ElevenLabs documentary cues
+    'inspiring', 'inspirational', 'triumphant', 'victory', 'uplifting',
+    'eerie', 'ominous', 'creepy', 'intriguing', 'mystery',
+    'nostalgic', 'nostalgia', 'reminiscing', 'reminiscent', 'reflective', 'wistful',
+    'empathetic', 'empathy', 'compassionate', 'compassion', 'sympathetic', 'caring', 'tender', 'affectionate',
+    'relieved', 'relief', 'reassured',
+    'disgusted', 'disgust', 'contempt', 'scornful', 'repulsed', 'revolted',
+    // High-intensity & performance
+    'yell', 'yelling', 'scream', 'bellow', 'loud',
+    'breathless', 'panting', 'out of breath', 'heavy breathing', 'winded',
+    'panicked', 'panic', 'frantic', 'hysterical', 'desperate',
+    'hesitant', 'hesitation', 'nervous', 'trembling', 'quavering', 'timid', 'uncertain', 'stammer', 'stutter',
+    // Human Paralinguistic Audio Cues
+    'clears throat', 'clear throat', 'clearing throat', 'throat clearing', 'throat clear',
+    'sniffle', 'sniffling',
+    'gulp', 'gulping', 'swallow', 'swallows',
+    'yawn', 'yawns', 'yawning', 'sleepy', 'exhausted',
+    'humming', 'hum', 'hums',
+    'cackle'
   ].join('|');
 
   const squareEmotionRegex = new RegExp(`\\[\\/?(?:${emotionCues})\\]`, 'gi');
@@ -244,8 +604,8 @@ export function cleanSpeechText(
   // [gentle, emotional], [soft whisper], [voice filled with emotion], [speak gently], [deep, motivational],
   // [slowly building], [fade out, hopeful]
   text = text.replace(/\[\s*[^\]\n]{1,80}\s*\]/g, (match) => {
-    // Preserve speaker labels like [Narrator]:
-    if (/^\[[^\]]+\]\s*:/i.test(match)) return match;
+    // Preserve speaker labels like [Narrator]: and preserved pause tags like [pause: 0.50s]
+    if (/^\[[^\]]+\]\s*:/i.test(match) || /^\[\s*pause:\s*[\d.]+s?\s*\]/i.test(match)) return match;
     return ' ';
   });
 
@@ -273,6 +633,9 @@ export function cleanSpeechText(
   // Normalize technical terms so neural tokenizers articulate them seamlessly without pause
   text = text.replace(/\b[Xx]-rays\b/gi, 'exrays');
   text = text.replace(/\b[Xx]-ray\b/gi, 'exray');
+
+  // Backend Universal Phonetic Normalization (guarantees Spanish, Catalan & proper nouns sound natural across all TTS engines)
+  text = applyBackendPhonetics(text);
 
   // 7. SpeakSay Naturalizer Sanitization:
   // Strip emojis & decorative unicode symbols that trip up neural tokenizers
@@ -499,6 +862,22 @@ export const EMOTION_SPEED_MODIFIERS: Record<string, number> = {
   confident: 0.98,
   sad: 0.92,
   neutral: 1.00,
+  hopeful: 1.03,
+  mysterious: 0.92,
+  nostalgic: 0.94,
+  empathetic: 0.95,
+  relieved: 0.96,
+  disgusted: 1.04,
+  shouting: 1.12,
+  breathless: 1.14,
+  panicked: 1.15,
+  hesitant: 0.91,
+  clears_throat: 1.00,
+  sniffle: 0.95,
+  gulp: 0.95,
+  yawn: 0.90,
+  humming: 0.98,
+  cackle: 1.05,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -542,6 +921,9 @@ export function applyCategoryEmotionAnnotation(
 
   const pacing = options?.pacing || (options?.isMarcus ? 'story' : 'documentary');
   const enableBreaths = options?.enableBreaths ?? true;
+  const isMarcusVoice = Boolean(options?.isMarcus);
+  // Scale down clause pitch excursions for deep voices like Marcus to keep delivery velvety and prevent vocoder phase-shake
+  const calcPitchDelta = (delta: number) => isMarcusVoice ? Math.round(delta * 0.35) : delta;
 
   // Category-specific pause standards calibrated to 22%-26% documentary pacing (Attenborough / Ken Burns Standard)
   let defaultSentencePause = 0.58;
@@ -619,7 +1001,52 @@ export function applyCategoryEmotionAnnotation(
         blockRateDelta = 2;
         blockPitchDelta = 3;
         blockVolDelta = '+2%';
+      } else if (cue.includes('hopeful') || cue.includes('inspiring') || cue.includes('triumphant') || cue.includes('victory')) {
+        blockRateDelta = 3;
+        blockPitchDelta = 2;
+        blockVolDelta = '+3%';
+      } else if (cue.includes('mysterious') || cue.includes('eerie') || cue.includes('ominous')) {
+        blockRateDelta = -4;
+        blockPitchDelta = -3;
+        blockVolDelta = '-4%';
+        blockPauseBonus = 0.12;
+      } else if (cue.includes('nostalgic') || cue.includes('reminisc')) {
+        blockRateDelta = -3;
+        blockPitchDelta = -1;
+        blockVolDelta = '-2%';
+      } else if (cue.includes('empathetic') || cue.includes('compassion') || cue.includes('tender')) {
+        blockRateDelta = -2;
+        blockPitchDelta = 1;
+        blockVolDelta = '-1%';
+      } else if (cue.includes('relieved') || cue.includes('relief')) {
+        blockRateDelta = -2;
+        blockPitchDelta = -1;
+        blockVolDelta = '-3%';
+      } else if (cue.includes('disgust') || cue.includes('contempt')) {
+        blockRateDelta = 3;
+        blockPitchDelta = 2;
+        blockVolDelta = '+2%';
+      } else if (cue.includes('shout') || cue.includes('yell') || cue.includes('scream')) {
+        blockRateDelta = 8;
+        blockPitchDelta = 5;
+        blockVolDelta = '+8%';
+      } else if (cue.includes('breathless') || cue.includes('panting') || cue.includes('out of breath')) {
+        blockRateDelta = 10;
+        blockPitchDelta = 3;
+        blockVolDelta = '+2%';
+      } else if (cue.includes('panic') || cue.includes('frantic')) {
+        blockRateDelta = 12;
+        blockPitchDelta = 5;
+        blockVolDelta = '+4%';
+      } else if (cue.includes('hesitant') || cue.includes('nervous') || cue.includes('trembl')) {
+        blockRateDelta = -6;
+        blockPitchDelta = 2;
+        blockVolDelta = '-4%';
       }
+    }
+
+    if (isMarcusVoice) {
+      blockPitchDelta = Math.round(blockPitchDelta * 0.35);
     }
 
     // 2. Preprocess paragraph text
@@ -723,7 +1150,7 @@ export function applyCategoryEmotionAnnotation(
         clauses.push({
           text: uText,
           rateDeltaPct: blockRateDelta - 4,
-          pitchDeltaHz: blockPitchDelta - 3,
+          pitchDeltaHz: blockPitchDelta + calcPitchDelta(-3),
           volumeDelta: '-4%',
           pauseAfterSec: Math.max(pause, 0.78),
           prependBreath: enableBreaths,
@@ -736,7 +1163,7 @@ export function applyCategoryEmotionAnnotation(
         clauses.push({
           text: uText,
           rateDeltaPct: blockRateDelta - 2,
-          pitchDeltaHz: blockPitchDelta - 2, // downward declarative pitch drop
+          pitchDeltaHz: blockPitchDelta + calcPitchDelta(-2), // downward declarative pitch drop
           volumeDelta: blockVolDelta !== '+0%' ? blockVolDelta : '-2%',
           pauseAfterSec: Math.max(pause, 0.62),
           prependBreath: isFirstClause && enableBreaths,
@@ -755,7 +1182,7 @@ export function applyCategoryEmotionAnnotation(
             clauses.push({
               text: lead + ',',
               rateDeltaPct: blockRateDelta + 2,     // engaging setup
-              pitchDeltaHz: blockPitchDelta + 3,     // setup pitch lift (+3Hz)
+              pitchDeltaHz: blockPitchDelta + calcPitchDelta(3),     // setup pitch lift
               volumeDelta: '+2%',
               pauseAfterSec: defaultClausePause,
               prependBreath: isFirstClause && enableBreaths,
@@ -763,7 +1190,7 @@ export function applyCategoryEmotionAnnotation(
             clauses.push({
               text: tail,
               rateDeltaPct: blockRateDelta - 3,     // slow emotional landing
-              pitchDeltaHz: blockPitchDelta - 3,     // deep resonant drop (-3Hz)
+              pitchDeltaHz: blockPitchDelta + calcPitchDelta(-3),     // deep resonant drop
               volumeDelta: '-5%',                   // intimate softness
               pauseAfterSec: Math.min(pause, 0.85),
               prependBreath: false,
@@ -781,7 +1208,7 @@ export function applyCategoryEmotionAnnotation(
             clauses.push({
               text: lead + ',',
               rateDeltaPct: blockRateDelta + 2,
-              pitchDeltaHz: blockPitchDelta + 2,
+              pitchDeltaHz: blockPitchDelta + calcPitchDelta(2),
               volumeDelta: blockVolDelta,
               pauseAfterSec: defaultClausePause + 0.02,
               prependBreath: isFirstClause && enableBreaths,
@@ -789,7 +1216,7 @@ export function applyCategoryEmotionAnnotation(
             clauses.push({
               text: tail,
               rateDeltaPct: blockRateDelta - 1,
-              pitchDeltaHz: blockPitchDelta - 1,
+              pitchDeltaHz: blockPitchDelta + calcPitchDelta(-1),
               volumeDelta: blockVolDelta,
               pauseAfterSec: pause,
               prependBreath: false,
@@ -804,7 +1231,7 @@ export function applyCategoryEmotionAnnotation(
         clauses.push({
           text: uText,
           rateDeltaPct: blockRateDelta - 4,
-          pitchDeltaHz: blockPitchDelta - 4,
+          pitchDeltaHz: blockPitchDelta + calcPitchDelta(-4),
           volumeDelta: '-12%',
           pauseAfterSec: Math.max(pause, 0.70),
           prependBreath: isFirstClause && enableBreaths,
@@ -815,7 +1242,7 @@ export function applyCategoryEmotionAnnotation(
         clauses.push({
           text: uText,
           rateDeltaPct: blockRateDelta - 4,
-          pitchDeltaHz: blockPitchDelta - 3,
+          pitchDeltaHz: blockPitchDelta + calcPitchDelta(-3),
           volumeDelta: '-10%',
           pauseAfterSec: Math.max(pause, 0.70),
           prependBreath: isFirstClause && enableBreaths,
@@ -837,7 +1264,7 @@ export function applyCategoryEmotionAnnotation(
         clauses.push({
           text: uText,
           rateDeltaPct: blockRateDelta + 2,
-          pitchDeltaHz: blockPitchDelta + 3,
+          pitchDeltaHz: blockPitchDelta + calcPitchDelta(3),
           volumeDelta: '+3%',
           pauseAfterSec: Math.max(pause, 0.70),
           prependBreath: isFirstClause && enableBreaths,
@@ -848,7 +1275,7 @@ export function applyCategoryEmotionAnnotation(
         clauses.push({
           text: uText,
           rateDeltaPct: blockRateDelta - 2,
-          pitchDeltaHz: blockPitchDelta - 2,
+          pitchDeltaHz: blockPitchDelta + calcPitchDelta(-2),
           volumeDelta: '-6%',
           pauseAfterSec: Math.max(pause, 0.65),
           prependBreath: isFirstClause && enableBreaths,
@@ -859,7 +1286,7 @@ export function applyCategoryEmotionAnnotation(
         clauses.push({
           text: uText,
           rateDeltaPct: blockRateDelta - 2,
-          pitchDeltaHz: blockPitchDelta - 2,
+          pitchDeltaHz: blockPitchDelta + calcPitchDelta(-2),
           volumeDelta: '-4%',
           pauseAfterSec: Math.max(pause, 0.65),
           prependBreath: enableBreaths,
@@ -870,7 +1297,7 @@ export function applyCategoryEmotionAnnotation(
         clauses.push({
           text: uText,
           rateDeltaPct: blockRateDelta + 1,
-          pitchDeltaHz: blockPitchDelta + 1,
+          pitchDeltaHz: blockPitchDelta + calcPitchDelta(1),
           volumeDelta: '+1%',
           pauseAfterSec: Math.max(pause, 0.65),
           prependBreath: isFirstClause && enableBreaths,
@@ -1239,9 +1666,16 @@ export function splitIntoProsodicClauses(
 
   const timings = (pacingProfile && PACING_TIMING_MAP[pacingProfile]) || PACING_TIMING_MAP.documentary;
 
+  // Build regex covering all known EMOTION_LOOKUP keys
+  const emotionKeysPattern = Object.keys(EMOTION_LOOKUP)
+    .sort((a, b) => b.length - a.length)
+    .map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('|');
+  const inlineEmotionTagRegex = new RegExp(`\\[\\s*(${emotionKeysPattern})\\s*\\]`, 'gi');
+
   // Preserve inline emotion directives as unique markers before general sanitization
   let textWithEmotionMarkers = rawText.replace(
-    /\[\s*(whisper|whispering|dramatic|intense|serious|curious|wonder|calm|peaceful|gentle|excited|energetic|confident|bold|authoritative|sad|sorrow|angry|cheerful|happy|neutral)\s*\]/gi,
+    inlineEmotionTagRegex,
     (m, emo) => ` __EMOTION_TAG_${EMOTION_LOOKUP[emo.toLowerCase()] || emo.toLowerCase()}__ `
   );
   textWithEmotionMarkers = textWithEmotionMarkers.replace(
@@ -1266,12 +1700,11 @@ export function splitIntoProsodicClauses(
     const isLastPara = (pIdx === rawParagraphs.length - 1);
     const paraPause = isLastPara ? timings.sentencePause : timings.paragraphPause;
 
-    // Check if paragraph begins or contains an emotion tag
+    // Check if paragraph begins or contains an initial emotion tag
     let cleanPara = para;
-    const pEmotionMatch = cleanPara.match(/__EMOTION_TAG_([a-z]+)__/i);
+    const pEmotionMatch = cleanPara.match(/__EMOTION_TAG_([a-z_]+)__/i);
     if (pEmotionMatch) {
       activeEmotion = pEmotionMatch[1].toLowerCase();
-      cleanPara = cleanPara.replace(/__EMOTION_TAG_[a-z]+__/gi, ' ').replace(/[ \t]+/g, ' ');
     }
 
     // Mask abbreviations and numbers so periods don't trigger false sentence splits
@@ -1293,10 +1726,10 @@ export function splitIntoProsodicClauses(
       if (!s) continue;
 
       // Check if this specific sentence introduced a new emotion tag
-      const sEmotionMatch = s.match(/__EMOTION_TAG_([a-z]+)__/i);
+      const sEmotionMatch = s.match(/__EMOTION_TAG_([a-z_]+)__/i);
       if (sEmotionMatch) {
         activeEmotion = sEmotionMatch[1].toLowerCase();
-        s = s.replace(/__EMOTION_TAG_[a-z]+__/gi, ' ').replace(/[ \t]+/g, ' ').trim();
+        s = s.replace(/__EMOTION_TAG_[a-z_]+__/gi, ' ').replace(/[ \t]+/g, ' ').trim();
       }
 
       const isLastSentence = (sIdx === rawSentences.length - 1);
@@ -1308,7 +1741,7 @@ export function splitIntoProsodicClauses(
   }
 
   if (clauses.length === 0) {
-    const cleanFallback = normalizeDocumentaryPhonetics(text.replace(/__PARA_BREAK__|__EMOTION_TAG_[a-z]+__/g, '').trim());
+    const cleanFallback = normalizeDocumentaryPhonetics(text.replace(/__PARA_BREAK__|__EMOTION_TAG_[a-z_]+__/g, '').trim());
     clauses.push({
       text: cleanFallback,
       pauseAfterSec: timings.sentencePause,

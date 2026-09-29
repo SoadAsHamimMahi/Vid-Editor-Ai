@@ -19,7 +19,8 @@ import {
   Zap,
   Volume2,
   Mic,
-  Loader2
+  Loader2,
+  RotateCcw
 } from 'lucide-react';
 import { useProjectStore } from '../../store/useProjectStore';
 import {
@@ -46,6 +47,8 @@ export const TimelineGapCheckerModal: React.FC<TimelineGapCheckerModalProps> = (
     setSelectedSceneId,
     insertPromptSceneAtIndex,
     setCustomPromptImportModalOpen,
+    canUndo,
+    undo,
   } = useProjectStore();
 
   const [activeTab, setActiveTab] = useState<'timeline_audit' | 'list_compare'>('timeline_audit');
@@ -337,7 +340,7 @@ export const TimelineGapCheckerModal: React.FC<TimelineGapCheckerModalProps> = (
                     onClick={() => {
                       const res = useProjectStore.getState().autoArrangeExistingScenes();
                       if (res && res.count > 0) {
-                        setInsertedNotice(`✓ Successfully sorted and renumbered all ${res.count} scenes chronologically by #M-SS speech timestamps!`);
+                        setInsertedNotice(`✓ Successfully sorted and renumbered all ${res.count} scenes chronologically by speech timestamps!`);
                       }
                     }}
                     className="px-3.5 py-2 rounded-lg bg-[#1e2030] hover:bg-[#282a40] text-slate-200 border border-[#3b3e5b] font-bold text-xs flex items-center justify-center gap-1.5 shadow-md cursor-pointer active:scale-95 transition-transform flex-shrink-0"
@@ -345,6 +348,20 @@ export const TimelineGapCheckerModal: React.FC<TimelineGapCheckerModalProps> = (
                     <Clock className="w-3.5 h-3.5 stroke-[2.5]" />
                     <span>Sort (#M-SS)</span>
                   </button>
+
+                  {canUndo && (
+                    <button
+                      onClick={() => {
+                        undo();
+                        setInsertedNotice('✓ Successfully restored previous state!');
+                      }}
+                      className="px-3.5 py-2 rounded-lg bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 border border-rose-500/40 font-bold text-xs flex items-center justify-center gap-1.5 shadow-md cursor-pointer active:scale-95 transition-transform flex-shrink-0"
+                      title="Undo last change and revert to previous timeline snapshot"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-rose-300" />
+                      <span>Undo</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -605,6 +622,19 @@ export const TimelineGapCheckerModal: React.FC<TimelineGapCheckerModalProps> = (
           </div>
 
           <div className="flex items-center gap-2">
+            {canUndo && (
+              <button
+                onClick={() => {
+                  undo();
+                  setInsertedNotice('✓ Successfully restored previous state!');
+                }}
+                className="px-3 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900/70 text-rose-200 border border-rose-500/40 text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer active:scale-95"
+                title="Undo last change"
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-rose-300" />
+                <span>Undo Last Action</span>
+              </button>
+            )}
             <button
               onClick={() => {
                 onClose();

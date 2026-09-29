@@ -58,6 +58,8 @@ export type ColorLUT =
   | 'original';
 
 export type CaptionStyle = 
+  | 'plain_bold_outline'
+  | 'plain_text'
   | 'none'
   | 'mrbeast_impact'
   | 'hormozi_pop'
@@ -240,7 +242,7 @@ export interface OverlayClip {
   name: string;
   filePath: string;
   mediaType: 'image' | 'video';
-  track: 'V2' | 'V3' | 'V4';
+  track: 'V2' | 'V3' | 'V4' | 'V5';
   startTime: number; // in seconds
   duration: number; // in seconds
   opacity?: number; // 0.0 to 1.0 (default 1.0)
@@ -255,6 +257,7 @@ export interface TrackMuteState {
   v2?: boolean; // Mute/hide overlay video/image layer (V2)
   v3?: boolean; // Mute/hide secondary overlay layer (V3)
   v4?: boolean; // Mute/hide overlay layer (V4)
+  v5?: boolean; // Mute/hide overlay/sticker layer (V5)
   a1?: boolean; // Mute voiceover audio
   a2?: boolean; // Mute background music
   a3?: boolean; // Mute SFX audio clips
@@ -286,6 +289,7 @@ export interface ProjectMetadata {
   aspectRatio: AspectRatio;
   captionStyle: CaptionStyle;
   captionPosition?: { x: number; y: number }; // Offset percentage from bottom center (x: -50 to 50, y: -20 to 80)
+  captionScale?: number; // Scaling factor for subtitle text size (0.6 to 2.5, default 1.0)
   fps: number;
   width: number;
   height: number;
@@ -322,6 +326,7 @@ export type FlowAspectRatio = '16:9' | '9:16';
 export interface FlowGenerationSettings {
   mode: 'image' | 'video' | 'animate';
   videoModel: FlowVideoModel;
+  imageModel?: string;
   videoDuration: FlowVideoDuration;
   batchCount: FlowBatchCount;
   aspectRatio: FlowAspectRatio;
@@ -474,7 +479,8 @@ export type AudioMasteringPreset =
   | 'late_night_warmth'
   | 'deep_sleep_master'
   | 'cinematic_bass'
-  | 'deep_cinema_warmth';
+  | 'deep_cinema_warmth'
+  | 'deep_night_story';
 
 export interface TTSGenerationRequest {
   text: string;
@@ -491,6 +497,21 @@ export interface TTSGenerationRequest {
   masteringPreset?: AudioMasteringPreset;
   outputPath?: string;
   apiKey?: string;
+  f5Quality?: 'standard' | 'ultra_master' | 'cinema_studio';
+  odeSteps?: number;
+  enableNaturalBreaths?: boolean;
+  seed?: number;
+  cfgStrength?: number; // Flow-matching guidance scale: 1.5 (stable/controlled) → 1.9 (natural default) → 2.5 (expressive/dynamic)
+}
+
+export interface TTSProgressData {
+  type?: string;
+  chunk?: number;
+  total?: number;
+  percent: number;
+  elapsedSec: number;
+  etaSec?: number;
+  message?: string;
 }
 
 export interface DialogueSpeaker {
@@ -550,4 +571,134 @@ export interface TTSGenerationResult {
   record?: GeneratedVoiceRecord;
   error?: string;
 }
+
+// ==========================================
+// AUTONOMOUS MULTI-AGENT GEMINI STUDIO TYPES
+// ==========================================
+export interface ChannelBrandProfile {
+  id: string;
+  name: string;
+  description: string;
+  writerTone: string;
+  directorVisualFormula: string;
+  negativePrompt: string;
+  defaultVoiceModel: string;
+  defaultVoiceEngine: 'kokoro' | 'edge-tts' | 'elevenlabs';
+  speakingSpeed: number;
+  dspPreset: string;
+  sentenceGapMs: number;
+}
+
+export type AgentRoleType =
+  | 'speechwriter'
+  | 'chief_critic'
+  | 'visual_director'
+  | 'vision_qc_inspector'
+  | 'writer_director'
+  | 'bypass';
+
+export interface AgentSlotConfig {
+  slotId: number;
+  role: AgentRoleType;
+  name: string;
+  systemPrompt: string;
+  model: string;
+  temperature: number;
+  enabled: boolean;
+  scoreThreshold?: number;
+  maxLoops?: number;
+}
+
+export interface AgenticWorkflowConfig {
+  topic: string;
+  channelProfileId: string;
+  workflowMode?: 'topic_to_video' | 'script_to_video';
+  customScript?: string;
+  lengthMode: 'shorts_60s' | 'standard_5m' | 'epic_30k';
+  targetDurationMinutes?: number;
+  apiKeys: string[];
+  slots?: AgentSlotConfig[];
+  targetPassingScore?: number;
+  maxRevisionLoops?: number;
+  generateImages?: boolean;
+  runVisionQc?: boolean;
+  autoCastVoice?: boolean;
+  synthesizeAudio?: boolean;
+  aspectRatio?: '16:9' | '9:16';
+  motionRhythm?: 'dynamic_alternating' | 'cinematic_documentary' | 'action_burst' | 'ambient_slow_burn';
+  requireScriptApproval?: boolean;
+}
+
+export interface CriticEvaluation {
+  score: number;
+  passed: boolean;
+  hookScore: number;
+  resonanceScore: number;
+  arcScore: number;
+  cadenceScore: number;
+  visualScore: number;
+  summaryFeedback: string;
+  actionableBullets: string[];
+}
+
+export interface AgenticScene {
+  sceneIndex: number;
+  timecode: string;
+  sentence: string;
+  prompt: string;
+  imageUrl?: string;
+  localImagePath?: string;
+  motionType: MotionType;
+  estimatedDuration: number;
+  visionQcPassed?: boolean;
+  visionQcScore?: number;
+  visionQcNotes?: string;
+}
+
+export interface AgenticStudioProgress {
+  stage: 'idle' | 'initializing' | 'writing' | 'critique' | 'revising' | 'awaiting_approval' | 'directing' | 'audio_casting' | 'synthesizing_audio' | 'generating_media' | 'vision_qc' | 'completed' | 'error';
+  percent: number;
+  message: string;
+  currentLoop?: number;
+  maxLoops?: number;
+  latestScore?: number;
+  targetScore?: number;
+  evaluation?: CriticEvaluation;
+  script?: string;
+  scenes?: AgenticScene[];
+  castVoice?: {
+    engine: string;
+    model: string;
+    speed: number;
+    dspPreset: string;
+    reason: string;
+  };
+  voiceoverAudioPath?: string;
+  subtitles?: Array<{ id: string; text: string; startTime: number; endTime: number }>;
+}
+
+export interface AgenticLogEntry {
+  id: string;
+  timestamp: number;
+  agentRole: AgentRoleType | 'system';
+  agentName: string;
+  type: 'info' | 'draft' | 'critique' | 'director' | 'image' | 'qc' | 'error' | 'success';
+  title: string;
+  content: string;
+  metadata?: any;
+}
+
+export interface AgenticStudioResult {
+  success: boolean;
+  script?: string;
+  evaluation?: CriticEvaluation;
+  scenes?: AgenticScene[];
+  castVoice?: any;
+  continuityBible?: any;
+  voiceoverAudioPath?: string;
+  subtitles?: Array<{ id: string; text: string; startTime: number; endTime: number }>;
+  aspectRatio?: '16:9' | '9:16';
+  error?: string;
+}
+
 

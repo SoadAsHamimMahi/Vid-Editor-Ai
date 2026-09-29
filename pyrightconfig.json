@@ -6,5 +6,9 @@
     "colab_video_worker.ipynb"
   ],
   "reportMissingModuleSource": "none",
-  "reportMissingImports": "none"
+  "reportMissingImports": "none",
+  "extraPaths": [
+    ".agent/skills/tts-voice-naturalizer/scripts",
+    "scripts"
+  ]
 }

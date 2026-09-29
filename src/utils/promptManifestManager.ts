@@ -14,18 +14,36 @@ export function parseTimecodeToSeconds(timecode: string): number {
     clean = clean.replace(/^[#\[\]\s]+|[#\[\]\s]+$/g, '').trim();
   }
 
-  // 1. Check decimal milliseconds/centiseconds: e.g. 4-03.17 or 04:03.17 or 4:03,17 or 00:01.53
-  const matchMs = clean.match(/^(\d+)[-_:](\d{1,2})[.:,](\d{1,3})/);
+  // 0. Check 4-part: H:MM:SS.mmm or H-MM-SS.mmm (e.g. 01:05:04.170, 1-05-04.170, 01:23:45.500)
+  const match4 = clean.match(/^(\d+)[-_:](\d{1,2})[-_:](\d{1,2})[.,](\d{1,3})/);
+  if (match4) {
+    const hours = parseInt(match4[1], 10);
+    const mins = parseInt(match4[2], 10);
+    const secs = parseInt(match4[3], 10);
+    const frac = parseFloat('0.' + match4[4]);
+    return +(hours * 3600 + mins * 60 + secs + frac).toFixed(3);
+  }
+
+  // 1. Check 3-part with colons: HH:MM:SS (e.g. 00:47:13, 01:02:15)
+  const match3Col = clean.match(/^(\d{1,2}):(\d{2}):(\d{2})\b/);
+  if (match3Col) {
+    const hours = parseInt(match3Col[1], 10);
+    const mins = parseInt(match3Col[2], 10);
+    const secs = parseInt(match3Col[3], 10);
+    return hours * 3600 + mins * 60 + secs;
+  }
+
+  // 2. Check decimal milliseconds/centiseconds: e.g. 4-03.17 or 04:03.17 or 4:03,17 or 00:01.53
+  const matchMs = clean.match(/^(\d+)[-_:](\d{1,2})[.,](\d{1,3})/);
   if (matchMs) {
     const mins = parseInt(matchMs[1], 10);
     const secs = parseInt(matchMs[2], 10);
-    const msStr = matchMs[3];
-    const ms = msStr.length === 1 ? parseInt(msStr, 10) * 0.1 : msStr.length === 2 ? parseInt(msStr, 10) * 0.01 : parseInt(msStr, 10) * 0.001;
-    return +(mins * 60 + secs + ms).toFixed(3);
+    const frac = parseFloat('0.' + matchMs[3]);
+    return +(mins * 60 + secs + frac).toFixed(3);
   }
 
-  // 2. Check 3-part: H-MM-SS or M-SS-ms (e.g. 0-01-53, 1-02-15 or 4-03-17)
-  const match3 = clean.match(/^(\d+)[-_:](\d{1,2})[-_:](\d{1,2})/);
+  // 3. Check 3-part with hyphens: H-MM-SS or M-SS-ms (e.g. 0-01-53, 1-02-15 or 4-03-17)
+  const match3 = clean.match(/^(\d+)[-_](\d{1,2})[-_](\d{1,2})/);
   if (match3) {
     const p1 = parseInt(match3[1], 10);
     const p2 = parseInt(match3[2], 10);
@@ -40,7 +58,7 @@ export function parseTimecodeToSeconds(timecode: string): number {
     return p1 * 3600 + p2 * 60 + p3;
   }
 
-  // 3. Check 2-part: M-SS or MM:SS or M-S
+  // 4. Check 2-part: M-SS or MM:SS or M-S
   const match2 = clean.match(/(\d+)[-_:](\d{1,2})/);
   if (match2) {
     const mins = parseInt(match2[1], 10);
@@ -209,8 +227,8 @@ export function parsePastedBatch(rawText: string): { timecode: string; prompt: s
   const trimmed = rawText.trim();
   if (!trimmed) return [];
 
-  // 1. Priority 1: Check for explicit '#' timecode headers (#00-00.07, #00-03.80, #0-00, etc.)
-  const hashTcRegex = /(?:^|\s)(#\d+[-_:]\d{1,2}(?:[.:,]\d{1,3}|[-_:]\d{1,2})?)/g;
+  // 1. Priority 1: Check for explicit '#' timecode headers (#00-00.07, #01:05:04.170, #0-00, etc.)
+  const hashTcRegex = /(?:^|\s)(#\d+[-_:]\d{1,2}(?:[-_:]\d{1,2})?(?:[.:,]\d{1,3}|[-_:]\d{1,2})?)/g;
   const hashOccurrences: { timecode: string; index: number }[] = [];
   let hMatch: RegExpExecArray | null;
 
@@ -265,7 +283,7 @@ export function parsePastedBatch(rawText: string): { timecode: string; prompt: s
   }
 
   // 2. Priority 2: Check for timestamp range line format: [00:00.07 - 00:01.63] text
-  const rangeLineRegex = /(?:^|\n)\s*\[\s*(\d+[-_:]\d{1,2}(?:[.:,]\d{1,3}|[-_:]\d{1,2})?)\s*[-–—]\s*(\d+[-_:]\d{1,2}(?:[.:,]\d{1,3}|[-_:]\d{1,2})?)\s*\]\s*([^\n\r]+)/g;
+  const rangeLineRegex = /(?:^|\n)\s*\[\s*(\d+[-_:]\d{1,2}(?:[-_:]\d{1,2})?(?:[.:,]\d{1,3}|[-_:]\d{1,2})?)\s*[-–—]\s*(\d+[-_:]\d{1,2}(?:[-_:]\d{1,2})?(?:[.:,]\d{1,3}|[-_:]\d{1,2})?)\s*\]\s*([^\n\r]+)/g;
   const rangeMatches = Array.from(trimmed.matchAll(rangeLineRegex));
   if (rangeMatches.length >= 2 || (rangeMatches.length === 1 && trimmed.split(/\r?\n/).filter(Boolean).length <= 2)) {
     return rangeMatches.map((m) => {
@@ -281,8 +299,8 @@ export function parsePastedBatch(rawText: string): { timecode: string; prompt: s
   }
 
   // 2. Position-based timecode occurrence slicer:
-  // Scans for all exact timecode occurrences (#0-00, #0-02, #4-03.17, etc.)
-  const timecodeFinder = /(#\d+[-_:]\d{1,2}(?:[.:,]\d{1,3}|[-_:]\d{1,2})?|\[\d+[-_:]\d{1,2}(?:[.:,]\d{1,3}|[-_:]\d{1,2})?\]|(?:\b\d{1,2}[-_:]\d{2}(?:[.:,]\d{1,3})?\b))/g;
+  // Scans for all exact timecode occurrences (#0-00, #0-02, #4-03.17, #01:05:04.170, etc.)
+  const timecodeFinder = /(#\d+[-_:]\d{1,2}(?:[-_:]\d{1,2})?(?:[.:,]\d{1,3}|[-_:]\d{1,2})?|\[\d+[-_:]\d{1,2}(?:[-_:]\d{1,2})?(?:[.:,]\d{1,3}|[-_:]\d{1,2})?\]|(?:\b\d{1,2}[-_:]\d{2}(?:[-_:]\d{1,2})?(?:[.:,]\d{1,3})?\b))/g;
   const timecodeOccurrences: { timecode: string; index: number }[] = [];
   let match: RegExpExecArray | null;
 

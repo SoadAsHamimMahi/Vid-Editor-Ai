@@ -25,7 +25,9 @@ import {
   Clock,
   Undo2,
   Redo2,
-  AlertCircle
+  AlertCircle,
+  Plus,
+  Trash2
 } from 'lucide-react';
 import { RibbonTab } from '../../types';
 import { useGenerationETA } from '../../hooks/useGenerationETA';
@@ -61,6 +63,9 @@ export const Header: React.FC<HeaderProps> = () => {
     setMissingMediaModalOpen,
     setIsMcpModalOpen,
     setIsVoiceDesignerModalOpen,
+    setIsAgenticStudioModalOpen,
+    addCdpPort,
+    removeCdpPort,
   } = useProjectStore();
 
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -68,6 +73,7 @@ export const Header: React.FC<HeaderProps> = () => {
   const [isAiDropdownOpen, setIsAiDropdownOpen] = useState(false);
   const [isEnginePopoverOpen, setIsEnginePopoverOpen] = useState(false);
   const [isConnectingCdp, setIsConnectingCdp] = useState(false);
+  const [customPortInput, setCustomPortInput] = useState('');
 
   const eta = useGenerationETA();
 
@@ -367,44 +373,120 @@ export const Header: React.FC<HeaderProps> = () => {
                 </button>
               </div>
 
-              {/* Advanced Diagnostics Toggle for Technical Users */}
-              <details className="group text-[11px] text-slate-400">
-                <summary className="flex items-center justify-between py-1 cursor-pointer hover:text-slate-200 font-medium">
-                  <span>Advanced Connection Details</span>
+              {/* Advanced Diagnostics Toggle & Unlimited Ports Management */}
+              <details className="group text-[11px] text-slate-400" open>
+                <summary className="flex items-center justify-between py-1 cursor-pointer hover:text-slate-200 font-medium select-none">
+                  <div className="flex items-center gap-1.5">
+                    <span>Active Ports & Accounts</span>
+                    <span className="px-1.5 py-0.2 rounded-full bg-surface-elevated text-indigo-300 font-mono text-[10px] border border-border-subtle">
+                      {browsers.length} ports
+                    </span>
+                  </div>
                   <ChevronDown className="w-3 h-3 transition-transform group-open:rotate-180" />
                 </summary>
                 <div className="pt-2 space-y-2">
-                  {[9222, 9223].map((port) => {
-                    const b = browsers.find((item) => item.port === port);
-                    const isCanvasReady = !!b?.connected && b.hasProjectOpen !== false;
-                    return (
-                      <div key={port} className="flex items-center justify-between p-2 bg-surface-canvas rounded-lg border border-border-subtle text-xs">
-                        <div>
-                          <span className="font-mono text-slate-300">Port :{port}</span>
-                          <div className={`text-[10px] ${isCanvasReady ? 'text-emerald-400' : 'text-slate-400'}`}>
-                            {isCanvasReady ? 'Connected' : 'Offline'}
+                  <div className="max-h-56 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                    {browsers.map((b) => {
+                      const port = b.port;
+                      const isCanvasReady = !!b?.connected && b.hasProjectOpen !== false;
+                      const isNoProjectOpen = !isCanvasReady && Boolean(b?.browserOpen);
+                      return (
+                        <div key={port} className="flex items-center justify-between p-2 bg-surface-canvas rounded-lg border border-border-subtle text-xs transition-colors hover:border-border-active">
+                          <div className="flex items-center gap-2">
+                            <span className={`w-2 h-2 rounded-full ${isCanvasReady ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]' : isNoProjectOpen ? 'bg-amber-400 animate-pulse' : 'bg-slate-500'}`} />
+                            <div>
+                              <div className="font-mono font-semibold text-slate-200 text-xs">Port :{port}</div>
+                              <div className={`text-[10px] ${isCanvasReady ? 'text-emerald-400' : isNoProjectOpen ? 'text-amber-400' : 'text-slate-400'}`}>
+                                {isCanvasReady ? 'Connected' : isNoProjectOpen ? 'Open Project' : 'Offline'}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              onClick={() => handleConnectPort(port)}
+                              disabled={isConnectingCdp}
+                              className={`px-2 py-1 rounded text-[10px] font-bold cursor-pointer transition-colors ${
+                                isCanvasReady
+                                  ? 'bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-500/50 text-emerald-300'
+                                  : 'bg-surface-elevated hover:bg-slate-700 text-slate-200'
+                              }`}
+                            >
+                              {isCanvasReady ? 'Active' : 'Connect'}
+                            </button>
+                            {(isCanvasReady || isNoProjectOpen) && (
+                              <button
+                                onClick={() => handleClosePort(port)}
+                                className="px-2 py-1 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/40 rounded text-[10px] font-semibold cursor-pointer transition-colors"
+                              >
+                                Disconnect
+                              </button>
+                            )}
+                            {browsers.length > 1 && (
+                              <button
+                                onClick={async () => {
+                                  await removeCdpPort(port);
+                                }}
+                                className="p-1 text-slate-500 hover:text-rose-400 hover:bg-rose-950/40 rounded transition-colors cursor-pointer"
+                                title={`Delete Port :${port}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </div>
                         </div>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            onClick={() => handleConnectPort(port)}
-                            disabled={isConnectingCdp}
-                            className="px-2 py-1 bg-surface-elevated hover:bg-slate-700 text-slate-200 rounded text-[10px] font-semibold cursor-pointer"
-                          >
-                            {isCanvasReady ? 'Active' : 'Connect'}
-                          </button>
-                          {isCanvasReady && (
-                            <button
-                              onClick={() => handleClosePort(port)}
-                              className="px-2 py-1 bg-rose-950/40 hover:bg-rose-900/60 text-rose-300 border border-rose-800/40 rounded text-[10px] font-semibold cursor-pointer"
-                            >
-                              Disconnect
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
+                  </div>
+
+                  {/* Add More Unlimited Ports */}
+                  <div className="pt-2 border-t border-border-subtle flex items-center gap-1.5">
+                    <button
+                      onClick={async () => {
+                        const highest = browsers.reduce((max, b) => Math.max(max, b.port), 9221);
+                        await addCdpPort(highest + 1);
+                      }}
+                      className="flex-1 py-1.5 px-2 bg-indigo-950/50 hover:bg-indigo-900/60 text-indigo-300 border border-indigo-500/40 rounded-lg text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-98"
+                      title="Add next consecutive port"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>+ Add Port :{browsers.reduce((max, b) => Math.max(max, b.port), 9221) + 1}</span>
+                    </button>
+
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        placeholder="Port"
+                        value={customPortInput}
+                        onChange={(e) => setCustomPortInput(e.target.value)}
+                        onKeyDown={async (e) => {
+                          if (e.key === 'Enter' && customPortInput.trim()) {
+                            const p = parseInt(customPortInput.trim(), 10);
+                            if (p >= 1024 && p <= 65535) {
+                              await addCdpPort(p);
+                              setCustomPortInput('');
+                            }
+                          }
+                        }}
+                        className="w-16 px-1.5 py-1 bg-surface-canvas border border-border-subtle rounded text-[11px] font-mono text-slate-200 focus:outline-hidden focus:border-indigo-500"
+                        min="1024"
+                        max="65535"
+                      />
+                      <button
+                        onClick={async () => {
+                          if (!customPortInput.trim()) return;
+                          const p = parseInt(customPortInput.trim(), 10);
+                          if (p >= 1024 && p <= 65535) {
+                            await addCdpPort(p);
+                            setCustomPortInput('');
+                          }
+                        }}
+                        className="px-2 py-1 bg-surface-elevated hover:bg-slate-700 text-slate-200 border border-border-subtle rounded text-[10px] font-semibold cursor-pointer"
+                        title="Add custom port"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </details>
             </div>
@@ -433,6 +515,17 @@ export const Header: React.FC<HeaderProps> = () => {
           <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-indigo-500/30 text-indigo-200 border border-indigo-400/30">AI</span>
         </button>
 
+        {/* 1.7. Autonomous Multi-Agent Gemini Studio */}
+        <button
+          onClick={() => setIsAgenticStudioModalOpen(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-indigo-950/80 via-purple-950/70 to-cyan-950/80 hover:from-indigo-900/90 hover:to-cyan-900/90 border border-indigo-400/50 hover:border-cyan-400 text-cyan-200 rounded-lg text-xs font-bold transition-all shadow-[0_0_12px_rgba(99,102,241,0.2)] hover:shadow-[0_0_16px_rgba(34,211,238,0.35)] cursor-pointer active:scale-98"
+          title="Autonomous Multi-Agent Gemini Studio (Speechwriter ↔ Critic ≥9.5 ➔ Director ➔ Vision QC)"
+        >
+          <Bot className="w-3.5 h-3.5 text-cyan-300 animate-pulse" />
+          <span className="hidden sm:inline">Agentic Studio</span>
+          <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-cyan-400/20 text-cyan-200 border border-cyan-400/40">AI CREW</span>
+        </button>
+
         {/* 2. Unified AI Creation Studio Dropdown */}
         <div className="relative" ref={aiDropdownRef}>
           <button
@@ -449,6 +542,25 @@ export const Header: React.FC<HeaderProps> = () => {
               <div className="px-2.5 py-1.5 border-b border-border-subtle text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                 Creation Wizards
               </div>
+
+              <button
+                onClick={() => {
+                  setIsAiDropdownOpen(false);
+                  setIsAgenticStudioModalOpen(true);
+                }}
+                className="w-full flex items-center gap-3 p-2 rounded-xl bg-indigo-950/40 hover:bg-indigo-900/60 text-cyan-200 border border-indigo-500/30 text-xs font-semibold transition-all text-left cursor-pointer group"
+              >
+                <div className="w-7 h-7 rounded-lg bg-gradient-to-tr from-indigo-500 to-cyan-400 text-white flex items-center justify-center shadow-xs">
+                  <Bot className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="font-bold text-white group-hover:text-cyan-300 flex items-center gap-1.5">
+                    <span>Autonomous Crew</span>
+                    <span className="text-[9px] px-1 py-0.2 rounded bg-cyan-500/30 text-cyan-200 font-mono">v2.0</span>
+                  </div>
+                  <div className="text-[10px] text-slate-300">Writer ↔ Critic (≥9.5) ➔ Director</div>
+                </div>
+              </button>
 
               <button
                 onClick={() => {

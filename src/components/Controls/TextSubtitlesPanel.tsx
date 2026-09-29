@@ -16,7 +16,8 @@ import {
   RefreshCw,
   Trash2,
   AlertCircle,
-  FileAudio
+  FileAudio,
+  Zap
 } from 'lucide-react';
 import { CaptionStyle } from '../../types';
 
@@ -30,6 +31,22 @@ interface PresetCard {
 }
 
 const PRESET_STYLES: PresetCard[] = [
+  {
+    id: 'plain_bold_outline',
+    name: 'Plain Bold Outline',
+    category: '🎬 Documentary / Video Essay',
+    previewText: 'It Was Called A Qahveh Khaneh',
+    previewBg: 'from-zinc-900 via-neutral-950 to-black',
+    previewStyle: {
+      fontFamily: '"Montserrat", "Arial Rounded MT Bold", sans-serif',
+      color: '#ffffff',
+      WebkitTextStroke: '2.5px #000000',
+      paintOrder: 'stroke fill',
+      textShadow: '0 2px 4px rgba(0, 0, 0, 0.95), 0 4px 10px rgba(0, 0, 0, 0.8)',
+      fontWeight: '900',
+      letterSpacing: '0.01em',
+    }
+  },
   {
     id: 'mrbeast_impact',
     name: 'MrBeast Viral Pop',
@@ -181,9 +198,11 @@ export const TextSubtitlesPanel: React.FC = () => {
   const { 
     project, 
     updateMetadata,
+    setCaptionScale,
     currentTime,
     addOverlayClip,
     autoGenerateSubtitlesFromVoiceover,
+    regenerateUntranscribedSubtitles,
     clearAllSubtitles,
     isTranscribingSubtitles
   } = useProjectStore();
@@ -205,10 +224,12 @@ export const TextSubtitlesPanel: React.FC = () => {
   const audioFileName = voiceoverPath ? voiceoverPath.split(/[\\/]/).pop() || 'Voiceover Audio' : null;
   const totalSubtitleWords = project.scenes.reduce((acc, s) => acc + (s.subtitles?.length || 0), 0);
   const scenesWithSubtitles = project.scenes.filter((s) => s.subtitles && s.subtitles.length > 0).length;
+  const untranscribedScenes = project.scenes.filter((s) => !s.subtitles || s.subtitles.length === 0);
+  const untranscribedCount = untranscribedScenes.length;
 
   const handleTranscribeSpeech = async () => {
     setLocalIsTranscribing(true);
-    setStatusMessage('Transcribing verbatim spoken voice speech across timeline...');
+    setStatusMessage('Transcribing verbatim spoken voice speech across timeline (safe rate-limited)...');
     setErrorMessage(null);
 
     try {
@@ -220,6 +241,25 @@ export const TextSubtitlesPanel: React.FC = () => {
       }
     } catch (err: any) {
       setErrorMessage(err.message || 'Transcription error occurred.');
+    } finally {
+      setLocalIsTranscribing(false);
+    }
+  };
+
+  const handleRegenerateUntranscribed = async () => {
+    setLocalIsTranscribing(true);
+    setStatusMessage(`Regenerating captions for ${untranscribedCount} untranscribed scenes with safe rate limits & auto-retry...`);
+    setErrorMessage(null);
+
+    try {
+      const res = await regenerateUntranscribedSubtitles();
+      if (res.success) {
+        setStatusMessage(`✓ Successfully regenerated ${res.wordsCount || 0} words across ${res.filledScenes || 0} missing scenes!`);
+      } else {
+        setErrorMessage(res.error || 'Failed to regenerate untranscribed areas.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Regeneration error occurred.');
     } finally {
       setLocalIsTranscribing(false);
     }
@@ -351,10 +391,45 @@ export const TextSubtitlesPanel: React.FC = () => {
             ) : (
               <>
                 <Mic className="w-3.5 h-3.5" />
-                <span>{totalSubtitleWords > 0 ? 'Re-Sync Voice Speech Subtitles' : 'Generate Subtitles from Voice'}</span>
+                <span>{totalSubtitleWords > 0 ? 'Re-Sync Full Voiceover' : 'Generate Subtitles from Voice'}</span>
               </>
             )}
           </button>
+
+          {/* Missing Untranscribed Fallback / Gap Fill Card */}
+          {untranscribedCount > 0 && scenesWithSubtitles > 0 && (
+            <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-500/40 space-y-2">
+              <div className="flex items-center justify-between text-xs font-semibold text-amber-300">
+                <span className="flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+                  <span>{untranscribedCount} Scenes Missing Captions</span>
+                </span>
+                <span className="text-[10px] font-mono bg-amber-900/60 px-1.5 py-0.5 rounded text-amber-200">
+                  {untranscribedCount} / {project.scenes.length}
+                </span>
+              </div>
+              <p className="text-[10px] text-slate-300 leading-relaxed">
+                Some timeline areas are untranscribed (due to Groq rate limits or silence). Click below to safely regenerate <strong>only the untranscribed scenes</strong> with safe rate-limit backoff.
+              </p>
+              <button
+                onClick={handleRegenerateUntranscribed}
+                disabled={isTranscribing || !voiceoverPath}
+                className="w-full py-1.5 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 disabled:opacity-40 text-slate-950 font-bold rounded-lg text-xs flex items-center justify-center gap-1.5 shadow-md shadow-amber-600/20 active:scale-95 transition-all cursor-pointer"
+              >
+                {isTranscribing ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin text-slate-950" />
+                    <span>Regenerating Missing Areas...</span>
+                  </>
+                ) : (
+                  <>
+                    <Zap className="w-3.5 h-3.5 text-slate-950" />
+                    <span>Regenerate Untranscribed Area Only</span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
 
           {/* Status Messages */}
           {statusMessage && (
@@ -370,6 +445,44 @@ export const TextSubtitlesPanel: React.FC = () => {
               <span>{errorMessage}</span>
             </div>
           )}
+        </div>
+
+        {/* Caption Font Size / Scale Control */}
+        <div className="p-3 rounded-xl bg-[#181722] border border-[#29263a] space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold text-slate-200 flex items-center gap-1.5">
+              <Type className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Caption Font Size</span>
+            </span>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-cyan-400 font-semibold text-xs">
+                {Math.round((project.metadata.captionScale ?? 1.0) * 100)}%
+              </span>
+              {project.metadata.captionScale !== undefined && project.metadata.captionScale !== 1.0 && (
+                <button
+                  type="button"
+                  onClick={() => setCaptionScale(1.0)}
+                  className="text-[10px] text-slate-400 hover:text-slate-200 underline"
+                >
+                  Reset
+                </button>
+              )}
+            </div>
+          </div>
+          <input
+            type="range"
+            min="0.5"
+            max="2.5"
+            step="0.05"
+            value={project.metadata.captionScale ?? 1.0}
+            onChange={(e) => setCaptionScale(parseFloat(e.target.value))}
+            className="w-full h-1 bg-[#26262e] rounded cursor-pointer accent-cyan-400"
+          />
+          <div className="flex justify-between text-[9px] text-slate-500 font-mono">
+            <span>50% (Compact)</span>
+            <span>100% (Default)</span>
+            <span>250% (Large)</span>
+          </div>
         </div>
 
         {/* Caption Style Presets Grid */}

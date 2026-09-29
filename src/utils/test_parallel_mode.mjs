@@ -23,12 +23,29 @@ class MockParallelEngine {
     const harvestedIds = [];
     for (const card of this.inFlight) {
       const tagLower = card.sceneTag.toLowerCase();
-      // Priority 1: Match by reference tag
-      const candIdx = canvasCompletedCards.findIndex((c) => {
+      // Priority 0: Stamped boundSceneId match
+      let candIdx = canvasCompletedCards.findIndex((c) => {
         if (this.consumedUrls.has(c.url)) return false;
-        const text = c.cardText.toLowerCase();
-        return text.includes(tagLower) || text.includes(card.promptSignature);
+        return c.boundSceneId && c.boundSceneId === card.job.sceneId;
       });
+
+      // Priority 1: Stamped tileId match
+      if (candIdx === -1 && card.tileId) {
+        candIdx = canvasCompletedCards.findIndex((c) => {
+          if (this.consumedUrls.has(c.url)) return false;
+          return c.tileId && c.tileId === card.tileId;
+        });
+      }
+
+      // Priority 2: Text / reference tag match with exclusion of foreign bound cards
+      if (candIdx === -1) {
+        candIdx = canvasCompletedCards.findIndex((c) => {
+          if (this.consumedUrls.has(c.url)) return false;
+          if (c.boundSceneId && c.boundSceneId !== card.job.sceneId) return false;
+          const text = (c.cardText || '').toLowerCase();
+          return text.includes(tagLower) || text.includes(card.promptSignature);
+        });
+      }
 
       if (candIdx !== -1) {
         const matched = canvasCompletedCards[candIdx];
@@ -46,6 +63,7 @@ class MockParallelEngine {
       const job = this.queue.shift();
       const cleanId = job.sceneId.replace(/[^a-zA-Z0-9]/g, '');
       const sceneTag = `SCN_${cleanId.slice(-5).toUpperCase()}`;
+      const tileId = `vg_tile_${sceneTag}_${Date.now()}`;
       const promptSig = job.prompt.toLowerCase().replace(/[^a-z0-9]/g, ' ').slice(0, 45).trim();
 
       // Front-loaded tagged prompt
@@ -54,6 +72,7 @@ class MockParallelEngine {
       this.inFlight.push({
         job,
         sceneTag,
+        tileId,
         taggedPrompt,
         promptSignature: promptSig,
         submittedAt: Date.now(),
@@ -192,11 +211,62 @@ async function testFrontLoadedTagRobustness() {
   console.log('  ✅ TEST 4 PASSED!\n');
 }
 
+// ── TEST 5: Parallel Mode with AI Vision Captions & DOM Stamping (No Tags in DOM) ──
+async function testParallelVisionCaptionsDOMStamping() {
+  console.log('▶ TEST 5: Real-World Google Flow AI Vision Captions & DOM Stamping');
+  const engine = new MockParallelEngine(3);
+
+  const jobs = [
+    { sceneId: 'scene-lamine-01', prompt: 'Lamine Yamal sitting with his mother at Rocafonda pitch, oil painting', outputPath: '/l1.png' },
+    { sceneId: 'scene-lamine-02', prompt: 'Lamine Yamal holding a soccer ball on pitch smiling, oil painting', outputPath: '/l2.png' },
+    { sceneId: 'scene-lamine-03', prompt: 'Lamine Yamal celebrating goal on pitch cheering, oil painting', outputPath: '/l3.png' },
+  ];
+
+  engine.enqueueBatch(jobs);
+  await engine.step([]);
+
+  const card1 = engine.inFlight.find(c => c.job.sceneId === 'scene-lamine-01');
+  const card2 = engine.inFlight.find(c => c.job.sceneId === 'scene-lamine-02');
+  const card3 = engine.inFlight.find(c => c.job.sceneId === 'scene-lamine-03');
+
+  // In real Google Flow, cardText has vision captions and NO [ref:...] tag:
+  // Scene 2 finishes first out-of-order!
+  const canvasStep1 = [
+    { url: 'https://cdn.google.com/yamal_ball.png', cardText: 'young soccer player holding ball on stadium grass', boundSceneId: 'scene-lamine-02', tileId: card2.tileId }
+  ];
+
+  await engine.step(canvasStep1);
+  assert.strictEqual(engine.completed.length, 1, 'Only Scene 2 should complete');
+  assert.strictEqual(engine.completed[0].sceneId, 'scene-lamine-02', 'Scene 2 correctly matched out-of-order');
+  assert.strictEqual(engine.completed[0].url, 'https://cdn.google.com/yamal_ball.png');
+  console.log('  ✓ Out-of-order Scene 2 finished first and was NOT stolen by Scene 1!');
+
+  // Now Scenes 1 and 3 finish together
+  const canvasStep2 = [
+    { url: 'https://cdn.google.com/yamal_mom.png', cardText: 'woman sitting on bench with young boy on soccer field', boundSceneId: 'scene-lamine-01', tileId: card1.tileId },
+    { url: 'https://cdn.google.com/yamal_goal.png', cardText: 'soccer player celebrating victory with hands raised', boundSceneId: 'scene-lamine-03', tileId: card3.tileId }
+  ];
+
+  await engine.step(canvasStep2);
+  assert.strictEqual(engine.completed.length, 3, 'All 3 scenes completed');
+
+  const res1 = engine.completed.find(c => c.sceneId === 'scene-lamine-01');
+  const res2 = engine.completed.find(c => c.sceneId === 'scene-lamine-02');
+  const res3 = engine.completed.find(c => c.sceneId === 'scene-lamine-03');
+
+  assert.strictEqual(res1.url, 'https://cdn.google.com/yamal_mom.png', 'Scene 1 mapped to exact matching image');
+  assert.strictEqual(res2.url, 'https://cdn.google.com/yamal_ball.png', 'Scene 2 mapped to exact matching image');
+  assert.strictEqual(res3.url, 'https://cdn.google.com/yamal_goal.png', 'Scene 3 mapped to exact matching image');
+  console.log('  ✓ All 3 scenes with similar prompts matched 100% deterministically with ZERO cross-talk');
+  console.log('  ✅ TEST 5 PASSED!\n');
+}
+
 async function runAll() {
   await testConcurrencyWindow();
   await testDeterministicTagMatching();
   await testUrlLocking();
   await testFrontLoadedTagRobustness();
+  await testParallelVisionCaptionsDOMStamping();
   console.log('🎉 ALL PARALLEL GENERATION TEST CASES PASSED WITH 100% SUCCESS!');
 }
 

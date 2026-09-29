@@ -46,6 +46,7 @@ const TimecodeDisplay: React.FC<{ totalDuration: number; fps: number }> = ({ tot
  * so we exclude them to avoid killing running <Audio> elements.
  */
 function compositionSceneFingerprint(scenes: any[]): string {
+  if (!Array.isArray(scenes)) return '[]';
   // Include visual and media fields that Composition.tsx and SceneMotion.tsx read
   return JSON.stringify(
     scenes.map((s) => ({
@@ -119,13 +120,19 @@ export const VideoPreview: React.FC = () => {
   const captionPositionJson = useProjectStore(
     (s) => JSON.stringify(s.project.metadata.captionPosition || { x: 0, y: 0 })
   );
+  const captionScale = useProjectStore(
+    (s) => s.project.metadata.captionScale ?? 1.0
+  );
 
   const playerRef = useRef<PlayerRef>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const playerWrapperRef = useRef<HTMLDivElement>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // Tracks whether the user has made their first play gesture (unmutes audio at that point)
+  const hasUnmutedRef = useRef(false);
 
-  const scenes = useProjectStore((s) => s.project.scenes);
+  const rawScenes = useProjectStore((s) => s.project.scenes);
+  const scenes = Array.isArray(rawScenes) ? rawScenes : [];
   const scenesDuration = scenes.reduce((acc, s) => acc + s.durationInSeconds, 0);
   const totalDuration = Math.max(1, scenesDuration, audioDuration);
   const totalFrames = Math.max(1, Math.round(totalDuration * fps));
@@ -134,8 +141,41 @@ export const VideoPreview: React.FC = () => {
   const memoizedInputProps = React.useMemo(
     () => ({ project: projectRef.current }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [sceneFingerprint, audioPath, bgMusicPath, bgMusicVolume, audioDucking, trackMutesJson, overlayClipsJson, audioClipsJson, fps, width, height, captionStyle, captionPositionJson, audioEngineEpoch]
+    [sceneFingerprint, audioPath, bgMusicPath, bgMusicVolume, audioDucking, trackMutesJson, overlayClipsJson, audioClipsJson, fps, width, height, captionStyle, captionPositionJson, captionScale, audioEngineEpoch]
   );
+
+  // Mute all media elements inside the player container before any user gesture.
+  // We do this via a MutationObserver so it catches <audio>/<video> elements
+  // that Remotion injects asynchronously after mount.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const muteIfNeeded = (el: Element) => {
+      if (!hasUnmutedRef.current && (el instanceof HTMLAudioElement || el instanceof HTMLVideoElement)) {
+        el.muted = true;
+      }
+    };
+
+    // Mute any already-present elements
+    container.querySelectorAll('audio, video').forEach(muteIfNeeded);
+
+    // Watch for new elements Remotion adds
+    const observer = new MutationObserver((mutations) => {
+      if (hasUnmutedRef.current) { observer.disconnect(); return; }
+      for (const m of mutations) {
+        m.addedNodes.forEach((node) => {
+          if (node instanceof Element) {
+            muteIfNeeded(node);
+            node.querySelectorAll('audio, video').forEach(muteIfNeeded);
+          }
+        });
+      }
+    });
+    observer.observe(container, { childList: true, subtree: true });
+
+    return () => observer.disconnect();
+  }, []);
 
   // Sync external isPlaying state with Remotion Player
   useEffect(() => {
@@ -278,7 +318,23 @@ export const VideoPreview: React.FC = () => {
     } else {
       // Ensure shared master AudioContext is running without creating leaked hardware instances
       ensureAudioContextRunning();
-      
+
+      // On first play, unmute the Remotion Player — this runs inside a real user-gesture
+      // event handler so Chromium's autoplay policy allows it
+      if (!hasUnmutedRef.current) {
+        hasUnmutedRef.current = true;
+        playerRef.current.unmute();
+        // Also manually unmute any audio/video DOM elements already rendered
+        if (containerRef.current) {
+          const mediaEls = Array.from(
+            containerRef.current.querySelectorAll('audio, video')
+          ) as HTMLMediaElement[];
+          for (const el of mediaEls) {
+            el.muted = false;
+          }
+        }
+      }
+
       // Auto-wake any paused audio elements inside player
       if (containerRef.current) {
         const audioTags = Array.from(containerRef.current.querySelectorAll('audio')) as HTMLAudioElement[];
@@ -368,6 +424,7 @@ export const VideoPreview: React.FC = () => {
                 className="bg-transparent text-[10px] font-medium text-purple-300 focus:outline-none cursor-pointer pr-1"
                 title="Select Subtitle Animation Style"
               >
+                <option value="plain_bold_outline" className="bg-[#181824] text-slate-200">🖋️ Plain Bold Outline</option>
                 <option value="mrbeast_impact" className="bg-[#181824] text-slate-200">🔥 MrBeast Pop</option>
                 <option value="hormozi_pop" className="bg-[#181824] text-slate-200">⚡ Hormozi Pop</option>
                 <option value="ali_abdaal" className="bg-[#181824] text-slate-200">☕ Ali Abdaal</option>
