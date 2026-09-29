@@ -42,6 +42,35 @@ import {
 } from '../../types';
 import { ApiKeyPoolManager } from './ApiKeyPoolManager';
 
+const FALLBACK_CHANNEL_PROFILES: ChannelBrandProfile[] = [
+  {
+    id: 'channel_true_crime_history',
+    name: 'Channel 1: Dark History & True Crime',
+    description: 'Solemn, investigative, deep dramatic pauses, atmospheric chiaroscuro lighting, 35mm film vintage stills.',
+    writerTone: 'Solemn, investigative documentary narrator (BBC / HBO style). Opens with a chilling mystery or provocative question. Uses rhythmic short sentences with dramatic pauses. Never melodramatic, highly factual and atmospheric.',
+    directorVisualFormula: 'Historical Editorial Cinematic Concept Art, 35mm film still, Kodak Vision3 500T, gaslamp chiaroscuro lighting, deep shadows, textured cobblestone, muted sepia and charcoal tones, authentic period attire, 16:9 widescreen, photorealistic documentary realism.',
+    negativePrompt: 'modern technology, neon lights, bright cartoon colors, oversaturation, CGI 3D render, text, watermark, blurry, deformed limbs, modern plastic',
+    defaultVoiceEngine: 'kokoro',
+    defaultVoiceModel: 'bm_george',
+    speakingSpeed: 0.92,
+    dspPreset: 'studio_documentary',
+    sentenceGapMs: 650,
+  },
+  {
+    id: 'channel_tech_future',
+    name: 'Channel 2: Modern Tech & Sci-Fi Innovations',
+    description: 'Fast-paced, witty, curiosity-driven explainer, sleek 8K Octane 3D render, vibrant cyan/magenta titanium visuals.',
+    writerTone: 'High-energy, punchy, conversational, curiosity-driven tech explainer (Veritasium / ColdFusion style). Opens with an astonishing counter-intuitive statistic. Rapid progression, zero fluff, witty comparisons.',
+    directorVisualFormula: 'Sleek 8K Octane 3D render, futuristic industrial tech design, volumetric cyan and titanium reflections, clean architectural composition, depth of field, sharp edge highlights, 16:9 widescreen, masterpiece digital art.',
+    negativePrompt: 'vintage film grain, dirty textures, dull muted colors, medieval items, historical sepia, text, watermark, cartoon anime, oversaturated noise',
+    defaultVoiceEngine: 'edge-tts',
+    defaultVoiceModel: 'en-US-ChristopherNeural',
+    speakingSpeed: 1.10,
+    dspPreset: 'broadcast_clarity',
+    sentenceGapMs: 220,
+  }
+];
+
 export const AgenticStudioModal: React.FC = () => {
   const { 
     isAgenticStudioModalOpen, 
@@ -55,7 +84,7 @@ export const AgenticStudioModal: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'launchpad' | 'warroom' | 'agents' | 'brands' | 'keys'>('launchpad');
 
   // Channel Profiles State
-  const [channels, setChannels] = useState<ChannelBrandProfile[]>([]);
+  const [channels, setChannels] = useState<ChannelBrandProfile[]>(FALLBACK_CHANNEL_PROFILES);
   const [selectedChannelId, setSelectedChannelId] = useState<string>('channel_true_crime_history');
   const [editingChannel, setEditingChannel] = useState<ChannelBrandProfile | null>(null);
 
@@ -142,8 +171,19 @@ export const AgenticStudioModal: React.FC = () => {
       }
       if (window.electronAPI?.getAgenticKeyPool) {
         const loadedKeys = await window.electronAPI.getAgenticKeyPool();
-        if (loadedKeys && loadedKeys.length > 0) {
+        if (loadedKeys && loadedKeys.length > 0 && loadedKeys.some((k) => k && k.trim())) {
           setApiKeys(loadedKeys);
+        } else {
+          const storedKey = localStorage.getItem('geminiApiKey');
+          if (storedKey) {
+            try {
+              const parsed = JSON.parse(storedKey);
+              if (Array.isArray(parsed) && parsed.length > 0) setApiKeys(parsed);
+              else if (typeof parsed === 'string' && parsed.trim()) setApiKeys([parsed.trim()]);
+            } catch {
+              if (storedKey.trim()) setApiKeys([storedKey.trim()]);
+            }
+          }
         }
       }
     } catch (err) {
@@ -245,7 +285,7 @@ export const AgenticStudioModal: React.FC = () => {
     setViewMode('editor');
   };
 
-  const activeChannel = channels.find((c) => c.id === selectedChannelId) || channels[0];
+  const activeChannel = channels.find((c) => c.id === selectedChannelId) || channels[0] || FALLBACK_CHANNEL_PROFILES[0];
 
   if (!isAgenticStudioModalOpen) return null;
 
@@ -1052,7 +1092,7 @@ export const AgenticStudioModal: React.FC = () => {
               <span>Engine: Multi-Key Gemini 2.0 Flash / Pro</span>
             </span>
             <span>•</span>
-            <span>Active Channel: <strong className="text-slate-200">{activeChannel.name}</strong></span>
+            <span>Active Channel: <strong className="text-slate-200">{activeChannel?.name || 'Default Channel'}</strong></span>
           </div>
 
           <div className="flex items-center gap-2">
