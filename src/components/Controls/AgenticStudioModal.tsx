@@ -29,7 +29,11 @@ import {
   Check, 
   RefreshCw,
   Monitor,
-  Smartphone 
+  Smartphone,
+  Upload,
+  Search,
+  FileVideo,
+  FileAudio
 } from 'lucide-react';
 import { useProjectStore } from '../../store/useProjectStore';
 import { 
@@ -38,9 +42,28 @@ import {
   AgenticStudioProgress, 
   AgenticLogEntry, 
   AgentSlotConfig, 
-  AgenticScene 
+  AgenticScene,
+  VoiceProfile
 } from '../../types';
+import { DEFAULT_BUILTIN_VOICES } from '../../utils/builtinVoices';
 import { ApiKeyPoolManager } from './ApiKeyPoolManager';
+import { VoiceCardAvatar } from '../VoiceStudio/VoiceVisualComponents';
+import { getVoiceCardIdentity } from '../../utils/voiceVisuals';
+
+const REFERENCE_STYLE_PRESETS = [
+  {
+    name: 'Dark True Crime / Mystery',
+    snippet: 'In the dead of winter, 1872, an eerie silence settled over the Atlantic Ocean. Two hundred miles off the Azores, the British brigantine Dei Gratia spotted a ship adrift in the swells. Its sails were ragged. Its helm was unattended. When boarding, captain David Morehouse found the table set for breakfast. The logbook open to November 24th. But not a single soul was aboard. Ten people had vanished without a trace, leaving behind a mystery that would defy naval historians for more than a century.'
+  },
+  {
+    name: 'Deep Sleep / Bedtime Story',
+    snippet: 'Close your eyes, take a slow, deep breath, and allow the quiet of the night to surround you. Tonight, our journey takes us high into the mist-veiled peaks of the ancient Himalayas. Where timeless stone temples stand guard over silent valleys, and the gentle whisper of the mountain breeze carries with it the forgotten stories of the stars.'
+  },
+  {
+    name: 'Viral Tech Explainer',
+    snippet: 'For fifty years, battery science has been trapped in a liquid bottleneck. Lithium ions swim through volatile, flammable electrolytes that degrade with every charge. But this month, everything changed. Inside a quiet laboratory in Kyoto, engineers just achieved what the entire automotive industry deemed physically impossible: a solid-state cell that charges from zero to eighty percent in under six minutes.'
+  }
+];
 
 const FALLBACK_CHANNEL_PROFILES: ChannelBrandProfile[] = [
   {
@@ -77,7 +100,9 @@ export const AgenticStudioModal: React.FC = () => {
     setIsAgenticStudioModalOpen, 
     project, 
     applyAgenticStudioResult, 
-    setViewMode 
+    setViewMode,
+    voiceProfiles,
+    loadVoiceProfiles
   } = useProjectStore();
 
   // Active Navigation Tab
@@ -105,6 +130,21 @@ export const AgenticStudioModal: React.FC = () => {
   const [editedApprovalScript, setEditedApprovalScript] = useState<string>('');
   const [isApproving, setIsApproving] = useState<boolean>(false);
 
+  // Narration Voice Model Custom Selection State
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string>('f5-en-marcus-clone');
+  const [selectedVoiceSpeed, setSelectedVoiceSpeed] = useState<number>(0.92);
+  const [selectedVoiceDsp, setSelectedVoiceDsp] = useState<string>('studio_documentary');
+  const [voiceSearchQuery, setVoiceSearchQuery] = useState<string>('');
+  const [voiceFilterCategory, setVoiceFilterCategory] = useState<'top_clones' | 'all' | 'kokoro' | 'edge' | 'elevenlabs'>('top_clones');
+  const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Reference Video Speech & Style Learning State
+  const [referenceSpeech, setReferenceSpeech] = useState<string>('');
+  const [isTranscribingRef, setIsTranscribingRef] = useState<boolean>(false);
+  const [refFileName, setRefFileName] = useState<string | null>(null);
+  const refFileInputRef = useRef<HTMLInputElement>(null);
+
   // Keys Pool
   const [apiKeys, setApiKeys] = useState<string[]>([]);
 
@@ -122,10 +162,23 @@ export const AgenticStudioModal: React.FC = () => {
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Load Channels & Key Pool on mount
+  // Stop audio on unmount
+  useEffect(() => {
+    return () => {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        previewAudioRef.current = null;
+      }
+    };
+  }, []);
+
+  // Load Channels, Voice Profiles & Key Pool on mount
   useEffect(() => {
     if (isAgenticStudioModalOpen) {
       loadInitialData();
+      if (loadVoiceProfiles) {
+        loadVoiceProfiles();
+      }
     }
   }, [isAgenticStudioModalOpen]);
 
@@ -191,6 +244,115 @@ export const AgenticStudioModal: React.FC = () => {
     }
   };
 
+  const handleTogglePlayVoicePreview = (voice: VoiceProfile, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (playingVoiceId === voice.id) {
+      if (previewAudioRef.current) {
+        previewAudioRef.current.pause();
+        previewAudioRef.current = null;
+      }
+      setPlayingVoiceId(null);
+      return;
+    }
+
+    if (previewAudioRef.current) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current = null;
+    }
+
+    const audioPath = voice.previewAudioPath || voice.referenceAudioPath;
+    if (!audioPath) return;
+
+    const audioUrl = audioPath.startsWith('http') ? audioPath : `media://${audioPath.replace(/\\/g, '/')}`;
+    const audio = new Audio(audioUrl);
+    previewAudioRef.current = audio;
+    setPlayingVoiceId(voice.id);
+
+    audio.onended = () => {
+      setPlayingVoiceId(null);
+      previewAudioRef.current = null;
+    };
+    audio.onerror = () => {
+      setPlayingVoiceId(null);
+      previewAudioRef.current = null;
+    };
+    audio.play().catch(() => {
+      setPlayingVoiceId(null);
+      previewAudioRef.current = null;
+    });
+  };
+
+  const handleSelectReferenceMedia = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const resolvedPath = window.electronAPI?.getPathForFile ? window.electronAPI.getPathForFile(file) : (file as any).path;
+    if (!resolvedPath) return;
+
+    setRefFileName(file.name);
+    setIsTranscribingRef(true);
+    try {
+      if (window.electronAPI?.transcribeAudioFile) {
+        const activeKey = apiKeys.find((k) => k.trim());
+        const res = await window.electronAPI.transcribeAudioFile(resolvedPath, activeKey, 'local');
+        if (res && res.text && res.text.trim()) {
+          setReferenceSpeech((prev) => (prev ? prev.trim() + '\n\n' : '') + res.text.trim());
+        }
+      }
+    } catch (err: any) {
+      console.error('Failed to transcribe reference file:', err);
+    } finally {
+      setIsTranscribingRef(false);
+      if (refFileInputRef.current) {
+        refFileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const allAvailableVoices = (voiceProfiles && voiceProfiles.length > 0) ? voiceProfiles : DEFAULT_BUILTIN_VOICES;
+  const chosenVoice = allAvailableVoices.find((v) => v.id === selectedVoiceId) || allAvailableVoices[0];
+  const activeChannel = channels.find((c) => c.id === selectedChannelId) || channels[0] || FALLBACK_CHANNEL_PROFILES[0];
+
+  const filteredVoices = allAvailableVoices.filter((v) => {
+    if (voiceFilterCategory === 'top_clones') {
+      const isTop =
+        v.id === 'f5-en-marcus-clone' ||
+        v.id === 'edge-en-marcus-deep' ||
+        v.id === 'f5-en-arthur-clone' ||
+        v.id === 'f5-en-before-it-worked' ||
+        v.id === 'f5-en-carrier-clone' ||
+        v.id === 'edge-en-julian-sleep' ||
+        v.id === 'edge-en-julian-midnight' ||
+        v.id.includes('marcus') ||
+        v.id.includes('blend') ||
+        (v.tags && v.tags.some((t) => t.toLowerCase().includes('top pick') || t.toLowerCase().includes('clone')));
+      if (!isTop) return false;
+    } else if (voiceFilterCategory === 'kokoro') {
+      if (v.engine !== 'kokoro') return false;
+    } else if (voiceFilterCategory === 'edge') {
+      if ((v.engine as string) !== 'edge-tts' && v.engine !== 'edge_tts') return false;
+    } else if (voiceFilterCategory === 'elevenlabs') {
+      if (v.engine !== 'elevenlabs' && !v.id.includes('elevenlabs')) return false;
+    }
+
+    if (voiceSearchQuery.trim()) {
+      const q = voiceSearchQuery.toLowerCase();
+      const nameMatch = (v.name || '').toLowerCase().includes(q);
+      const idMatch = (v.id || '').toLowerCase().includes(q);
+      const descMatch = (v.description || '').toLowerCase().includes(q);
+      const tagMatch = (v.tags || []).some((t) => t.toLowerCase().includes(q));
+      if (!nameMatch && !idMatch && !descMatch && !tagMatch) return false;
+    }
+
+    return true;
+  });
+
+  const sortedFilteredVoices = [...filteredVoices].sort((a, b) => {
+    const aMarcus = (a.id === 'f5-en-marcus-clone' || a.id === 'edge-en-marcus-deep' || a.id.includes('marcus')) ? 2 : (a.id === 'f5-en-arthur-clone' ? 1 : 0);
+    const bMarcus = (b.id === 'f5-en-marcus-clone' || b.id === 'edge-en-marcus-deep' || b.id.includes('marcus')) ? 2 : (b.id === 'f5-en-arthur-clone' ? 1 : 0);
+    return bMarcus - aMarcus;
+  });
+
   const handleStartWorkflow = async () => {
     if (workflowMode === 'topic_to_video' && !topic.trim()) return;
     if (workflowMode === 'script_to_video' && !customScript.trim()) return;
@@ -217,6 +379,12 @@ export const AgenticStudioModal: React.FC = () => {
       generateImages,
       runVisionQc,
       autoCastVoice,
+      selectedVoiceId: !autoCastVoice ? selectedVoiceId : undefined,
+      selectedVoiceEngine: !autoCastVoice ? (chosenVoice?.engine as any) : undefined,
+      selectedVoiceSpeed: !autoCastVoice ? selectedVoiceSpeed : undefined,
+      selectedVoiceDsp: !autoCastVoice ? selectedVoiceDsp : undefined,
+      referenceSpeech: referenceSpeech.trim() || undefined,
+      referenceSpeechSource: refFileName || undefined,
       synthesizeAudio,
       aspectRatio,
       motionRhythm,
@@ -284,8 +452,6 @@ export const AgenticStudioModal: React.FC = () => {
     setIsAgenticStudioModalOpen(false);
     setViewMode('editor');
   };
-
-  const activeChannel = channels.find((c) => c.id === selectedChannelId) || channels[0] || FALLBACK_CHANNEL_PROFILES[0];
 
   if (!isAgenticStudioModalOpen) return null;
 
@@ -491,6 +657,108 @@ export const AgenticStudioModal: React.FC = () => {
                     />
                   </div>
 
+                  {/* Channel Reference Speech & Video Transcripts (Style Mimicry) */}
+                  <div className="bg-[#121724] border border-border-subtle rounded-2xl p-5 space-y-3">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div className="flex items-center gap-2">
+                        <BookOpen className="w-4 h-4 text-amber-400" />
+                        <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                          Channel Reference Speech & Style DNA
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 text-[10px] font-bold border border-amber-500/20">
+                          In-Context Style Mimicry
+                        </span>
+                      </div>
+
+                      {/* Actions: Import Video / Audio with Whisper */}
+                      <div className="flex items-center gap-2">
+                        <input
+                          ref={refFileInputRef}
+                          type="file"
+                          accept="video/*,audio/*,.mp4,.mov,.mkv,.mp3,.wav,.m4a,.webm,.txt"
+                          onChange={handleSelectReferenceMedia}
+                          className="hidden"
+                        />
+                        <button
+                          type="button"
+                          disabled={isTranscribingRef}
+                          onClick={() => refFileInputRef.current?.click()}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-950/40 hover:bg-amber-900/50 text-amber-300 border border-amber-500/30 rounded-xl text-xs font-semibold transition-all cursor-pointer disabled:opacity-50"
+                          title="Upload an existing video or audio from your channel to extract its speechwriting rhythm and hook style via Whisper"
+                        >
+                          {isTranscribingRef ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              <span>Transcribing with Whisper...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Upload className="w-3.5 h-3.5" />
+                              <span>Import Channel Video / Audio</span>
+                            </>
+                          )}
+                        </button>
+
+                        {referenceSpeech && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setReferenceSpeech('');
+                              setRefFileName(null);
+                            }}
+                            className="text-xs text-slate-400 hover:text-rose-400 p-1 cursor-pointer"
+                            title="Clear reference speech"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Paste a speech excerpt or transcript from your channel's top video, or upload a video/audio file above. The AI Speechwriter and Chief Critic will learn and reproduce your signature hook structures, rhetorical pauses, and sentence length.
+                    </p>
+
+                    {/* Quick style sample presets */}
+                    <div className="flex items-center gap-2 flex-wrap text-xs">
+                      <span className="text-[10px] text-slate-500 font-mono">Quick DNA Presets:</span>
+                      {REFERENCE_STYLE_PRESETS.map((preset) => (
+                        <button
+                          key={preset.name}
+                          type="button"
+                          onClick={() => setReferenceSpeech(preset.snippet)}
+                          className="px-2.5 py-1 rounded-lg bg-[#0e1320] hover:bg-surface-elevated text-slate-300 hover:text-white border border-border-subtle text-[11px] transition-all cursor-pointer"
+                        >
+                          {preset.name}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="relative">
+                      <textarea
+                        value={referenceSpeech}
+                        onChange={(e) => setReferenceSpeech(e.target.value)}
+                        placeholder="Paste past video speech/transcript here (e.g. 'In the dead of winter, 1872, an eerie silence settled over the Atlantic Ocean...'). The AI agents will analyze and mimic this exact cadence and rhetorical voice."
+                        rows={4}
+                        className="w-full bg-[#090d16] border border-border-subtle rounded-xl p-3.5 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-amber-500 transition-colors font-sans leading-relaxed"
+                      />
+                      <div className="flex items-center justify-between text-[10px] text-slate-500 font-mono mt-1 px-1">
+                        <div>
+                          {refFileName ? (
+                            <span className="text-amber-400 flex items-center gap-1 font-semibold">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-400" /> Transcribed from {refFileName}
+                            </span>
+                          ) : (
+                            <span>{referenceSpeech ? 'Active Reference DNA' : 'Optional — Leave empty to use channel default'}</span>
+                          )}
+                        </div>
+                        <div>
+                          {referenceSpeech.trim().split(/\s+/).filter(Boolean).length} words • {referenceSpeech.length} chars
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Format & Length Mode */}
                   <div className="bg-[#121724] border border-border-subtle rounded-2xl p-5 space-y-3">
                     <div className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
@@ -591,6 +859,198 @@ export const AgenticStudioModal: React.FC = () => {
                   />
                 </div>
               )}
+
+              {/* Narration Voice Generation & Model Selection */}
+              <div className="bg-[#121724] border border-border-subtle rounded-2xl p-5 space-y-4">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-2">
+                    <Mic className="w-4 h-4 text-cyan-400" />
+                    <span className="text-xs font-bold text-slate-300 uppercase tracking-wider">
+                      Narration Voice Actor & Generation Model
+                    </span>
+                    {!autoCastVoice && (
+                      <span className="px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 text-[10px] font-bold border border-cyan-500/30">
+                        {chosenVoice.name.split('—')[0].trim()}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setAutoCastVoice(true)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                        autoCastVoice
+                          ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-xs'
+                          : 'text-slate-400 hover:text-slate-200 bg-[#0e1320] border border-border-subtle'
+                      }`}
+                    >
+                      ✨ Auto-Cast from Channel ({activeChannel.defaultVoiceModel})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAutoCastVoice(false)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                        !autoCastVoice
+                          ? 'bg-gradient-to-r from-cyan-600 to-indigo-600 text-white shadow-xs'
+                          : 'text-slate-400 hover:text-slate-200 bg-[#0e1320] border border-border-subtle'
+                      }`}
+                    >
+                      🎙️ Select Voice Model
+                    </button>
+                  </div>
+                </div>
+
+                {!autoCastVoice && (
+                  <div className="space-y-4 pt-2 border-t border-border-subtle">
+                    {/* Category Pills & Search */}
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        {[
+                          { id: 'top_clones', label: '⭐ Top Clones (Marcus, Arthur)' },
+                          { id: 'all', label: 'All Voices' },
+                          { id: 'kokoro', label: 'Kokoro (Free Local)' },
+                          { id: 'edge', label: 'Edge Neural (Free)' },
+                          { id: 'elevenlabs', label: 'ElevenLabs' },
+                        ].map((cat) => (
+                          <button
+                            key={cat.id}
+                            type="button"
+                            onClick={() => setVoiceFilterCategory(cat.id as any)}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-medium cursor-pointer transition-all ${
+                              voiceFilterCategory === cat.id
+                                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-xs'
+                                : 'bg-[#0e1320] text-slate-400 hover:text-slate-200 border border-border-subtle'
+                            }`}
+                          >
+                            {cat.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="relative min-w-[220px]">
+                        <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="text"
+                          value={voiceSearchQuery}
+                          onChange={(e) => setVoiceSearchQuery(e.target.value)}
+                          placeholder="Search Marcus, Arthur, Kokoro..."
+                          className="w-full bg-[#090d16] border border-border-subtle rounded-xl pl-8 pr-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-cyan-500"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Voice Grid */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-64 overflow-y-auto pr-1 custom-scrollbar">
+                      {sortedFilteredVoices.map((voice) => {
+                        const isSelected = selectedVoiceId === voice.id;
+                        const isPlaying = playingVoiceId === voice.id;
+                        const identity = getVoiceCardIdentity(voice);
+
+                        return (
+                          <div
+                            key={voice.id}
+                            onClick={() => {
+                              setSelectedVoiceId(voice.id);
+                              if (voice.defaultSpeed) setSelectedVoiceSpeed(voice.defaultSpeed);
+                              if (voice.defaultMasteringPreset) setSelectedVoiceDsp(voice.defaultMasteringPreset);
+                            }}
+                            className={`p-3.5 rounded-xl border transition-all cursor-pointer relative group flex items-start justify-between gap-3 ${
+                              isSelected
+                                ? 'bg-gradient-to-r from-cyan-950/60 to-indigo-950/50 border-cyan-500 shadow-md ring-1 ring-cyan-500/40'
+                                : 'bg-[#0e1320] border-border-subtle hover:border-slate-600'
+                            }`}
+                          >
+                            <div className="flex items-start gap-3 min-w-0">
+                              <VoiceCardAvatar voice={voice} isPlaying={isPlaying} size="md" />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="font-bold text-xs text-white group-hover:text-cyan-300 transition-colors truncate">
+                                    {identity.displayName}
+                                  </span>
+                                  <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold border ${identity.badgeStyle}`}>
+                                    {identity.badgeText}
+                                  </span>
+                                  {isSelected && (
+                                    <span className="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 text-[9px] font-bold flex items-center gap-1">
+                                      <Check className="w-2.5 h-2.5" />
+                                      <span>Active</span>
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-slate-400 font-medium truncate mt-0.5">
+                                  {identity.subtitle}
+                                </div>
+                                <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                                  {voice.languageName || 'English'} • <span className="uppercase text-slate-400">{voice.engine}</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {(voice.previewAudioPath || voice.referenceAudioPath) && (
+                              <button
+                                type="button"
+                                onClick={(e) => handleTogglePlayVoicePreview(voice, e)}
+                                title={isPlaying ? 'Pause Audition' : 'Play Audition Sample'}
+                                className={`p-2 rounded-lg border transition-all cursor-pointer flex-shrink-0 ${
+                                  isPlaying
+                                    ? 'bg-cyan-500 text-black border-cyan-400 shadow-lg shadow-cyan-500/30'
+                                    : 'bg-white/5 hover:bg-white/10 text-slate-300 border-border-subtle hover:border-cyan-500/40'
+                                }`}
+                              >
+                                {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 fill-current" />}
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Speed Slider & DSP Preset */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-border-subtle/50">
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-xs font-semibold text-slate-300">Narration Speed</span>
+                          <span className="text-xs font-mono font-bold text-cyan-400">{selectedVoiceSpeed.toFixed(2)}x</span>
+                        </div>
+                        <input
+                          type="range"
+                          min="0.75"
+                          max="1.35"
+                          step="0.05"
+                          value={selectedVoiceSpeed}
+                          onChange={(e) => setSelectedVoiceSpeed(parseFloat(e.target.value))}
+                          className="w-full accent-cyan-400 cursor-pointer"
+                        />
+                        <div className="flex justify-between text-[10px] text-slate-500 font-mono mt-1">
+                          <span>0.75x (Sleep/Deep)</span>
+                          <span>1.00x (Normal)</span>
+                          <span>1.35x (Fast Explainer)</span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-xs font-semibold text-slate-300">Studio DSP Mastering Chain</span>
+                          <span className="text-[10px] text-slate-400 font-mono">{selectedVoiceDsp}</span>
+                        </div>
+                        <select
+                          value={selectedVoiceDsp}
+                          onChange={(e) => setSelectedVoiceDsp(e.target.value)}
+                          className="w-full bg-[#090d16] border border-border-subtle rounded-xl p-2.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 cursor-pointer font-sans"
+                        >
+                          <option value="studio_documentary">Studio Documentary (Warm Proximity, High-Pass & Optical Comp)</option>
+                          <option value="broadcast_clarity">Broadcast Clarity (Punchy Presence, Multiband Limiter)</option>
+                          <option value="cinema_trailer">Cinema Trailer (Sub-Bass Boom & Velvet De-Esser)</option>
+                          <option value="warm_radio">Warm Radio (Smooth Tube Saturation & Intimacy)</option>
+                          <option value="crisp_youtube">Crisp YouTube (De-Muffled, High-Def Polish)</option>
+                          <option value="dark_ambient">Dark Ambient (Eerie High Roll-Off & Sub Gravitas)</option>
+                          <option value="raw_direct">Raw Direct (Unprocessed Neural Output)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {/* Canvas Aspect Ratio & Motion Rhythm */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

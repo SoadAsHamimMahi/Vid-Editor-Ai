@@ -627,6 +627,16 @@ export interface AgenticWorkflowConfig {
   aspectRatio?: '16:9' | '9:16';
   motionRhythm?: 'dynamic_alternating' | 'cinematic_documentary' | 'action_burst' | 'ambient_slow_burn';
   requireScriptApproval?: boolean;
+
+  // Custom Voice Selection
+  selectedVoiceId?: string;
+  selectedVoiceEngine?: 'kokoro' | 'edge-tts' | 'elevenlabs' | 'f5_tts' | 'google-tts' | 'chat_tts';
+  selectedVoiceSpeed?: number;
+  selectedVoiceDsp?: string;
+
+  // Reference Video Speech & Transcripts (In-Context Style Learning)
+  referenceSpeech?: string;
+  referenceSpeechSource?: string;
 }
 
 export interface CriticEvaluation {

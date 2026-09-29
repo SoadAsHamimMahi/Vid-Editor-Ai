@@ -60,6 +60,16 @@ export interface AgenticWorkflowConfig {
   aspectRatio?: '16:9' | '9:16';
   motionRhythm?: 'dynamic_alternating' | 'cinematic_documentary' | 'all_zoom' | 'all_pan';
   requireScriptApproval?: boolean;
+
+  // Custom Voice Selection
+  selectedVoiceId?: string;
+  selectedVoiceEngine?: string;
+  selectedVoiceSpeed?: number;
+  selectedVoiceDsp?: string;
+
+  // Reference Video Speech & Transcripts (In-Context Style Learning)
+  referenceSpeech?: string;
+  referenceSpeechSource?: string;
 }
 
 export interface CriticEvaluation {
@@ -514,7 +524,8 @@ export class GeminiAgenticStudioService {
             config.topic,
             activeProfile,
             chapterOutlines,
-            isRevision ? latestEvaluation.actionableBullets : undefined
+            isRevision ? latestEvaluation.actionableBullets : undefined,
+            config.referenceSpeech
           );
         } else {
           currentScript = await this.generateOrReviseScript(
@@ -522,7 +533,8 @@ export class GeminiAgenticStudioService {
             activeProfile,
             config.lengthMode,
             isRevision ? currentScript : undefined,
-            isRevision ? latestEvaluation.actionableBullets : undefined
+            isRevision ? latestEvaluation.actionableBullets : undefined,
+            config.referenceSpeech
           );
         }
 
@@ -547,7 +559,7 @@ export class GeminiAgenticStudioService {
           script: currentScript,
         });
 
-        latestEvaluation = await this.evaluateScriptWithCritic(currentScript, activeProfile, targetScore);
+        latestEvaluation = await this.evaluateScriptWithCritic(currentScript, activeProfile, targetScore, config.referenceSpeech);
 
         this.log(
           'chief_critic',
@@ -612,7 +624,18 @@ export class GeminiAgenticStudioService {
       script: currentScript,
     });
 
-    const castVoice = await this.castVoiceModel(currentScript, activeProfile);
+    let castVoice: { engine: string; model: string; speed: number; dspPreset: string; reason: string };
+    if (config.selectedVoiceId && !config.autoCastVoice) {
+      castVoice = {
+        engine: config.selectedVoiceEngine || activeProfile.defaultVoiceEngine || 'kokoro',
+        model: config.selectedVoiceId,
+        speed: config.selectedVoiceSpeed || activeProfile.speakingSpeed || 1.0,
+        dspPreset: config.selectedVoiceDsp || activeProfile.dspPreset || 'studio_documentary',
+        reason: `Manually selected from Voice Library (${config.selectedVoiceId})`,
+      };
+    } else {
+      castVoice = await this.castVoiceModel(currentScript, activeProfile);
+    }
     this.log('system', 'Audio Director', 'info', `Voice Cast: ${castVoice.model} (${castVoice.engine.toUpperCase()})`, `${castVoice.reason} | DSP: ${castVoice.dspPreset} | Speed: ${castVoice.speed}x`);
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -888,10 +911,15 @@ Return ONLY a JSON array of 5 strings:
     topic: string,
     profile: ChannelBrandProfile,
     chapterOutlines: string[],
-    criticCorrections?: string[]
+    criticCorrections?: string[],
+    referenceSpeech?: string
   ): Promise<string> {
     const acts: string[] = [];
     const actNames = ['Act 1 (Cold Open)', 'Act 2 (The Rising Stakes)', 'Act 3 (The Crisis)', 'Act 4 (The Climax)', 'Act 5 (The Legacy)'];
+
+    const referenceStyleBlock = referenceSpeech && referenceSpeech.trim()
+      ? `\nCHANNEL SIGNATURE SPEECH STYLE REFERENCE (FEW-SHOT MIMICRY):\n"""\n${referenceSpeech.trim().slice(0, 3000)}\n"""\n- Analyze and replicate the sentence length, pause cadence, vocabulary, and narrative tone of the reference text above.\n`
+      : '';
 
     for (let i = 0; i < 5; i++) {
       const outline = chapterOutlines[i] || `Act ${i + 1} narrative progression`;
@@ -901,7 +929,7 @@ Return ONLY a JSON array of 5 strings:
 TOPIC: "${topic}"
 TARGET LENGTH: 950 - 1,150 words for this Act.
 CHANNEL TONE: ${profile.writerTone}
-
+${referenceStyleBlock}
 ACT OUTLINE:
 ${outline}
 
@@ -928,12 +956,25 @@ CRITICAL RULES:
     profile: ChannelBrandProfile,
     lengthMode: 'shorts_60s' | 'standard_5m' | 'epic_30k',
     previousDraft?: string,
-    criticCorrections?: string[]
+    criticCorrections?: string[],
+    referenceSpeech?: string
   ): Promise<string> {
     const isShorts = lengthMode === 'shorts_60s';
     const wordBudget = isShorts
       ? '130 - 160 words (exactly 50-60 seconds when spoken)'
       : '750 - 1,000 words (approximately 5-7 minutes when spoken)';
+
+    const referenceStyleBlock = referenceSpeech && referenceSpeech.trim()
+      ? `\nCHANNEL SIGNATURE SPEECH STYLE REFERENCE (FEW-SHOT IN-CONTEXT MIMICRY):
+The creator provided this authentic excerpt from their channel's reference videos:
+"""
+${referenceSpeech.trim().slice(0, 3500)}
+"""
+
+CRITICAL STYLE MIMICRY DIRECTIVES:
+- Emulate the sentence cadence, pause frequency, vocabulary choices, rhetorical devices, and storytelling structure of this reference text.
+- The new script MUST mirror this exact signature channel rhythm while presenting the topic "${topic}".\n`
+      : '';
 
     let prompt = '';
 
@@ -944,7 +985,7 @@ Target Word Count: ${wordBudget}
 
 CHANNEL VOICE & TONE DIRECTIVES:
 ${profile.writerTone}
-
+${referenceStyleBlock}
 NARRATIVE WRITING RULES:
 1. START WITH A PROVOCATIVE 3-SECOND HOOK: Dive straight into the drama or mystery.
 2. WRITING FOR THE SPOKEN EAR: Use conversational rhythm, punchy one-sentence paragraphs, and natural cadence.
@@ -959,7 +1000,7 @@ PREVIOUS DRAFT:
 """
 ${previousDraft}
 """
-
+${referenceStyleBlock}
 CHIEF CRITIC'S MANDATORY REQUIRED CORRECTIONS:
 ${(criticCorrections || []).map((c, i) => `${i + 1}. ${c}`).join('\n')}
 
@@ -978,14 +1019,23 @@ Output ONLY the revised speech narration text. No conversational preamble.`;
   private async evaluateScriptWithCritic(
     script: string,
     profile: ChannelBrandProfile,
-    targetScore: number
+    targetScore: number,
+    referenceSpeech?: string
   ): Promise<CriticEvaluation> {
+    const referenceStyleCritique = referenceSpeech && referenceSpeech.trim()
+      ? `\nCHANNEL REFERENCE SPEECH STYLE:
+"""
+${referenceSpeech.trim().slice(0, 1500)}
+"""
+- Style Conformity: Verify whether the script mirrors the sentence length, cadence, and tone of the reference text above.\n`
+      : '';
+
     const prompt = `You are the Chief Editor and Ruthless Content Critic for a top-tier media studio.
 Your job is to critically grade this narration script on a 0.0 to 10.0 scale.
 
 CHANNEL TONE BENCHMARK:
 "${profile.writerTone}"
-
+${referenceStyleCritique}
 SCRIPT TO EVALUATE:
 """
 ${script}
