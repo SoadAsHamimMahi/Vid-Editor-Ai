@@ -54,7 +54,8 @@ export const HomePage: React.FC = () => {
     browsers,
     setScriptDirectorModalOpen,
     setAudioStudioModalOpen,
-    setVoiceToVideoModalOpen
+    setVoiceToVideoModalOpen,
+    setIsAgenticStudioModalOpen
   } = useProjectStore();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -257,6 +258,19 @@ export const HomePage: React.FC = () => {
             </span>
 
             <button 
+              onClick={() => setIsAgenticStudioModalOpen(true)}
+              className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-semibold text-cyan-200 bg-gradient-to-r from-indigo-950/70 via-purple-950/60 to-cyan-950/70 hover:from-indigo-900/80 hover:to-cyan-900/80 border border-indigo-400/50 hover:border-cyan-400 transition-all group shadow-[0_0_12px_rgba(99,102,241,0.2)] cursor-pointer"
+            >
+              <div className="flex items-center gap-2.5">
+                <Bot className="w-3.5 h-3.5 text-cyan-300 animate-pulse group-hover:scale-110 transition-transform" />
+                <span>Agentic Studio AI</span>
+              </div>
+              <span className="text-[9px] font-mono font-bold bg-cyan-500/20 text-cyan-300 px-1.5 py-0.5 rounded border border-cyan-500/40">
+                CREW
+              </span>
+            </button>
+
+            <button 
               onClick={() => setScriptDirectorModalOpen(true)}
               className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold text-indigo-300 bg-indigo-950/30 hover:bg-indigo-950/60 border border-indigo-500/30 transition-all group shadow-xs cursor-pointer"
             >
@@ -354,14 +368,29 @@ export const HomePage: React.FC = () => {
             </div>
           </div>
 
-          {/* Quick Refresh Projects */}
-          <button
-            onClick={() => loadProjectSummaries()}
-            className="p-2 rounded-lg bg-surface-card hover:bg-surface-elevated text-slate-400 hover:text-slate-200 border border-border-subtle transition-colors cursor-pointer"
-            title="Reload Projects from disk"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${isLoadingProjects ? 'animate-spin text-cyan-400' : ''}`} />
-          </button>
+          <div className="flex items-center gap-2.5">
+            {/* Autonomous Multi-Agent AI Studio */}
+            <button
+              onClick={() => setIsAgenticStudioModalOpen(true)}
+              className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-indigo-950/90 via-purple-950/80 to-cyan-950/90 hover:from-indigo-900 hover:to-cyan-900 border border-indigo-400/60 hover:border-cyan-400 text-cyan-200 rounded-lg text-xs font-bold transition-all shadow-[0_0_15px_rgba(99,102,241,0.25)] hover:shadow-[0_0_20px_rgba(34,211,238,0.45)] cursor-pointer active:scale-98"
+              title="Launch Autonomous Multi-Agent AI Studio (Speechwriter ↔ Critic ≥9.5 ➔ Director ➔ Vision QC)"
+            >
+              <Bot className="w-3.5 h-3.5 text-cyan-300 animate-pulse" />
+              <span>Agentic Studio</span>
+              <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-cyan-400/20 text-cyan-200 border border-cyan-400/40">
+                AI CREW
+              </span>
+            </button>
+
+            {/* Quick Refresh Projects */}
+            <button
+              onClick={() => loadProjectSummaries()}
+              className="p-2 rounded-lg bg-surface-card hover:bg-surface-elevated text-slate-400 hover:text-slate-200 border border-border-subtle transition-colors cursor-pointer"
+              title="Reload Projects from disk"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingProjects ? 'animate-spin text-cyan-400' : ''}`} />
+            </button>
+          </div>
         </div>
 
         <div className="p-6 space-y-6 max-w-7xl w-full mx-auto">
@@ -374,7 +403,34 @@ export const HomePage: React.FC = () => {
               <span className="text-[11px] text-slate-500 font-medium">Choose a workflow to begin</span>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              {/* Pathway 0: Autonomous Agent Studio */}
+              <div
+                onClick={() => setIsAgenticStudioModalOpen(true)}
+                className="p-5 rounded-2xl bg-gradient-to-br from-indigo-950/90 via-purple-950/70 to-cyan-950/90 border border-indigo-400/60 hover:border-cyan-400 hover:shadow-[0_0_35px_rgba(34,211,238,0.25)] transition-all cursor-pointer group flex flex-col justify-between"
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="w-9 h-9 rounded-xl bg-cyan-500/20 text-cyan-300 flex items-center justify-center group-hover:scale-110 transition-transform border border-cyan-400/40 shadow-[0_0_12px_rgba(34,211,238,0.3)]">
+                      <Bot className="w-5 h-5 animate-pulse" />
+                    </div>
+                    <span className="text-[10px] font-extrabold text-cyan-300 bg-cyan-950/90 px-2 py-0.5 rounded-full border border-cyan-400/50">
+                      ★ AI CREW (≥9.5)
+                    </span>
+                  </div>
+                  <h3 className="text-sm font-bold text-white group-hover:text-cyan-300 transition-colors">
+                    Agentic Studio
+                  </h3>
+                  <p className="text-xs text-slate-300/90 mt-1 leading-relaxed">
+                    Autonomous 4-agent crew: Writer ↔ Critic loop (≥9.5 score), Director shotlist, Vision QC, and voiceover.
+                  </p>
+                </div>
+                <div className="mt-4 pt-3 border-t border-indigo-500/30 flex items-center justify-between text-xs font-semibold text-cyan-300">
+                  <span>Launch Agent Crew</span>
+                  <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                </div>
+              </div>
+
               {/* Pathway 1: Script to Video AI */}
               <div
                 onClick={() => setScriptDirectorModalOpen(true)}

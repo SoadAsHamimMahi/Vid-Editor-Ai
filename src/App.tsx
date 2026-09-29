@@ -309,6 +309,8 @@ export const App: React.FC = () => {
           isOpen={isMcpModalOpen}
           onClose={() => setIsMcpModalOpen(false)}
         />
+        <PolicyViolationFixModal />
+        <AgenticStudioModal />
       </div>
     );
   }
