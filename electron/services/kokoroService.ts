@@ -662,11 +662,11 @@ export class KokoroService {
       let filter = BROADCAST_STUDIO_FILTER;
 
       if (masteringPreset === 'podcast_warmth') {
-        filter = 'highpass=f=60:poles=2,equalizer=f=160:width_type=h:width=60:g=2.2,equalizer=f=480:width_type=q:width=1.8:g=-2.0,equalizer=f=3500:width_type=h:width=1200:g=1.8,equalizer=f=6800:width_type=q:width=1.8:g=-3.5,equalizer=f=7600:width_type=q:width=2.0:g=-3.8,equalizer=f=12000:width_type=h:g=1.2,acompressor=threshold=0.12:ratio=2.8:attack=15:release=180:makeup=1.4,loudnorm=I=-16:TP=-1.0:LRA=7';
+        filter = 'highpass=f=60:poles=2,lowpass=f=11000:poles=2,equalizer=f=160:width_type=h:width=60:g=2.2,equalizer=f=480:width_type=q:width=1.8:g=-2.0,equalizer=f=3500:width_type=h:width=1200:g=1.8,equalizer=f=6800:width_type=q:width=1.8:g=-3.5,equalizer=f=7600:width_type=q:width=2.0:g=-3.8,equalizer=f=9500:width_type=h:width=2500:g=0.8,acompressor=threshold=0.12:ratio=2.8:attack=15:release=180:makeup=1.4,loudnorm=I=-16:TP=-1.0:LRA=7';
       } else if (masteringPreset === 'cinema_trailer') {
         filter = 'highpass=f=45:poles=2,equalizer=f=90:width_type=h:width=40:g=3.0,equalizer=f=480:width_type=q:width=1.8:g=-2.0,equalizer=f=3200:width_type=q:width=1.2:g=1.8,equalizer=f=7200:width_type=q:width=2.2:g=-3.5,acompressor=threshold=0.10:ratio=3.5:attack=10:release=150:makeup=1.8,loudnorm=I=-15:TP=-1.0:LRA=8';
       } else if (masteringPreset === 'crisp_youtube') {
-        filter = 'highpass=f=75:poles=2,equalizer=f=240:width_type=q:width=1.5:g=1.5,equalizer=f=520:width_type=q:width=1.8:g=-2.2,equalizer=f=3200:width_type=q:width=1.4:g=2.0,equalizer=f=6800:width_type=q:width=1.8:g=-3.8,equalizer=f=7800:width_type=q:width=1.8:g=-4.0,equalizer=f=12000:width_type=h:g=1.8,acompressor=threshold=0.13:ratio=2.8:attack=10:release=100:makeup=1.4,loudnorm=I=-15.5:TP=-1.0:LRA=6';
+        filter = 'highpass=f=75:poles=2,lowpass=f=11000:poles=2,equalizer=f=240:width_type=q:width=1.5:g=1.5,equalizer=f=520:width_type=q:width=1.8:g=-2.2,equalizer=f=3200:width_type=q:width=1.4:g=2.0,equalizer=f=6800:width_type=q:width=1.8:g=-3.8,equalizer=f=7800:width_type=q:width=1.8:g=-4.0,equalizer=f=9500:width_type=h:width=2500:g=1.0,acompressor=threshold=0.13:ratio=2.8:attack=10:release=100:makeup=1.4,loudnorm=I=-15.5:TP=-1.0:LRA=6';
       } else if (masteringPreset === 'late_night_warmth') {
         filter = 'highpass=f=70,equalizer=f=160:width_type=q:width=1.2:g=1.8,equalizer=f=650:width_type=q:width=1.8:g=-1.8,equalizer=f=3200:width_type=q:width=1.4:g=2.4,equalizer=f=7500:width_type=q:width=2.0:g=-1.8,acompressor=threshold=0.14:ratio=2.0:attack=15:release=200:makeup=1.2,loudnorm=I=-16:TP=-1.5:LRA=8';
       } else if (masteringPreset === 'deep_sleep_master') {
