@@ -1,0 +1,16 @@
+# Node
+node_modules/
+
+# Build
+dist/
+
+# Large installer binaries (GitHub 100MB limit)
+public/downloads/*.exe
+public/downloads/*.dmg
+public/downloads/*.AppImage
+public/downloads/*.zip
+public/downloads/*.tar.gz
+
+# Logs & temp
+*.log
+.DS_Store

@@ -46,14 +46,18 @@ import {
   ArrowUpDown,
   Clapperboard,
   Clock,
-  Timer
+  Timer,
+  Zap,
+  Square
 } from 'lucide-react';
+import { streamingAudioPlayer } from '../../utils/streamingAudioPlayer';
 import { getVoiceSampleText } from '../../utils/voiceSamples';
 import { 
   validateVoiceText, 
   truncateToEngineLimit 
 } from '../../utils/voiceLimits';
 import { detectPhoneticReplacements, applyPhoneticAssistant } from '../../utils/textSanitizer';
+import { UpdateBadgeButton } from '../Controls/UpdateBadgeButton';
 
 interface QuickStarterPreset {
   id: string;
@@ -306,6 +310,11 @@ export const VoiceStudioPage: React.FC = () => {
     setF5Quality,
     enableNaturalBreaths,
     setEnableNaturalBreaths,
+    enableInstantStreaming,
+    setEnableInstantStreaming,
+    isStreamingAudio,
+    streamingChunkInfo,
+    stopTTSStreaming,
     pronunciationRules,
     setPronunciationRules,
     sendVoiceoverToTimeline,
@@ -884,12 +893,18 @@ export const VoiceStudioPage: React.FC = () => {
       setAudioUrl(fullUrl);
       setAudioDuration(res.duration || estimatedSeconds);
       setAudioCurrentTime(0);
-      setTimeout(() => {
-        if (audioRef.current) {
-          audioRef.current.play().catch(() => {});
-          setIsPlayingAudio(true);
-        }
-      }, 200);
+
+      // If instant streaming was not active or already finished, start HTML audio playback
+      if (!streamingAudioPlayer.getState().isPlaying) {
+        setTimeout(() => {
+          if (audioRef.current) {
+            audioRef.current.play().catch(() => {});
+            setIsPlayingAudio(true);
+          }
+        }, 200);
+      } else {
+        setIsPlayingAudio(true);
+      }
     } else {
       setErrorMessage(res.error || 'Failed to synthesize speech.');
     }
@@ -1329,6 +1344,8 @@ export const VoiceStudioPage: React.FC = () => {
 
         {/* Right Actions: Timeline Link & API Keys */}
         <div className="flex items-center gap-2">
+          {/* In-App Updater Pill */}
+          <UpdateBadgeButton />
           {project?.metadata?.title && (
             <div className="hidden xl:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-surface-card border border-border-subtle text-[11px] font-medium text-slate-300">
               <Film className="w-3.5 h-3.5 text-cyan-400" />
@@ -1748,6 +1765,24 @@ export const VoiceStudioPage: React.FC = () => {
                       <span className="text-[10px] text-slate-400 font-mono">({speed.toFixed(1)}x)</span>
                     </button>
 
+                    {/* ⚡ ElevenLabs-Style Instant Stream Audio Toggle */}
+                    <button
+                      type="button"
+                      onClick={() => setEnableInstantStreaming(!enableInstantStreaming)}
+                      className={`px-3 py-1.5 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                        enableInstantStreaming
+                          ? 'bg-amber-500/15 border-amber-500/50 text-amber-300 shadow-sm shadow-amber-500/15'
+                          : 'bg-surface-panel border-border-subtle text-slate-400 hover:text-slate-200 hover:bg-surface-elevated'
+                      }`}
+                      title="Instant Audio Stream (ElevenLabs Style): Audio plays instantly in real-time as sentence 1 is synthesized (~350ms) instead of waiting for the full speech"
+                    >
+                      <Zap className={`w-3.5 h-3.5 ${enableInstantStreaming ? 'text-amber-400 fill-amber-400/30' : 'text-slate-500'}`} />
+                      <span>Instant Stream</span>
+                      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${enableInstantStreaming ? 'bg-amber-400/25 text-amber-200' : 'bg-slate-800 text-slate-500'}`}>
+                        {enableInstantStreaming ? 'ON' : 'OFF'}
+                      </span>
+                    </button>
+
                     {/* F5-TTS Neural Flow Quality Pill Toggle */}
                     {(activeVoiceProfile?.engine === 'f5_tts' || activeVoiceProfile?.engine === 'indic_f5' || !activeVoiceProfile) && (
                       <div className="flex items-center gap-1.5">
@@ -1868,6 +1903,53 @@ export const VoiceStudioPage: React.FC = () => {
                 {/* Real-time TTS Progress HUD & Live ETA Bar */}
                 {isGeneratingTTS && (
                   <div className="p-4 bg-slate-900/95 border-t border-indigo-500/30 animate-fadeIn space-y-2.5">
+                    {/* ElevenLabs-Style Instant Audio Stream Playback Banner */}
+                    {isStreamingAudio && (
+                      <div className="p-3 rounded-xl bg-gradient-to-r from-amber-950/70 via-indigo-950/60 to-cyan-950/70 border border-amber-500/50 flex items-center justify-between gap-3 text-xs animate-fadeIn shadow-lg shadow-amber-950/30">
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span className="relative flex h-3 w-3 flex-shrink-0">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-80"></span>
+                            <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
+                          </span>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-bold text-amber-300 flex items-center gap-1">
+                                <Zap className="w-3.5 h-3.5 fill-amber-400" />
+                                <span>ElevenLabs Instant Stream:</span>
+                              </span>
+                              <span className="text-white font-medium">
+                                {streamingChunkInfo?.chunk && streamingChunkInfo?.total
+                                  ? `Playing Sentence ${streamingChunkInfo.chunk} of ${streamingChunkInfo.total}`
+                                  : 'Streaming Voice Instantly to Speakers...'}
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-slate-300 truncate mt-0.5 font-mono">
+                              ⚡ Low-latency voice streaming • Remaining sentences synthesizing smoothly in background
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Animated Visualizer Bars & Stop Button */}
+                        <div className="flex items-center gap-2.5 flex-shrink-0">
+                          <div className="flex items-end gap-1 h-5 px-2 py-0.5 bg-black/50 rounded-lg border border-amber-500/30">
+                            <span className="w-1 bg-amber-400 rounded-full animate-bounce [animation-delay:0ms] h-3.5"></span>
+                            <span className="w-1 bg-amber-300 rounded-full animate-bounce [animation-delay:150ms] h-4.5"></span>
+                            <span className="w-1 bg-cyan-400 rounded-full animate-bounce [animation-delay:300ms] h-2.5"></span>
+                            <span className="w-1 bg-indigo-400 rounded-full animate-bounce [animation-delay:75ms] h-4"></span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={stopTTSStreaming}
+                            className="px-2.5 py-1.5 rounded-lg bg-rose-600/25 hover:bg-rose-600/40 text-rose-300 hover:text-white border border-rose-500/50 text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer shadow-xs active:scale-95"
+                            title="Stop live streaming playback"
+                          >
+                            <Square className="w-3 h-3 fill-rose-400" />
+                            <span>Stop Stream</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="flex items-center justify-between text-xs flex-wrap gap-2">
                       <div className="flex items-center gap-2.5">
                         <span className="relative flex h-2.5 w-2.5">

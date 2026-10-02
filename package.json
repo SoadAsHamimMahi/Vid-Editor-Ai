@@ -31,10 +31,23 @@
       "scripts/**/*",
       "package.json"
     ],
+    "asarUnpack": [
+      "scripts/**/*",
+      "projects_data/voices/samples/**/*",
+      "node_modules/kokoro-js/voices/**/*"
+    ],
     "extraResources": [
       {
         "from": "scripts",
         "to": "scripts"
+      },
+      {
+        "from": "projects_data/voices/samples",
+        "to": "projects_data/voices/samples"
+      },
+      {
+        "from": "node_modules/kokoro-js/voices",
+        "to": "voices"
       }
     ],
     "win": {

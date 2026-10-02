@@ -527,13 +527,28 @@ export class EdgeTtsService {
       const pythonExe = this.resolvePythonExe();
       const baseDir = typeof import.meta !== 'undefined' && import.meta.dirname ? import.meta.dirname : process.cwd();
       const workerCandidates = [
-        path.resolve(process.cwd(), 'scripts', 'edge_tts_worker.py'),
         process.resourcesPath ? path.resolve(process.resourcesPath, 'scripts', 'edge_tts_worker.py') : '',
+        baseDir.includes('app.asar') ? path.resolve(baseDir.replace('app.asar', 'app.asar.unpacked'), '../scripts', 'edge_tts_worker.py') : '',
+        path.resolve(process.cwd(), 'scripts', 'edge_tts_worker.py'),
         path.resolve(process.cwd(), 'resources', 'scripts', 'edge_tts_worker.py'),
         path.resolve(baseDir, 'scripts', 'edge_tts_worker.py'),
         path.resolve(baseDir, '../scripts', 'edge_tts_worker.py'),
       ].filter(Boolean);
-      const workerScript = workerCandidates.find((c) => fs.existsSync(c)) || workerCandidates[0];
+      let workerScript = workerCandidates.find((c) => !c.includes('app.asar') && fs.existsSync(c)) || workerCandidates[0];
+      if (workerScript && workerScript.includes('app.asar')) {
+        const unpacked = workerScript.replace('app.asar', 'app.asar.unpacked');
+        if (fs.existsSync(unpacked)) {
+          workerScript = unpacked;
+        } else {
+          try {
+            const targetDir = path.join(process.cwd(), 'projects_data', 'scripts');
+            fs.ensureDirSync(targetDir);
+            const targetScript = path.join(targetDir, 'edge_tts_worker.py');
+            fs.copyFileSync(workerScript, targetScript);
+            workerScript = targetScript;
+          } catch {}
+        }
+      }
       const tempPayloadPath = path.join(os.tmpdir(), `edge_payload_${Date.now()}_${Math.random().toString(36).slice(2)}.json`);
 
       const payload = {

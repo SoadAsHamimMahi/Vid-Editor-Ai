@@ -137,9 +137,9 @@ export const VideoPreview: React.FC = () => {
   const totalDuration = Math.max(1, scenesDuration, audioDuration);
   const totalFrames = Math.max(1, Math.round(totalDuration * fps));
 
-  // Build stable inputProps — only changes when composition-affecting data changes
+  // Build stable inputProps — always pulls live project from store when composition data changes
   const memoizedInputProps = React.useMemo(
-    () => ({ project: projectRef.current }),
+    () => ({ project: useProjectStore.getState().project }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [sceneFingerprint, audioPath, bgMusicPath, bgMusicVolume, audioDucking, trackMutesJson, overlayClipsJson, audioClipsJson, fps, width, height, captionStyle, captionPositionJson, captionScale, audioEngineEpoch]
   );

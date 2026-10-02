@@ -16,6 +16,17 @@ projects_data
 chrome_profile_*
 *.local
 
+# Installers & binary packages
+*.exe
+*.dmg
+*.AppImage
+*.blockmap
+website/dist/
+website/public/downloads/*.exe
+website/public/downloads/*.dmg
+website/public/downloads/*.AppImage
+website/public/downloads/*.zip
+
 # Environment variables & secrets (keep local, never commit)
 .env
 .env.*

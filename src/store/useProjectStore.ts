@@ -29,11 +29,13 @@ import {
   TTSGenerationResult,
   GeneratedVoiceRecord,
   TTSProgressData,
+  TTSAudioChunk,
   AudioMasteringPreset,
   MultiSpeakerRequest,
   PronunciationRule,
   WordTimestamp
 } from '../types';
+import { streamingAudioPlayer } from '../utils/streamingAudioPlayer';
 import { analyzeAudioBeats } from '../utils/beatDetector';
 import { getExactAudioDuration } from '../utils/audioDuration';
 import { resetAudioEngine as resetAudioEngineManager, ensureAudioContextRunning } from '../utils/audioContextManager';
@@ -124,6 +126,11 @@ interface ProjectState {
   ttsProgressMessage: string | null;
   ttsProgressData: TTSProgressData | null;
   setTTSProgress: (data: TTSProgressData | null) => void;
+  enableInstantStreaming: boolean;
+  setEnableInstantStreaming: (enabled: boolean) => void;
+  isStreamingAudio: boolean;
+  streamingChunkInfo: { chunk: number; total: number; isPlaying: boolean; text?: string } | null;
+  stopTTSStreaming: () => void;
   lastGeneratedTTSAudioPath: string | null;
   setActiveVoiceProfile: (profile: VoiceProfile | null) => void;
   loadVoiceProfiles: () => Promise<VoiceProfile[]>;
@@ -734,6 +741,18 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   ttsProgressMessage: null,
   ttsProgressData: null,
   setTTSProgress: (data) => set({ ttsProgressData: data }),
+  enableInstantStreaming: true,
+  setEnableInstantStreaming: (enabled) => set({ enableInstantStreaming: enabled }),
+  isStreamingAudio: false,
+  streamingChunkInfo: null,
+  stopTTSStreaming: () => {
+    streamingAudioPlayer.stop();
+    const sessionId = streamingAudioPlayer.getState().sessionId;
+    if (sessionId && (window.electronAPI as any)?.cancelTTSStream) {
+      (window.electronAPI as any).cancelTTSStream(sessionId).catch(() => {});
+    }
+    set({ isStreamingAudio: false, streamingChunkInfo: null });
+  },
   lastGeneratedTTSAudioPath: null,
   setActiveVoiceProfile: (profile) => set({ activeVoiceProfile: profile }),
   flowGenerationMode: 'image',
@@ -1536,7 +1555,55 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     { id: 'rule-cesspit',             pattern: 'cesspit',              replacement: 'sesspit' },
     { id: 'rule-cistern',             pattern: 'cistern',              replacement: 'sistern' },
     { id: 'rule-edinburgh',           pattern: 'Edinburgh',            replacement: 'Edinburuh' },
-    { id: 'rule-mps',                 pattern: 'MPs',                  replacement: "M-P's" },
+    // ── Cristiano Ronaldo & Portuguese / European Names ────────────────────────────
+    { id: 'rule-funchal',             pattern: 'Funchal',              replacement: 'Foonshahl' },
+    { id: 'rule-jose-dinis-accent',   pattern: 'José Dinis',           replacement: 'Zhozeh Deeneesh' },
+    { id: 'rule-jose-dinis-plain',    pattern: 'Jose Dinis',           replacement: 'Zhozeh Deeneesh' },
+    { id: 'rule-santo-antonio-accent', pattern: 'Santo António',       replacement: 'Sahntoo Antawneeoo' },
+    { id: 'rule-santo-antonio-plain', pattern: 'Santo Antonio',        replacement: 'Sahntoo Antawneeoo' },
+    { id: 'rule-maria-dolores',       pattern: 'Maria Dolores',        replacement: 'Maria Dolohresh' },
+    { id: 'rule-dolores',             pattern: 'Dolores',              replacement: 'Dolohresh' },
+    { id: 'rule-madeira',             pattern: 'Madeira',              replacement: 'Mahdayra' },
+    { id: 'rule-andorinha',           pattern: 'Andorinha',            replacement: 'Andoreenya' },
+    { id: 'rule-abelhinha',           pattern: 'Abelhinha',            replacement: 'Abelyeenya' },
+    { id: 'rule-chorao-accent',       pattern: 'Chorão',               replacement: 'Shorowng' },
+    { id: 'rule-chorao-plain',        pattern: 'Chorao',               replacement: 'Shorowng' },
+    { id: 'rule-nacional',            pattern: 'Nacional',             replacement: 'Nahseeohnahl' },
+    { id: 'rule-tachycardia',         pattern: 'Tachycardia',          replacement: 'Tackeecardya' },
+    { id: 'rule-john-oshea',          pattern: "John O'Shea",          replacement: 'John Ohshay' },
+    { id: 'rule-oshea',               pattern: "O'Shea",               replacement: 'Ohshay' },
+    { id: 'rule-eric-cantona',        pattern: 'Eric Cantona',         replacement: 'Eric Kahntonah' },
+    { id: 'rule-cantona',             pattern: 'Cantona',              replacement: 'Kahntonah' },
+    { id: 'rule-juventus',            pattern: 'Juventus',             replacement: 'Yooventoos' },
+    { id: 'rule-bernabeu-accent',     pattern: 'Bernabéu',             replacement: 'Bernabayoo' },
+    { id: 'rule-bernabeu-plain',      pattern: 'Bernabeu',             replacement: 'Bernabayoo' },
+    { id: 'rule-la-decima-accent',    pattern: 'La Décima',            replacement: 'Lah Dehseemah' },
+    { id: 'rule-la-decima-plain',     pattern: 'La Decima',            replacement: 'Lah Dehseemah' },
+    { id: 'rule-eder-accent',         pattern: 'Éder',                 replacement: 'Ehdair' },
+    { id: 'rule-eder-plain',          pattern: 'Eder',                 replacement: 'Ehdair' },
+    { id: 'rule-georgina',            pattern: 'Georgina',             replacement: 'Horheenah' },
+    { id: 'rule-anfield',             pattern: 'Anfield',              replacement: 'Ahnfield' },
+    { id: 'rule-qatar',               pattern: 'Qatar',                replacement: 'Kuhtahr' },
+    { id: 'rule-doha',                pattern: 'Doha',                 replacement: 'Dohha' },
+    { id: 'rule-al-nassr',            pattern: 'Al Nassr',             replacement: 'Al Nahsur' },
+    { id: 'rule-eusebio-accent',      pattern: 'Eusébio',              replacement: 'Ayoozehbyoo' },
+    { id: 'rule-eusebio-plain',       pattern: 'Eusebio',              replacement: 'Ayoozehbyoo' },
+    { id: 'rule-buenos-aires',        pattern: 'Buenos Aires',         replacement: 'Bwenos Eyres' },
+    { id: 'rule-cry-baby-hyphen',     pattern: 'Cry-Baby',             replacement: 'Crybaby' },
+    { id: 'rule-crybaby-hyphen-lc',   pattern: 'cry-baby',             replacement: 'crybaby' },
+    { id: 'rule-step-overs',          pattern: 'step-overs',           replacement: 'step overs' },
+    { id: 'rule-step-over',           pattern: 'step-over',            replacement: 'step over' },
+    { id: 'rule-tin-roofed',          pattern: 'tin-roofed',           replacement: 'tin roofed' },
+    { id: 'rule-reed-like',           pattern: 'reed-like',            replacement: 'reedlike' },
+    { id: 'rule-show-off',            pattern: 'show-off',             replacement: 'showoff' },
+    { id: 'rule-sit-ups',             pattern: 'Sit-ups',              replacement: 'Situps' },
+    { id: 'rule-green-and-white',     pattern: 'green-and-white',      replacement: 'green and white' },
+    { id: 'rule-brand-new',           pattern: 'brand-new',            replacement: 'brand new' },
+    { id: 'rule-quarter-final',       pattern: 'quarter-final',        replacement: 'quarterfinal' },
+    { id: 'rule-goalscorer',          pattern: 'goalscorer',           replacement: 'goal scorer' },
+    { id: 'rule-under-sixteens',      pattern: 'under-sixteens',       replacement: 'under sixteens' },
+    { id: 'rule-under-seventeens',    pattern: 'under-seventeens',     replacement: 'under seventeens' },
+    { id: 'rule-under-eighteens',     pattern: 'under-eighteens',      replacement: 'under eighteens' },
     // ── English Tech Acronym Expansions ───────────────────────────────────────────
     { id: 'rule-ai',      pattern: 'AI',      replacement: 'A-I', caseSensitive: true },
     { id: 'rule-chatgpt', pattern: 'ChatGPT', replacement: 'Chat G-P-T' },
@@ -1752,8 +1819,31 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
         // Re-sort scenes chronologically
         updatedScenes.sort((a, b) => a.startInSeconds - b.startInSeconds);
-        updatedScenes = updatedScenes.map((s, idx) => ({ ...s, order: idx }));
+        let cur = 0;
+        updatedScenes = updatedScenes.map((s, idx) => {
+          const res = { ...s, order: idx, startInSeconds: +cur.toFixed(3) };
+          cur += s.durationInSeconds;
+          return res;
+        });
       }
+    }
+
+    // Auto-normalize startInSeconds across all scenes if initial scene has an offset without preceding audio
+    const firstSceneStart = updatedScenes[0]?.startInSeconds || 0;
+    if (firstSceneStart > 1.0 && (!project.metadata.audioPath || (project.metadata.audioDuration || 0) < firstSceneStart)) {
+      let cur = 0;
+      updatedScenes = updatedScenes.map((s, idx) => {
+        const dur = s.durationInSeconds;
+        const offset = s.startInSeconds - cur;
+        const normalizedSubs = (s.subtitles || []).map((w) => ({
+          ...w,
+          start: Math.max(0, +(w.start - offset).toFixed(3)),
+          end: Math.max(0, +(w.end - offset).toFixed(3)),
+        }));
+        const res = { ...s, order: idx, startInSeconds: +cur.toFixed(3), durationInSeconds: dur, subtitles: normalizedSubs };
+        cur += dur;
+        return res;
+      });
     }
 
     const updatedProject = {
@@ -1853,13 +1943,21 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!project.scenes || project.scenes.length === 0) return;
 
     let changed = false;
-    const updatedScenes = project.scenes.map((scene, idx) => {
-      // NEVER override scenes that the user wants to generate
-      if (scene.status === 'pending' || scene.status === 'generating') {
-        return scene;
+    let updatedScenes = project.scenes.map((scene, idx) => {
+      // If scene was left in generating/pending but already has an image path assigned, heal to ready!
+      if ((scene.status === 'generating' || scene.status === 'pending') && (scene.localImagePath || scene.imageUrl)) {
+        changed = true;
+        return {
+          ...scene,
+          status: 'ready' as const,
+          imageUrl: scene.imageUrl || (scene.localImagePath ? `media://${scene.localImagePath.replace(/\\/g, '/')}` : undefined),
+        };
       }
 
-      if (scene.localImagePath && scene.imageUrl && scene.status === 'ready') {
+      // If user intentionally queued scene and no media exists yet, keep pending
+      if ((scene.status === 'pending' || scene.status === 'generating') && !scene.localImagePath && !scene.imageUrl) {
+        // Still check mediaAssets to see if image was harvested to disk
+      } else if (scene.localImagePath && scene.imageUrl && scene.status === 'ready') {
         return scene;
       }
 
@@ -1890,6 +1988,25 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
       return scene;
     });
+
+    // Auto-heal / normalize scenes to contiguous timeline if first scene has an arbitrary script timecode offset
+    const firstSceneStart = updatedScenes[0]?.startInSeconds || 0;
+    if (firstSceneStart > 1.0 && (!project.metadata.audioPath || (project.metadata.audioDuration || 0) < firstSceneStart)) {
+      changed = true;
+      let cur = 0;
+      updatedScenes = updatedScenes.map((s, idx) => {
+        const dur = Math.max(0.5, s.durationInSeconds || 3.5);
+        const offset = s.startInSeconds - cur;
+        const normalizedSubs = (s.subtitles || []).map((w) => ({
+          ...w,
+          start: Math.max(0, +(w.start - offset).toFixed(3)),
+          end: Math.max(0, +(w.end - offset).toFixed(3)),
+        }));
+        const res = { ...s, order: idx, startInSeconds: +cur.toFixed(3), durationInSeconds: dur, subtitles: normalizedSubs };
+        cur += dur;
+        return res;
+      });
+    }
 
     if (changed) {
       setProject({
@@ -4906,10 +5023,41 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           };
         }
 
+        const sessionId = req.streamSessionId || `tts_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const useStreaming = req.enableStreamingPlayback ?? get().enableInstantStreaming ?? true;
+
+        let unlistenChunk: (() => void) | undefined;
+        if (useStreaming) {
+          streamingAudioPlayer.startSession(sessionId);
+          set({
+            isStreamingAudio: true,
+            streamingChunkInfo: { chunk: 0, total: 0, isPlaying: false },
+          });
+
+          if ((window.electronAPI as any)?.onTTSAudioChunk) {
+            unlistenChunk = (window.electronAPI as any).onTTSAudioChunk((chunk: TTSAudioChunk) => {
+              if (!chunk.sessionId || chunk.sessionId === sessionId) {
+                streamingAudioPlayer.handleChunk(chunk);
+                set((s) => ({
+                  isStreamingAudio: true,
+                  streamingChunkInfo: {
+                    chunk: chunk.chunkIndex + 1,
+                    total: chunk.totalChunks > 0 ? chunk.totalChunks : (s.streamingChunkInfo?.total || 1),
+                    isPlaying: true,
+                    text: chunk.text,
+                  },
+                }));
+              }
+            });
+          }
+        }
+
         const effectiveReq: TTSGenerationRequest = {
           ...req,
           text: speechCleanText,
           emotion: effectiveEmotion,
+          streamSessionId: sessionId,
+          enableStreamingPlayback: useStreaming,
           f5Quality: req.f5Quality || get().f5Quality,
           odeSteps: req.odeSteps || (
             (req.f5Quality || get().f5Quality) === 'cinema_studio' ? 64 :
@@ -4933,6 +5081,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         try {
           const result: TTSGenerationResult = await window.electronAPI.generateSpeech(effectiveReq);
           if (unlistenProgress) unlistenProgress();
+          if (unlistenChunk) unlistenChunk();
 
           if (result.success && result.audioPath) {
             if (result.record) {
@@ -4958,6 +5107,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
           }
         } finally {
           if (unlistenProgress) unlistenProgress();
+          if (unlistenChunk) unlistenChunk();
         }
       }
       throw new Error('TTS API is not available.');

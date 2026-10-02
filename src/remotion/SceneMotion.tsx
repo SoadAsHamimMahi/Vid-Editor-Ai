@@ -96,11 +96,14 @@ export const SceneMotion: React.FC<SceneMotionProps> = ({ scene, width, height }
   let transitionFilter = '';
 
   // Entrance transition (first transFrames)
-  if (frame < transFrames && transitionType !== 'none') {
+  const isFirstScene = (scene.order || 0) === 0 || (scene.startInSeconds || 0) <= 0;
+  if (frame < transFrames && transitionType !== 'none' && !isFirstScene) {
     const tProgress = frame / transFrames; // 0 -> 1
     switch (transitionType) {
       case 'cross_dissolve':
-        transitionOpacity = interpolate(tProgress, [0, 1], [0, 1]);
+        // For back-to-back non-overlapping sequence tracks, keep full opacity so clips
+        // do not dip to pure pitch black between cuts or when paused at cut points.
+        transitionOpacity = 1.0;
         break;
       case 'fade_black':
         transitionOpacity = interpolate(tProgress, [0, 1], [0, 1]);
@@ -111,18 +114,18 @@ export const SceneMotion: React.FC<SceneMotionProps> = ({ scene, width, height }
         break;
       case 'whip_pan':
         transitionTranslateX = interpolate(tProgress, [0, 1], [width * 0.4, 0]);
-        transitionOpacity = interpolate(tProgress, [0, 0.4, 1], [0, 0.8, 1]);
+        transitionOpacity = interpolate(tProgress, [0, 0.4, 1], [0.6, 0.85, 1]);
         break;
       case 'glitch':
         if (frame % 4 === 1) {
           transitionTranslateX = (Math.random() - 0.5) * 40;
           transitionFilter += ' hue-rotate(90deg) saturate(200%)';
         }
-        transitionOpacity = interpolate(tProgress, [0, 1], [0.3, 1]);
+        transitionOpacity = interpolate(tProgress, [0, 1], [0.7, 1]);
         break;
       case 'zoom_blur':
-        transitionScaleMultiplier = interpolate(tProgress, [0, 1], [1.4, 1.0]);
-        transitionOpacity = interpolate(tProgress, [0, 1], [0, 1]);
+        transitionScaleMultiplier = interpolate(tProgress, [0, 1], [1.2, 1.0]);
+        transitionOpacity = 1.0;
         break;
     }
   }
@@ -137,7 +140,7 @@ export const SceneMotion: React.FC<SceneMotionProps> = ({ scene, width, height }
     return (
       <div 
         className="w-full h-full flex flex-col items-center justify-center bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-slate-300 p-8 select-none relative overflow-hidden"
-        style={{ width, height, opacity: transitionOpacity }}
+        style={{ width, height, opacity: 1 }}
       >
         <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(99,102,241,0.15),transparent_70%)]" />
         <div className="z-10 text-center max-w-2xl">

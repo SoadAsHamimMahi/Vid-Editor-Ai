@@ -319,6 +319,7 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
             toggleSelectScene(scene.id, isMulti, isRange);
           } else if (!selectedSceneIds.includes(scene.id) || selectedSceneIds.length <= 1) {
             toggleSelectScene(scene.id, false, false);
+            useProjectStore.getState().setInspectorTab('visual');
           }
         }}
         onClick={(e) => {
@@ -390,23 +391,23 @@ const ClipBlockComponent: React.FC<ClipBlockProps> = ({ scene, pixelsPerSecond }
 
         {/* Filmstrip Background Thumbnail (Video or Image) */}
         {isVideo && vidSrc ? (
-          <div className="absolute inset-0 opacity-40 group-hover:opacity-60 transition-opacity">
+          <div className="absolute inset-0 opacity-80 group-hover:opacity-100 transition-opacity">
             <video
               src={vidSrc}
               muted
               playsInline
               className="w-full h-full object-cover"
             />
-            <div className="absolute inset-0 bg-gradient-to-t from-[#141418] via-[#141418]/60 to-transparent" />
+            <div className="absolute inset-0 bg-gradient-to-t from-[#141418]/85 via-transparent to-black/30 pointer-events-none" />
           </div>
         ) : imgSrc ? (
-          <div className="absolute inset-0 opacity-40 group-hover:opacity-60 transition-opacity">
+          <div className="absolute inset-0 opacity-80 group-hover:opacity-100 transition-opacity">
             <img
               src={imgSrc}
               alt={scene.prompt}
               className="w-full h-full object-cover"
             />
-            <div className="absolute inset-0 bg-gradient-to-t from-[#141418] via-[#141418]/60 to-transparent" />
+            <div className="absolute inset-0 bg-gradient-to-t from-[#141418]/85 via-transparent to-black/30 pointer-events-none" />
           </div>
         ) : null}
 

@@ -129,6 +129,12 @@ const electronAPI = {
     ipcRenderer.on('tts:progress', handler);
     return () => ipcRenderer.removeListener('tts:progress', handler);
   },
+  onTTSAudioChunk: (callback: (chunk: any) => void) => {
+    const handler = (_event: any, chunk: any) => callback(chunk);
+    ipcRenderer.on('tts:audio-chunk', handler);
+    return () => ipcRenderer.removeListener('tts:audio-chunk', handler);
+  },
+  cancelTTSStream: (sessionId: string) => ipcRenderer.invoke('tts:cancel-stream', sessionId),
 
   // Cloud AI Video (Colab Wan 2.1 / LTX-Video)
   colabSetTunnelUrl: (url: string) => ipcRenderer.invoke('colab:set-tunnel-url', url),
@@ -171,9 +177,36 @@ const electronAPI = {
     ipcRenderer.on('agentic-studio:log', handler);
     return () => ipcRenderer.removeListener('agentic-studio:log', handler);
   },
+
+  // CineFlow Production Auth, Licensing & Credits
+  authLogin: (credentials: { email: string; password: string }) => ipcRenderer.invoke('auth:login', credentials),
+  authLogout: () => ipcRenderer.invoke('auth:logout'),
+  authGetUser: () => ipcRenderer.invoke('auth:get-user'),
+  licenseActivate: (key: string) => ipcRenderer.invoke('license:activate', key),
+  creditsGetBalance: () => ipcRenderer.invoke('credits:get-balance'),
+  creditsReserve: (operation: string, amount?: number) => ipcRenderer.invoke('credits:reserve', operation, amount),
+  creditsDeduct: (reservationId: string, actualCost?: number) => ipcRenderer.invoke('credits:deduct', reservationId, actualCost),
+  creditsRelease: (reservationId: string, reason?: string) => ipcRenderer.invoke('credits:release', reservationId, reason),
+  adminGrantCredits: (userId: string, amount: number, reason: string) => ipcRenderer.invoke('admin:grant-credits', userId, amount, reason),
+
+  // In-App Auto-Updater
+  checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+  installUpdate: (silent?: boolean) => ipcRenderer.invoke('updater:install', silent),
+  onUpdateAvailable: (callback: (info: any) => void) => {
+    const handler = (_event: any, info: any) => callback(info);
+    ipcRenderer.on('updater:available', handler);
+    return () => ipcRenderer.removeListener('updater:available', handler);
+  },
+  onUpdateProgress: (callback: (progress: any) => void) => {
+    const handler = (_event: any, progress: any) => callback(progress);
+    ipcRenderer.on('updater:progress', handler);
+    return () => ipcRenderer.removeListener('updater:progress', handler);
+  },
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
 
 export { electronAPI };
+
 

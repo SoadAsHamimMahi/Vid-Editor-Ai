@@ -80,47 +80,73 @@ export const MainComposition: React.FC<MainCompositionProps> = React.memo(({ pro
       )}
 
       {/* 3. Track V1: Render Base Scenes Sequentially with Transitions & Camera Motion */}
-      {scenes.map((scene, index) => {
-        let fromFrame = Math.round(scene.startInSeconds * fps);
-        let durationInFrames = Math.max(1, Math.round(scene.durationInSeconds * fps));
+      {(() => {
+        let accumulatedSecs = 0;
+        const firstSceneStart = scenes[0]?.startInSeconds || 0;
+        // If the first scene has an arbitrary script offset (e.g. from a script timecode like #12-26.830)
+        // without an audio track preceding it, or if scenes are out of sync with sequential timeline layout:
+        const shouldNormalizeToTimeline = firstSceneStart > 1.0 && (!metadata.audioPath || (metadata.audioDuration || 0) < firstSceneStart);
 
-        // If this is the first scene and it starts with a small gap (e.g. 0.17s speech pause), snap to frame 0
-        if (index === 0 && scene.startInSeconds > 0 && scene.startInSeconds <= 2.0) {
-          durationInFrames = Math.max(1, Math.round((scene.startInSeconds + scene.durationInSeconds) * fps));
-          fromFrame = 0;
-        } else if (index > 0) {
-          const prevScene = scenes[index - 1];
-          const prevEnd = prevScene.startInSeconds + prevScene.durationInSeconds;
-          const gap = scene.startInSeconds - prevEnd;
-          // If there is a tiny gap (< 0.3s) between scenes, bridge to prevent black flicker
-          if (gap > 0 && gap < 0.3) {
-            fromFrame = Math.round(prevEnd * fps);
-            durationInFrames = Math.max(1, Math.round((scene.startInSeconds + scene.durationInSeconds - prevEnd) * fps));
+        return scenes.map((scene, index) => {
+          const sceneStartSec = shouldNormalizeToTimeline ? accumulatedSecs : scene.startInSeconds;
+          let fromFrame = Math.round(sceneStartSec * fps);
+          let durationInFrames = Math.max(1, Math.round(scene.durationInSeconds * fps));
+
+          if (!shouldNormalizeToTimeline) {
+            // If this is the first scene and it starts with a small gap (e.g. 0.17s speech pause), snap to frame 0
+            if (index === 0 && scene.startInSeconds > 0 && scene.startInSeconds <= 2.0) {
+              durationInFrames = Math.max(1, Math.round((scene.startInSeconds + scene.durationInSeconds) * fps));
+              fromFrame = 0;
+            } else if (index > 0) {
+              const prevScene = scenes[index - 1];
+              const prevEnd = prevScene.startInSeconds + prevScene.durationInSeconds;
+              const gap = scene.startInSeconds - prevEnd;
+              // If there is a tiny gap (< 0.3s) between scenes, bridge to prevent black flicker
+              if (gap > 0 && gap < 0.3) {
+                fromFrame = Math.round(prevEnd * fps);
+                durationInFrames = Math.max(1, Math.round((scene.startInSeconds + scene.durationInSeconds - prevEnd) * fps));
+              }
+            }
           }
-        }
 
-        return (
-          <Sequence
-            key={scene.id}
-            from={fromFrame}
-            durationInFrames={durationInFrames}
-          >
-            <div style={{ width: '100%', height: '100%', opacity: isV1Muted ? 0 : 1 }}>
-              <SceneMotion scene={scene} width={width} height={height} />
-            </div>
-            {!isT1Muted && (
-              <Subtitles 
-                words={scene.subtitles} 
-                sceneStartTime={scene.startInSeconds} 
-                captionStyle={metadata.captionStyle} 
-                autoEmojiEnabled={metadata.autoEmojiEnabled !== false}
-                captionPosition={metadata.captionPosition}
-                captionScale={metadata.captionScale}
-              />
-            )}
-          </Sequence>
-        );
-      })}
+          accumulatedSecs += scene.durationInSeconds;
+
+          // Normalize subtitles timing if scenes had an offset
+          const normalizedSubtitles = (scene.subtitles || []).map((w) => {
+            if (shouldNormalizeToTimeline && w.start >= firstSceneStart) {
+              const wordOffset = scene.startInSeconds - sceneStartSec;
+              return {
+                ...w,
+                start: Math.max(0, +(w.start - wordOffset).toFixed(3)),
+                end: Math.max(0, +(w.end - wordOffset).toFixed(3)),
+              };
+            }
+            return w;
+          });
+
+          return (
+            <Sequence
+              key={scene.id}
+              from={fromFrame}
+              durationInFrames={durationInFrames}
+            >
+              <div style={{ width: '100%', height: '100%', opacity: isV1Muted ? 0 : 1 }}>
+                <SceneMotion scene={scene} width={width} height={height} />
+              </div>
+              {!isT1Muted && (
+                <Subtitles 
+                  words={normalizedSubtitles} 
+                  sceneStartTime={sceneStartSec} 
+                  captionStyle={metadata.captionStyle} 
+                  autoEmojiEnabled={metadata.autoEmojiEnabled !== false}
+                  captionPosition={metadata.captionPosition}
+                  captionScale={metadata.captionScale}
+                />
+              )}
+            </Sequence>
+          );
+        });
+      })()}
 
       {/* 4. Multi-Track Video Overlay Layers (V2, V3, V4 B-Roll, PiP, Graphics) */}
       {(metadata.overlayClips || []).map((clip) => {

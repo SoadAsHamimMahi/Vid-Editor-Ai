@@ -22,6 +22,8 @@ import { AgenticStudioModal } from './components/Controls/AgenticStudioModal';
 import { HomePage } from './components/Home/HomePage';
 import { VoiceStudioPage } from './components/VoiceStudio/VoiceStudioPage';
 import { useProjectStore } from './store/useProjectStore';
+import { UpdateModal } from './components/Controls/UpdateModal';
+import { useUpdateStore } from './store/useUpdateStore';
 class PanelErrorBoundary extends React.Component<{ name: string; children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
   state = { hasError: false, error: null as Error | null };
   static getDerivedStateFromError(error: Error) {
@@ -76,6 +78,18 @@ export const App: React.FC = () => {
   } = useProjectStore();
 
   const [audioModalOpen, setAudioModalOpen] = useState(false);
+  const { 
+    updateInfo, 
+    isModalOpen, 
+    setIsModalOpen, 
+    checkForUpdates, 
+    initUpdateListener 
+  } = useUpdateStore();
+
+  React.useEffect(() => {
+    const unsub = initUpdateListener();
+    return () => unsub?.();
+  }, []);
 
   // Load global API keys and check real Chrome CDP status on startup
   React.useEffect(() => {
@@ -88,6 +102,17 @@ export const App: React.FC = () => {
     const interval = setInterval(() => {
       useProjectStore.getState().checkCdpStatus();
     }, 12000);
+
+    // Auto-heal scenes on startup / project change if first scene has an arbitrary script timecode offset
+    const scenes = useProjectStore.getState().project?.scenes;
+    if (scenes && scenes.length > 0 && scenes[0].startInSeconds > 1.0) {
+      const p = useProjectStore.getState().project;
+      const audioDur = p.metadata?.audioDuration || 0;
+      const audioP = p.metadata?.audioPath;
+      if (!audioP || audioDur < scenes[0].startInSeconds) {
+        useProjectStore.getState().syncMediaToScenes();
+      }
+    }
 
     // Global listener for Google Flow image/video generation progress
     let unsubFlowProgress: (() => void) | undefined;
@@ -236,8 +261,17 @@ export const App: React.FC = () => {
     };
   }, []);
 
-
-  // Ensure instant save before window reload or exit
+  // Auto-heal scenes whenever a project is loaded with script timecode offsets
+  React.useEffect(() => {
+    const sc = project.scenes;
+    if (sc && sc.length > 0 && sc[0].startInSeconds > 1.0) {
+      const audioDur = project.metadata?.audioDuration || 0;
+      const audioP = project.metadata?.audioPath;
+      if (!audioP || audioDur < sc[0].startInSeconds) {
+        useProjectStore.getState().syncMediaToScenes();
+      }
+    }
+  }, [project.scenes, project.metadata?.audioPath, project.metadata?.audioDuration]);
   React.useEffect(() => {
     const handleBeforeUnload = () => {
       if (project.metadata.id && window.electronAPI?.saveProject) {
@@ -266,6 +300,12 @@ export const App: React.FC = () => {
     return (
       <div className="w-screen h-screen overflow-hidden bg-[#0e0e13]">
         <VoiceStudioPage />
+        <UpdateModal
+          isOpen={isModalOpen}
+          onClose={() => setIsModalOpen(false)}
+          updateInfo={updateInfo}
+          onCheckAgain={checkForUpdates}
+        />
       </div>
     );
   }
@@ -311,6 +351,12 @@ export const App: React.FC = () => {
         />
         <PolicyViolationFixModal />
         <AgenticStudioModal />
+        <UpdateModal
+          isOpen={isModalOpen}
+          onClose={() => setIsModalOpen(false)}
+          updateInfo={updateInfo}
+          onCheckAgain={checkForUpdates}
+        />
       </div>
     );
   }
@@ -390,6 +436,12 @@ export const App: React.FC = () => {
       />
       <PolicyViolationFixModal />
       <AgenticStudioModal />
+      <UpdateModal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        updateInfo={updateInfo}
+        onCheckAgain={checkForUpdates}
+      />
     </div>
   );
 };

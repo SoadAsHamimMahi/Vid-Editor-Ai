@@ -789,19 +789,22 @@ export function manifestToTimelineScenes(
 
   const motionCycle: MotionType[] = ['zoom_in', 'pan_right', 'zoom_out', 'pan_left'];
 
+  let curTimelineTime = 0;
   return entries.map((entry, idx) => {
-    const startTime = parseTimecodeToSeconds(entry.timecode);
+    const rawStartTime = parseTimecodeToSeconds(entry.timecode);
     let dur = defaultDuration;
 
     if (idx + 1 < entries.length) {
       const nextTime = parseTimecodeToSeconds(entries[idx + 1].timecode);
-      const delta = +(nextTime - startTime).toFixed(3);
+      const delta = +(nextTime - rawStartTime).toFixed(3);
       if (delta >= 0.2) {
         dur = delta;
       }
     }
 
     const snappedDuration = Math.max(0.3, Math.round(dur * fps) / fps);
+    const sceneStartTime = +curTimelineTime.toFixed(3);
+    curTimelineTime += snappedDuration;
     const cleanTc = entry.timecode.replace('#', '').replace(/[:\\/\*\?"<>\|]/g, '-');
     const defaultSceneId = `scene-manifest-${cleanTc}-${idx}`;
 
@@ -880,8 +883,8 @@ export function manifestToTimelineScenes(
         const totalWords = words.length;
         const wordDur = Math.max(0.24, snappedDuration / totalWords);
         finalSubtitles = words.map((w, wIdx) => {
-          const wStart = Math.min(startTime + snappedDuration - 0.1, startTime + wIdx * wordDur);
-          const wEnd = Math.min(startTime + snappedDuration, wStart + wordDur * 0.95);
+          const wStart = Math.min(sceneStartTime + snappedDuration - 0.1, sceneStartTime + wIdx * wordDur);
+          const wEnd = Math.min(sceneStartTime + snappedDuration, wStart + wordDur * 0.95);
           return {
             word: w,
             start: Math.round(wStart * fps) / fps,
@@ -894,7 +897,7 @@ export function manifestToTimelineScenes(
     return {
       id: existing?.id || defaultSceneId,
       order: idx,
-      startInSeconds: startTime,
+      startInSeconds: sceneStartTime,
       durationInSeconds: snappedDuration,
       prompt: entry.prompt,
       imageUrl: matchedImageUrl,

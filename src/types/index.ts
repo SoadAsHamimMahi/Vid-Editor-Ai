@@ -502,6 +502,20 @@ export interface TTSGenerationRequest {
   enableNaturalBreaths?: boolean;
   seed?: number;
   cfgStrength?: number; // Flow-matching guidance scale: 1.5 (stable/controlled) → 1.9 (natural default) → 2.5 (expressive/dynamic)
+  enableStreamingPlayback?: boolean; // ⚡ ElevenLabs-style instant streaming audio playback
+  streamSessionId?: string;
+}
+
+export interface TTSAudioChunk {
+  sessionId: string;
+  chunkIndex: number;
+  totalChunks: number;
+  audioData: string; // base64-encoded audio chunk (WAV or MP3)
+  mimeType: 'audio/wav' | 'audio/mpeg' | 'audio/mp3';
+  text: string;
+  durationSec: number;
+  isLast: boolean;
+  finalAudioPath?: string;
 }
 
 export interface TTSProgressData {

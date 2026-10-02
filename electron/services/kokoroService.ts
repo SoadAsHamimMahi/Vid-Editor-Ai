@@ -1,6 +1,8 @@
 import path from 'path';
 import fs from 'fs-extra';
 import { spawn } from 'child_process';
+import { app } from 'electron';
+import axios from 'axios';
 import ffmpegPath from 'ffmpeg-static';
 import { TTSGenerationRequest } from '../../src/types';
 import { cleanSpeechText, splitIntoProsodicClauses, ProsodicClause } from './ttsTextSanitizer';
@@ -193,12 +195,52 @@ const BROADCAST_STUDIO_FILTER = [
   'loudnorm=I=-14.5:TP=-1.2:LRA=4'
 ].join(',');
 
+/**
+ * Encodes raw Float32Array PCM samples into standard 16-bit mono PCM WAV Buffer.
+ * Zero-dependency, sub-millisecond execution for instant streaming playback.
+ */
+export function encodeFloat32ToWavBuffer(samples: Float32Array, sampleRate = 24000): Buffer {
+  const numSamples = samples.length;
+  const buffer = Buffer.alloc(44 + numSamples * 2);
+
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + numSamples * 2, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16); // Subchunk1Size (16 for PCM)
+  buffer.writeUInt16LE(1, 20);  // AudioFormat (1 = PCM)
+  buffer.writeUInt16LE(1, 22);  // NumChannels (1 = Mono)
+  buffer.writeUInt32LE(sampleRate, 24); // SampleRate
+  buffer.writeUInt32LE(sampleRate * 2, 28); // ByteRate
+  buffer.writeUInt16LE(2, 32);  // BlockAlign
+  buffer.writeUInt16LE(16, 34); // BitsPerSample
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(numSamples * 2, 40);
+
+  let offset = 44;
+  for (let i = 0; i < numSamples; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    const intVal = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    buffer.writeInt16LE(Math.floor(intVal), offset);
+    offset += 2;
+  }
+
+  return buffer;
+}
+
 export class KokoroService {
   private ttsInstance: any = null;
   private isInitializing = false;
   private resolvedFfmpegPath: string;
   private voicesDir: string;
   private vectorCache: Map<string, Float32Array> = new Map();
+  private cancelledSessions: Set<string> = new Set();
+
+  public cancelSession(sessionId: string): void {
+    if (sessionId) {
+      this.cancelledSessions.add(sessionId);
+    }
+  }
 
   constructor() {
     this.resolvedFfmpegPath = ffmpegPath ? ffmpegPath.replace('app.asar', 'app.asar.unpacked') : 'ffmpeg';
@@ -353,14 +395,24 @@ export class KokoroService {
     }
 
     // 3. Solo voice files from local storage
+    const appRoot = (app && typeof app.getAppPath === 'function') ? app.getAppPath() : process.cwd();
     const baseDir = typeof import.meta !== 'undefined' && import.meta.dirname ? import.meta.dirname : process.cwd();
     const candidates = [
+      // Packaged extraResources in production: <install-dir>/resources/voices/${voiceKey}.bin
+      process.resourcesPath ? path.join(process.resourcesPath, 'voices', `${voiceKey}.bin`) : '',
+      // Unpacked asar: <install-dir>/resources/app.asar.unpacked/node_modules/kokoro-js/voices/${voiceKey}.bin
+      process.resourcesPath ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'kokoro-js', 'voices', `${voiceKey}.bin`) : '',
+      appRoot.includes('app.asar') ? path.join(appRoot.replace('app.asar', 'app.asar.unpacked'), 'node_modules', 'kokoro-js', 'voices', `${voiceKey}.bin`) : '',
+      // Inside app.asar in production:
+      path.join(appRoot, 'node_modules', 'kokoro-js', 'voices', `${voiceKey}.bin`),
+      path.join(baseDir, '..', 'node_modules', 'kokoro-js', 'voices', `${voiceKey}.bin`),
+      // User project data:
+      path.resolve(process.cwd(), 'projects_data', 'voices', `${voiceKey}.bin`),
+      // Local development:
       path.resolve(process.cwd(), `node_modules/kokoro-js/voices/${voiceKey}.bin`),
-      path.resolve(process.cwd(), `projects_data/voices/${voiceKey}.bin`),
       path.resolve(baseDir, `../voices/${voiceKey}.bin`),
-      path.resolve(baseDir, `../../node_modules/kokoro-js/voices/${voiceKey}.bin`),
       path.resolve(baseDir, `voices/${voiceKey}.bin`),
-    ];
+    ].filter(Boolean);
 
     for (const cand of candidates) {
       if (fs.existsSync(cand)) {
@@ -373,6 +425,32 @@ export class KokoroService {
           console.warn(`[KokoroService] Failed reading voice vector from ${cand}:`, err.message);
         }
       }
+    }
+
+    // 4. Self-healing remote download if missing from local disk
+    try {
+      console.log(`[KokoroService] Voice vector "${voiceKey}" not found on disk. Fetching from local server/CDN...`);
+      const remoteUrls = [
+        `http://localhost:3000/voices/${voiceKey}.bin`,
+        `https://raw.githubusercontent.com/hexgrad/kokoro/main/voices/${voiceKey}.bin`,
+      ];
+      for (const url of remoteUrls) {
+        try {
+          const res = await axios.get(url, { responseType: 'arraybuffer', timeout: 8000 });
+          if (res.data && res.data.byteLength > 0) {
+            const savePath = path.resolve(process.cwd(), 'projects_data', 'voices', `${voiceKey}.bin`);
+            await fs.ensureDir(path.dirname(savePath));
+            await fs.writeFile(savePath, Buffer.from(res.data));
+            const buf = res.data;
+            const f32 = new Float32Array(buf, 0, buf.byteLength / 4);
+            this.vectorCache.set(voiceKey, f32);
+            console.log(`[KokoroService] ✓ Successfully downloaded & cached voice vector "${voiceKey}"`);
+            return f32;
+          }
+        } catch {}
+      }
+    } catch (netErr: any) {
+      console.warn(`[KokoroService] Remote voice fetch notice:`, netErr.message);
     }
 
     // Fallback to af_heart if file not found
@@ -545,14 +623,35 @@ export class KokoroService {
    * Synthesizes text into high-realism speech file using Kokoro-82M.
    * Employs sentence-block adaptive prosody streaming and broadcast studio channel strip mastering.
    */
-  public async synthesizeToFile(req: TTSGenerationRequest, outputPath: string): Promise<boolean> {
+  public async synthesizeToFile(
+    req: TTSGenerationRequest,
+    outputPath: string,
+    onChunk?: (chunk: { chunkIndex: number; totalChunks: number; audioBuffer: Buffer; durationSec: number; text: string; isLast: boolean }) => void,
+    onProgress?: (progress: any) => void
+  ): Promise<boolean> {
     try {
       const tts = await this.getTTS();
       const voiceKey = await this.resolveVoiceIdentifier(req.voiceId, req.gender);
       const speed = req.speed ?? 1.0;
 
       // Segment script into natural narrative units (paragraphs and full sentences)
-      const clauses: ProsodicClause[] = splitIntoProsodicClauses(req.text, req.prosodyPacing);
+      let clauses: ProsodicClause[] = splitIntoProsodicClauses(req.text, req.prosodyPacing);
+
+      // If only 1 clause was found but text has multiple sentences or clauses (e.g. punctuation),
+      // sub-chunk it on punctuation (. , ; ! ? —) so the first audio chunk is generated in < 400ms!
+      if (clauses.length <= 1) {
+        const rawText = clauses.length === 1 ? clauses[0].text : cleanSpeechText(req.text);
+        const subParts = rawText.split(/(?<=[.!?;:—,\n])\s+/).filter((s) => s.trim().length > 0);
+        if (subParts.length > 1) {
+          clauses = subParts.map((part, idx) => ({
+            text: part.trim(),
+            pauseAfterSec: idx === subParts.length - 1 ? 0.35 : 0.15,
+            emotion: req.emotion || 'neutral',
+            speedModifier: 1.0,
+          }));
+        }
+      }
+
       let finalAudio: any;
 
       if (clauses.length <= 1) {
@@ -560,12 +659,35 @@ export class KokoroService {
         console.log(`[KokoroService] Synthesizing speech with voice "${voiceKey}" in single continuous pass (${textToSynth.length} chars, speed=${speed})...`);
         const singleAudio = await tts.generate(textToSynth, { voice: voiceKey, speed });
         finalAudio = this.stitchAudioChunks([{ audio: singleAudio, pauseAfterSec: 0 }]);
+
+        if (onChunk && singleAudio && singleAudio.audio) {
+          try {
+            const raw = this.trimSilence(singleAudio.audio, 24000);
+            const wavBuf = encodeFloat32ToWavBuffer(raw, 24000);
+            onChunk({
+              chunkIndex: 0,
+              totalChunks: 1,
+              audioBuffer: wavBuf,
+              durationSec: raw.length / 24000,
+              text: textToSynth,
+              isLast: true,
+            });
+          } catch (emitErr: any) {
+            console.warn('[KokoroService] Failed to emit single chunk:', emitErr.message);
+          }
+        }
       } else {
         console.log(
-          `[KokoroService] Synthesizing speech with voice "${voiceKey}" across ${clauses.length} natural narrative units (speed=${speed})...`
+          `[KokoroService] ⚡ Synthesizing & streaming speech with voice "${voiceKey}" across ${clauses.length} natural narrative units (speed=${speed})...`
         );
         const chunkResults: { audio: any; pauseAfterSec: number }[] = [];
         for (let i = 0; i < clauses.length; i++) {
+          if (req.streamSessionId && this.cancelledSessions.has(req.streamSessionId)) {
+            console.log(`[KokoroService] Stream session ${req.streamSessionId} cancelled by user.`);
+            this.cancelledSessions.delete(req.streamSessionId);
+            return false;
+          }
+
           const clause = clauses[i];
           if (!clause.text || clause.text.trim().length === 0) continue;
           try {
@@ -573,6 +695,34 @@ export class KokoroService {
             const chunkAudio = await tts.generate(clause.text, { voice: voiceKey, speed: clauseSpeed });
             if (chunkAudio && chunkAudio.audio && chunkAudio.audio.length > 0) {
               chunkResults.push({ audio: chunkAudio, pauseAfterSec: clause.pauseAfterSec });
+
+              // ⚡ Instant ElevenLabs-style streaming emission as each clause finishes
+              if (onChunk) {
+                try {
+                  const raw = this.trimSilence(chunkAudio.audio, 24000);
+                  const wavBuf = encodeFloat32ToWavBuffer(raw, 24000);
+                  onChunk({
+                    chunkIndex: i,
+                    totalChunks: clauses.length,
+                    audioBuffer: wavBuf,
+                    durationSec: raw.length / 24000,
+                    text: clause.text,
+                    isLast: i === clauses.length - 1,
+                  });
+                } catch (emitErr: any) {
+                  console.warn('[KokoroService] Failed to emit chunk:', emitErr.message);
+                }
+              }
+
+              if (onProgress) {
+                const percent = Math.min(95, Math.round(((i + 1) / clauses.length) * 90) + 5);
+                onProgress({
+                  percent,
+                  chunk: i + 1,
+                  total: clauses.length,
+                  message: `Synthesizing & streaming voice (${i + 1}/${clauses.length})...`,
+                });
+              }
             }
           } catch (clauseErr: any) {
             console.warn(`[KokoroService] Error generating unit "${clause.text.slice(0, 30)}...":`, clauseErr.message);

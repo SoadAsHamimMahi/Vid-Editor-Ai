@@ -766,12 +766,25 @@ def main():
                          "history" in voice_id.lower()) and not is_marcus
                     )
 
+                    def resolve_sample_path(filename):
+                        cands = [
+                            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "projects_data", "voices", "samples", filename)),
+                            os.path.abspath(os.path.join(os.getcwd(), "projects_data", "voices", "samples", filename)),
+                            os.path.abspath(os.path.join(os.getcwd(), "resources", "projects_data", "voices", "samples", filename)),
+                            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "projects_data", "voices", "samples", filename)),
+                            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "resources", "projects_data", "voices", "samples", filename)),
+                        ]
+                        for c in cands:
+                            if os.path.exists(c):
+                                return c
+                        return cands[0]
+
                     # Industry Documentary Reference Profiles for Dynamic Story Arc Switching
-                    curious_ref_audio = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "projects_data", "voices", "samples", "before_it_worked_intellectual_ref.wav"))
+                    curious_ref_audio = resolve_sample_path("before_it_worked_intellectual_ref.wav")
                     curious_ref_text = "That machine proved, in 1881, that manufactured cold was real — not a rumor, not a parlor trick, but something you could build, and run, and trust."
-                    grave_ref_audio = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "projects_data", "voices", "samples", "before_it_worked_ref.wav"))
+                    grave_ref_audio = resolve_sample_path("before_it_worked_ref.wav")
                     grave_ref_text = "When nothing else about the wound can be controlled at all, bring the temperature down, and buy the President time."
-                    marcus_default_ref_audio = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "projects_data", "voices", "samples", "marcus_elevenlabs_ref.wav"))
+                    marcus_default_ref_audio = resolve_sample_path("marcus_elevenlabs_ref.wav")
                     marcus_default_ref_text = "Wonderful to have you here. I want to tell you a story about a boy who could not stop crying."
 
                     def get_mood_profile(mood):

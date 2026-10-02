@@ -30,6 +30,7 @@ import {
   PromptAuditReport,
   AuditedSceneItem
 } from '../../utils/promptManifestManager';
+import { STANDARD_SAMPLE_IMAGE_PROMPTS, STANDARD_PROMPT_STRUCTURE_GUIDE } from '../../utils/samplePromptTemplates';
 import { PromptEntry } from '../../types';
 
 interface CustomPromptImportModalProps {
@@ -61,6 +62,32 @@ export const CustomPromptImportModal: React.FC<CustomPromptImportModalProps> = (
   const [autoUpdateTimeline, setAutoUpdateTimeline] = useState<boolean>(true);
   const [activeRightTab, setActiveRightTab] = useState<'manifest' | 'pre_placement_audit'>('pre_placement_audit');
   const [auditStrategy, setAuditStrategy] = useState<'timecodes' | 'sync_voiceover' | 'even_spread'>('timecodes');
+  const [copiedSampleType, setCopiedSampleType] = useState<'prompts' | 'guide' | null>(null);
+
+  const handleCopySamplePrompts = async () => {
+    try {
+      await navigator.clipboard.writeText(STANDARD_SAMPLE_IMAGE_PROMPTS);
+      setCopiedSampleType('prompts');
+      setTimeout(() => setCopiedSampleType(null), 2500);
+    } catch (err) {
+      console.error('Failed to copy sample prompts:', err);
+    }
+  };
+
+  const handleLoadSamplePrompts = () => {
+    setRawText(STANDARD_SAMPLE_IMAGE_PROMPTS);
+    setLastImportInfo(null);
+  };
+
+  const handleCopyPromptGuide = async () => {
+    try {
+      await navigator.clipboard.writeText(STANDARD_PROMPT_STRUCTURE_GUIDE);
+      setCopiedSampleType('guide');
+      setTimeout(() => setCopiedSampleType(null), 2500);
+    } catch (err) {
+      console.error('Failed to copy prompt guide:', err);
+    }
+  };
 
   const manifest = project.metadata.promptManifest;
   const status = useMemo(() => getImportStatus(manifest), [manifest]);
@@ -158,34 +185,104 @@ export const CustomPromptImportModal: React.FC<CustomPromptImportModalProps> = (
         <div className="flex-1 overflow-hidden flex flex-col md:flex-row p-6 gap-6">
           {/* Left Column: Paste Input Box & Importer */}
           <div className="w-full md:w-5/12 flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                <FileText className="w-4 h-4 text-purple-400" />
-                <span>Paste Prompt Batch from ChatGPT / Claude</span>
-              </label>
+            {/* Left Column Header: Label, Copy Sample & Load Sample Buttons */}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <label className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
+                  <FileText className="w-4 h-4 text-purple-400" />
+                  <span>Paste Prompt Batch from ChatGPT / Claude</span>
+                </label>
 
-              <div className="flex items-center gap-1.5 text-[10px] font-mono">
-                {(() => {
-                  const analysis = analyzePromptTextStructure(rawText);
-                  if (analysis.totalPrompts === 0) {
-                    return <span className="text-slate-400">Preserves #0-00 timecodes</span>;
-                  }
-                  return (
-                    <>
-                      <span className="px-2 py-0.5 rounded bg-purple-950/90 border border-purple-500/50 text-purple-300 font-bold shadow-xs">
-                        {analysis.totalPrompts} PROMPTS
-                      </span>
-                      {analysis.timecodedCount > 0 && (
-                        <span className="px-1.5 py-0.5 rounded bg-indigo-950/70 border border-indigo-500/40 text-indigo-300 font-medium">
-                          {analysis.uniqueTimecodesCount} Timestamps ({analysis.firstTimecode} → {analysis.lastTimecode})
-                        </span>
+                {/* Copy Sample Prompts & Load Sample Actions */}
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleCopySamplePrompts}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95 ${
+                      copiedSampleType === 'prompts'
+                        ? 'bg-emerald-950 border border-emerald-500/60 text-emerald-300 shadow-[0_0_10px_rgba(16,185,129,0.3)]'
+                        : 'bg-[#1e1e2d] hover:bg-[#28283c] border border-[#373750] text-purple-300 hover:text-white'
+                    }`}
+                    title="Copy standard image generation prompts with millisecond timestamps (#0-00.000) to clipboard"
+                  >
+                    {copiedSampleType === 'prompts' ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Copied Standard Prompts!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5 text-purple-400" />
+                        <span>Copy Sample Prompts</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleLoadSamplePrompts}
+                    className="px-2 py-1 rounded-lg text-[11px] font-medium bg-[#161622] hover:bg-[#222234] border border-[#2b2b40] text-slate-400 hover:text-slate-200 transition-all cursor-pointer active:scale-95"
+                    title="Load standard sample prompts directly into the text box to test pre-placement audit"
+                  >
+                    <span>Load Sample</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Status Bar: Timecode Millisecond Support Info OR Parsed Stats */}
+              <div className="flex items-center justify-between text-[10px] font-mono">
+                {rawText.trim() ? (
+                  (() => {
+                    const analysis = analyzePromptTextStructure(rawText);
+                    return (
+                      <div className="flex items-center justify-between w-full">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="px-2 py-0.5 rounded bg-purple-950/90 border border-purple-500/50 text-purple-300 font-bold shadow-xs">
+                            {analysis.totalPrompts} PROMPTS
+                          </span>
+                          {analysis.timecodedCount > 0 && (
+                            <span className="px-1.5 py-0.5 rounded bg-indigo-950/70 border border-indigo-500/40 text-indigo-300 font-medium">
+                              {analysis.uniqueTimecodesCount} Timestamps ({analysis.firstTimecode} → {analysis.lastTimecode})
+                            </span>
+                          )}
+                          <span className="text-slate-400 pl-0.5">
+                            {analysis.wordCount.toLocaleString()} WORDS
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRawText('');
+                            setLastImportInfo(null);
+                          }}
+                          className="text-slate-500 hover:text-rose-400 transition-colors cursor-pointer"
+                          title="Clear input text"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <div className="flex items-center justify-between w-full text-slate-400">
+                    <span className="flex items-center gap-1 text-[11px] text-cyan-300/80">
+                      <Clock className="w-3 h-3 text-cyan-400" />
+                      <span>Supports millisecond times (<code className="text-cyan-300 font-bold">#0-00.000</code>, <code className="text-cyan-300 font-bold">#0-04.250</code>)</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleCopyPromptGuide}
+                      className="text-[10px] text-purple-400 hover:text-purple-300 flex items-center gap-1 cursor-pointer transition-colors"
+                      title="Copy standard prompt generation instructions for ChatGPT / Claude"
+                    >
+                      {copiedSampleType === 'guide' ? (
+                        <span className="text-emerald-400 font-bold">✓ Copied AI Guide!</span>
+                      ) : (
+                        <span>Copy ChatGPT/Claude Guide</span>
                       )}
-                      <span className="text-slate-400 pl-0.5">
-                        {analysis.wordCount.toLocaleString()} WORDS
-                      </span>
-                    </>
-                  );
-                })()}
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -195,7 +292,7 @@ export const CustomPromptImportModal: React.FC<CustomPromptImportModalProps> = (
                 setRawText(e.target.value);
                 setLastImportInfo(null);
               }}
-              placeholder={`Paste any 20-30 batch from ChatGPT / Claude here, for example:\n\n#0-00 SCENE: Elisha Otis on platform forty feet in the air\nCHARACTER: Elisha Otis (42, charcoal vest)\nENVIRONMENT: 1854 Crystal Palace\nLIGHTING: Soft daylight\n\n#0-04 SCENE: Assistant holding axe looking at suspension cable\nCHARACTER: Assistant in linen shirt\nENVIRONMENT: Crystal Palace demonstration structure\n\n#0-08 SCENE: Rope cut with axe, spring snapping into guide rails...`}
+              placeholder={`Paste any standard batch from ChatGPT / Claude here, for example:\n\n#0-00.000 SCENE: Elisha Otis on platform forty feet in the air\nCHARACTER: Elisha Otis (42, charcoal vest)\nENVIRONMENT: 1854 Crystal Palace\nLIGHTING: Soft daylight\nCAMERA: Low-angle wide shot\n\n#0-04.250 SCENE: Assistant holding axe looking at suspension cable\nCHARACTER: Assistant in linen shirt\nENVIRONMENT: Crystal Palace demonstration structure\n\n#0-08.500 SCENE: Rope cut with axe, spring snapping into guide rails...`}
               className="flex-1 min-h-[260px] p-3.5 bg-[#0e0e14] border border-[#252536] rounded-xl text-slate-200 placeholder-slate-600 font-mono text-xs leading-relaxed resize-none focus:outline-none focus:border-purple-500 transition-colors shadow-inner"
             />
 
@@ -262,10 +359,22 @@ export const CustomPromptImportModal: React.FC<CustomPromptImportModalProps> = (
 
             {/* Quick Tips */}
             <div className="p-3 rounded-xl bg-[#161622]/60 border border-[#242436] text-[11px] text-slate-400 space-y-1">
-              <span className="font-bold text-slate-300 block">💡 Paste Workflow Rules:</span>
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-slate-300">💡 Paste Workflow Rules:</span>
+                <button
+                  type="button"
+                  onClick={handleCopySamplePrompts}
+                  className="text-[10px] text-purple-400 hover:text-purple-300 flex items-center gap-1 cursor-pointer"
+                  title="Copy standard image generation prompts to clipboard"
+                >
+                  <Copy className="w-2.5 h-2.5" />
+                  <span>Copy Standard Prompts</span>
+                </button>
+              </div>
               <p>• Click <b>"Replace & Update Prompts"</b> to overwrite current scene prompts with updated versions.</p>
               <p>• Click <b>"+ Add New Only"</b> if you only want to insert missing scenes without changing existing ones.</p>
-              <p>• <b>Keep #M-SS timecodes</b> in each prompt block for automatic placement.</p>
+              <p>• <b>Keep #M-SS or #M-SS.mmm timecodes</b> (e.g. <code className="text-purple-300">#0-00.000</code>) in each prompt block for automatic placement.</p>
+              <p>• Supported fields: <code className="text-slate-300">SCENE:</code>, <code className="text-slate-300">CHARACTER:</code>, <code className="text-slate-300">ENVIRONMENT:</code>, <code className="text-slate-300">LIGHTING:</code>, <code className="text-slate-300">CAMERA:</code>, <code className="text-slate-300">MOOD:</code>.</p>
             </div>
           </div>
 

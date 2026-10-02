@@ -1,0 +1,300 @@
+// ──────────────────────────────────────────────────────────────
+// CineFlow Studio — Prisma Database Schema
+// Full production schema covering users, subscriptions, credits,
+// licensing, sessions, invoices, and audit logging.
+// ──────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ───────────────────────────────────────────────────
+
+enum UserRole {
+  SUPER_ADMIN
+  ADMIN
+  USER
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+enum SubscriptionPlan {
+  FREE
+  CREATOR
+  CREATOR_PRO
+  STUDIO
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  EXPIRED
+}
+
+enum CreditTransactionType {
+  SUBSCRIPTION     // Monthly credit grant from plan
+  PURCHASE         // One-time credit pack purchase
+  DEDUCTION        // Credit consumed by an operation
+  REFUND           // Credits returned for failed operation
+  ADMIN_GRANT      // Custom credits given by admin
+  ADMIN_REVOKE     // Credits removed by admin
+  ROLLOVER_EXPIRE  // Excess credits expired at month boundary
+  PROMO            // Promotional credits (sign-up bonus, referral)
+  CHARGEBACK       // Credits removed due to payment dispute
+}
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  RELEASED
+  EXPIRED
+}
+
+enum LicenseKeyStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+enum InvoiceStatus {
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum ReleaseChannel {
+  CANARY
+  BETA
+  STABLE
+}
+
+// ─── Models ──────────────────────────────────────────────────
+
+model User {
+  id               String     @id @default(uuid()) @db.Uuid
+  email            String     @unique @db.VarChar(255)
+  passwordHash     String     @map("password_hash") @db.VarChar(255)
+  name             String     @db.VarChar(255)
+  role             UserRole   @default(USER)
+  status           UserStatus @default(ACTIVE)
+  creditBalance    Int        @default(0) @map("credit_balance")
+  stripeCustomerId String?    @unique @map("stripe_customer_id") @db.VarChar(255)
+  avatarUrl        String?    @map("avatar_url") @db.VarChar(512)
+  emailVerified    Boolean    @default(false) @map("email_verified")
+  lastLoginAt      DateTime?  @map("last_login_at")
+  createdAt        DateTime   @default(now()) @map("created_at")
+  updatedAt        DateTime   @updatedAt @map("updated_at")
+
+  // Relations
+  subscriptions       Subscription[]
+  creditTransactions   CreditTransaction[]
+  creditReservations   CreditReservation[]
+  licenseKeys         LicenseKey[]
+  sessions            Session[]
+  invoices            Invoice[]
+  auditLogsAsActor    AuditLog[]    @relation("AuditActor")
+  auditLogsAsTarget   AuditLog[]    @relation("AuditTarget")
+  publishedReleases   AppRelease[]
+
+  @@index([email])
+  @@index([stripeCustomerId])
+  @@index([role, status])
+  @@map("users")
+}
+
+model Subscription {
+  id                   String             @id @default(uuid()) @db.Uuid
+  userId               String             @map("user_id") @db.Uuid
+  stripeSubscriptionId String?            @unique @map("stripe_subscription_id") @db.VarChar(255)
+  plan                 SubscriptionPlan   @default(FREE)
+  status               SubscriptionStatus @default(ACTIVE)
+  monthlyCredits       Int                @map("monthly_credits")
+  rolloverLimit        Int                @default(0) @map("rollover_limit")
+  maxDevices           Int                @default(1) @map("max_devices")
+  currentPeriodStart   DateTime           @map("current_period_start")
+  currentPeriodEnd     DateTime           @map("current_period_end")
+  canceledAt           DateTime?          @map("canceled_at")
+  createdAt            DateTime           @default(now()) @map("created_at")
+  updatedAt            DateTime           @updatedAt @map("updated_at")
+
+  // Relations
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
+
+  @@index([userId])
+  @@index([stripeSubscriptionId])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+model CreditTransaction {
+  id            String                @id @default(uuid()) @db.Uuid
+  userId        String                @map("user_id") @db.Uuid
+  reservationId String?               @map("reservation_id") @db.Uuid
+  type          CreditTransactionType
+  amount        Int                   // positive = credit, negative = debit
+  balanceAfter  Int                   @map("balance_after")
+  operation     String?               @db.VarChar(100) // e.g. IMAGE_GEN, TTS_ELEVENLABS
+  description   String                @db.VarChar(500)
+  metadata      Json?                 @db.JsonB       // operation details, admin notes
+  performedBy   String?               @map("performed_by") @db.Uuid // admin who granted
+  createdAt     DateTime              @default(now()) @map("created_at")
+
+  // Relations
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reservation CreditReservation? @relation(fields: [reservationId], references: [id])
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([type])
+  @@index([reservationId])
+  @@map("credit_transactions")
+}
+
+model CreditReservation {
+  id         String            @id @default(uuid()) @db.Uuid
+  userId     String            @map("user_id") @db.Uuid
+  amount     Int
+  operation  String            @db.VarChar(100)
+  status     ReservationStatus @default(PENDING)
+  expiresAt  DateTime          @map("expires_at")
+  createdAt  DateTime          @default(now()) @map("created_at")
+  resolvedAt DateTime?         @map("resolved_at")
+
+  // Relations
+  user         User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions CreditTransaction[]
+
+  @@index([userId, status])
+  @@index([status, expiresAt])
+  @@map("credit_reservations")
+}
+
+model LicenseKey {
+  id         String           @id @default(uuid()) @db.Uuid
+  userId     String           @map("user_id") @db.Uuid
+  key        String           @unique @db.VarChar(25) // CF-XXXX-XXXX-XXXX-XXXX
+  status     LicenseKeyStatus @default(ACTIVE)
+  maxDevices Int              @default(1) @map("max_devices")
+  createdAt  DateTime         @default(now()) @map("created_at")
+  revokedAt  DateTime?        @map("revoked_at")
+
+  // Relations
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activations LicenseActivation[]
+
+  @@index([key])
+  @@index([userId])
+  @@map("license_keys")
+}
+
+model LicenseActivation {
+  id            String    @id @default(uuid()) @db.Uuid
+  licenseKeyId  String    @map("license_key_id") @db.Uuid
+  hwid          String    @db.VarChar(64) // SHA-256 hardware fingerprint
+  deviceName    String    @map("device_name") @db.VarChar(100)
+  osInfo        String    @map("os_info") @db.VarChar(100)
+  appVersion    String    @map("app_version") @db.VarChar(20)
+  activatedAt   DateTime  @default(now()) @map("activated_at")
+  lastSeenAt    DateTime  @default(now()) @map("last_seen_at")
+  deactivatedAt DateTime? @map("deactivated_at")
+
+  // Relations
+  licenseKey LicenseKey @relation(fields: [licenseKeyId], references: [id], onDelete: Cascade)
+
+  @@unique([licenseKeyId, hwid])
+  @@index([hwid])
+  @@index([licenseKeyId])
+  @@map("license_activations")
+}
+
+model Session {
+  id               String   @id @default(uuid()) @db.Uuid
+  userId           String   @map("user_id") @db.Uuid
+  refreshTokenHash String   @map("refresh_token_hash") @db.VarChar(64)
+  familyId         String   @map("family_id") @db.VarChar(36) // for rotation detection
+  ipAddress        String?  @map("ip_address") @db.VarChar(45)
+  userAgent        String?  @map("user_agent") @db.VarChar(500)
+  expiresAt        DateTime @map("expires_at")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([refreshTokenHash])
+  @@index([userId])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model Invoice {
+  id              String        @id @default(uuid()) @db.Uuid
+  userId          String        @map("user_id") @db.Uuid
+  subscriptionId  String?       @map("subscription_id") @db.Uuid
+  stripeInvoiceId String?       @unique @map("stripe_invoice_id") @db.VarChar(255)
+  amountCents     Int           @map("amount_cents")
+  currency        String        @default("usd") @db.VarChar(3)
+  status          InvoiceStatus @default(PAID)
+  description     String?       @db.VarChar(500)
+  createdAt       DateTime      @default(now()) @map("created_at")
+
+  // Relations
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id])
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([stripeInvoiceId])
+  @@map("invoices")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  actorId   String   @map("actor_id") @db.Uuid
+  targetId  String?  @map("target_id") @db.Uuid
+  action    String   @db.VarChar(100) // e.g. CREDIT_GRANT, USER_BAN, ROLE_CHANGE
+  details   Json?    @db.JsonB        // full context
+  ipAddress String?  @map("ip_address") @db.VarChar(45)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  actor  User  @relation("AuditActor", fields: [actorId], references: [id], onDelete: Cascade)
+  target User? @relation("AuditTarget", fields: [targetId], references: [id], onDelete: SetNull)
+
+  @@index([actorId, createdAt(sort: Desc)])
+  @@index([targetId, createdAt(sort: Desc)])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+model AppRelease {
+  id                String         @id @default(uuid()) @db.Uuid
+  version           String         @db.VarChar(20) // semver e.g. 1.2.0
+  platform          String         @db.VarChar(10) // win32 | darwin | linux
+  arch              String         @default("x64") @db.VarChar(10) // x64 | arm64
+  channel           ReleaseChannel @default(STABLE)
+  downloadUrl       String         @map("download_url") @db.VarChar(512)
+  fileSize          BigInt?        @map("file_size")
+  checksum          String?        @db.VarChar(64) // SHA-256
+  releaseNotes      String?        @map("release_notes") @db.Text
+  isMandatory       Boolean        @default(false) @map("is_mandatory")
+  rolloutPercentage Int            @default(100) @map("rollout_percentage") // 0-100
+  publishedBy       String         @map("published_by") @db.Uuid
+  publishedAt       DateTime       @default(now()) @map("published_at")
+
+  // Relations
+  publisher User @relation(fields: [publishedBy], references: [id])
+
+  @@unique([version, platform, arch, channel])
+  @@index([platform, channel])
+  @@map("app_releases")
+}

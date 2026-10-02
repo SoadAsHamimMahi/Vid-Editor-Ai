@@ -12,6 +12,8 @@ import { TTSService } from './services/ttsService';
 import { ColabVideoService, ColabVideoJobRequest } from './services/colabVideoService';
 import { VideoEditorMcpServer } from './services/mcpServer';
 import { GeminiAgenticStudioService } from './services/geminiAgenticStudioService';
+import { licenseClient } from './services/licenseClient';
+import { updateService } from './services/updateService';
 import { Project, ExportSettings } from '../src/types';
 
 const currentFile = fileURLToPath(import.meta.url);
@@ -193,6 +195,17 @@ function createWindow() {
 
   mainWindow.webContents.on('did-finish-load', () => {
     console.log('[Renderer] ✓ did-finish-load successfully loaded dist/index.html');
+    setTimeout(async () => {
+      try {
+        const check = await updateService.checkForUpdates();
+        if (check.updateAvailable && mainWindow && !mainWindow.isDestroyed()) {
+          console.log(`[Main] ⚡ Broadcasting available update v${check.latestVersion} to renderer`);
+          mainWindow.webContents.send('updater:available', check);
+        }
+      } catch (err: any) {
+        console.log('[Main] Auto-update check notice:', err.message);
+      }
+    }, 4000);
   });
 
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
@@ -1057,11 +1070,23 @@ ipcMain.handle('project:load', async () => {
 
 // AI Voice Studio & Text-to-Speech (IndicF5, Chatterbox, Voice Cloning, Neural)
 ipcMain.handle('tts:generate', async (event, req: any) => {
-  return await ttsService.generateSpeech(req, (progress) => {
-    try {
-      event.sender.send('tts:progress', progress);
-    } catch {}
-  });
+  return await ttsService.generateSpeech(
+    req,
+    (progress) => {
+      try {
+        event.sender.send('tts:progress', progress);
+      } catch {}
+    },
+    (chunk) => {
+      try {
+        event.sender.send('tts:audio-chunk', chunk);
+      } catch {}
+    }
+  );
+});
+
+ipcMain.handle('tts:cancel-stream', async (_event, sessionId: string) => {
+  return ttsService.cancelStream(sessionId);
 });
 
 ipcMain.handle('tts:generate-multi-speaker', async (_event, req: any) => {
@@ -1416,5 +1441,65 @@ ipcMain.handle('agentic-studio:save-key-pool', async (_event, keys: string[]) =>
   geminiAgenticStudioService.setKeyPool(keys);
   return { success: true };
 });
+
+// ==========================================
+// CINEFLOW PRODUCTION AUTH, LICENSING & CREDITS
+// ==========================================
+ipcMain.handle('auth:login', async (_event, credentials: { email: string; password: string }) => {
+  return await licenseClient.login(credentials.email, credentials.password);
+});
+
+ipcMain.handle('auth:logout', async () => {
+  return await licenseClient.logout();
+});
+
+ipcMain.handle('auth:get-user', async () => {
+  return await licenseClient.getUser();
+});
+
+ipcMain.handle('license:activate', async (_event, key: string) => {
+  return await licenseClient.activateLicense(key);
+});
+
+ipcMain.handle('credits:get-balance', async () => {
+  return await licenseClient.getBalance();
+});
+
+ipcMain.handle('credits:reserve', async (_event, operation: string, amount?: number) => {
+  return await licenseClient.reserveCredits(operation, amount);
+});
+
+ipcMain.handle('credits:deduct', async (_event, reservationId: string, actualCost?: number) => {
+  return await licenseClient.deductCredits(reservationId, actualCost);
+});
+
+ipcMain.handle('credits:release', async (_event, reservationId: string, reason?: string) => {
+  return await licenseClient.releaseCredits(reservationId, reason);
+});
+
+ipcMain.handle('admin:grant-credits', async (_event, userId: string, amount: number, reason: string) => {
+  return await licenseClient.adminGrantCredits(userId, amount, reason);
+});
+
+// ==========================================
+// CINEFLOW IN-APP AUTO-UPDATER
+// ==========================================
+ipcMain.handle('updater:check', async () => {
+  return await updateService.checkForUpdates();
+});
+
+ipcMain.handle('updater:download', async () => {
+  return await updateService.downloadUpdate((progress) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('updater:progress', progress);
+    }
+  });
+});
+
+ipcMain.handle('updater:install', async (_event, silent?: boolean) => {
+  return await updateService.installUpdate(silent ?? false);
+});
+
+
 
 

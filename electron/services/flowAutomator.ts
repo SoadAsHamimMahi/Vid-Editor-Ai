@@ -168,6 +168,7 @@ export class FlowAutomatorPool {
   private rateLimitedPorts: Map<number, number> = new Map(); // port -> cooldown expiration timestamp
   private consumedUrls: Set<string> = new Set(); // Global set of harvested image/video URLs to prevent duplicate pulls
   private consumedFailedTiles: Set<string> = new Set(); // Track failed policy violation tiles to avoid duplicate alerts
+  private harvestedContentHashes: Set<string> = new Set(); // Global SHA-256 content hashes to prevent duplicate image saves
   private maxConcurrentPerBrowser: number = 3; // Default to 3x Studio parallel mode
   private lastAppliedSettingsMap: Map<string, string> = new Map(); // canvas URL -> serialized settings key
   private onJobProgress?: (
@@ -282,7 +283,8 @@ export class FlowAutomatorPool {
       const count = this.consumedUrls.size;
       this.consumedUrls.clear();
       this.consumedFailedTiles.clear();
-      console.log(`[FlowAutomator] Reset all ${count} consumed URLs and failed tile trackers.`);
+      this.harvestedContentHashes.clear();
+      console.log(`[FlowAutomator] Reset all ${count} consumed URLs, failed tile trackers, and content hashes.`);
     }
   }
 
@@ -1431,6 +1433,16 @@ export class FlowAutomatorPool {
           el = (el as HTMLElement).offsetParent as HTMLElement | null;
         }
 
+        // Fallback to in-memory ledger if React virtualization stripped DOM attributes
+        const win = window as any;
+        if ((!boundSceneId || !boundSceneTag) && win.__CINEFLOW_LEDGER__) {
+          if (tileId && win.__CINEFLOW_LEDGER__.has(tileId)) {
+            const entry = win.__CINEFLOW_LEDGER__.get(tileId);
+            if (!boundSceneId) boundSceneId = entry.sceneId;
+            if (!boundSceneTag) boundSceneTag = entry.sceneTag;
+          }
+        }
+
         return {
           tileId,
           boundSceneId,
@@ -1446,6 +1458,41 @@ export class FlowAutomatorPool {
         };
       });
     }).catch(() => []);
+  }
+
+  /**
+   * Records a cryptographic audit entry in projects_data/projects/<id>/harvest_ledger.json.
+   * Provides full provenance and proof of assignment for every harvested media card.
+   */
+  public async recordHarvestAudit(entry: {
+    projectId?: string;
+    sceneId: string;
+    sceneTag: string;
+    tileId?: string;
+    sha256?: string;
+    matchTier: string;
+    matchScore: number;
+    diskPath: string;
+    mediaType: 'image' | 'video';
+  }): Promise<void> {
+    try {
+      const pId = entry.projectId || 'default_project';
+      const projectDir = projectStorage.getProjectDir(pId);
+      await fs.ensureDir(projectDir);
+      const ledgerFile = path.join(projectDir, 'harvest_ledger.json');
+      let ledger: any[] = [];
+      if (await fs.pathExists(ledgerFile)) {
+        ledger = await fs.readJson(ledgerFile).catch(() => []);
+      }
+      ledger.push({
+        ...entry,
+        timestamp: new Date().toISOString(),
+      });
+      if (ledger.length > 500) ledger = ledger.slice(-500);
+      await fs.writeJson(ledgerFile, ledger, { spaces: 2 });
+    } catch (err: any) {
+      console.warn('[FlowAutomator] Failed to record harvest audit:', err.message);
+    }
   }
 
   /**
@@ -1478,8 +1525,20 @@ export class FlowAutomatorPool {
       }, src);
 
       if (harvestResult?.status === 'ready' && harvestResult.base64) {
+        const buf = Buffer.from(harvestResult.base64, 'base64');
+        if (buf.length < 500) {
+          console.warn(`[FlowAutomator] saveCandidateToDisk rejected: payload too small (${buf.length} bytes).`);
+          return false;
+        }
+        const contentHash = crypto.createHash('sha256').update(buf).digest('hex');
+        if (this.harvestedContentHashes.has(contentHash)) {
+          console.warn(`[FlowAutomator] Duplicate image content detected (SHA-256: ${contentHash.slice(0, 10)}...). Refusing duplicate.`);
+          return false;
+        }
+        this.harvestedContentHashes.add(contentHash);
+
         await fs.ensureDir(path.dirname(outputPath));
-        await fs.writeFile(outputPath, Buffer.from(harvestResult.base64, 'base64'));
+        await fs.writeFile(outputPath, buf);
         return true;
       } else if (harvestResult?.status === 'needs_canvas_shot' && harvestResult.src) {
         const imgHandle = await page.evaluateHandle((srcToMatch: string) => {
@@ -1491,6 +1550,21 @@ export class FlowAutomatorPool {
         if (el) {
           await fs.ensureDir(path.dirname(outputPath));
           await el.screenshot({ path: outputPath, type: 'png' });
+          const stat = await fs.stat(outputPath).catch(() => null);
+          if (!stat || stat.size < 500) {
+            await fs.remove(outputPath).catch(() => {});
+            return false;
+          }
+          const shotBuf = await fs.readFile(outputPath).catch(() => null);
+          if (shotBuf) {
+            const shotHash = crypto.createHash('sha256').update(shotBuf).digest('hex');
+            if (this.harvestedContentHashes.has(shotHash)) {
+              console.warn(`[FlowAutomator] Duplicate screenshot image detected (SHA-256: ${shotHash.slice(0, 10)}...).`);
+              await fs.remove(outputPath).catch(() => {});
+              return false;
+            }
+            this.harvestedContentHashes.add(shotHash);
+          }
           return true;
         }
       }
@@ -1622,6 +1696,17 @@ export class FlowAutomatorPool {
 
         const rect = v.getBoundingClientRect();
         const effectiveSrc = v.src || v.currentSrc || (v.querySelector('source')?.src) || v.getAttribute('data-src') || '';
+
+        // Fallback to in-memory ledger if React virtualization stripped DOM attributes
+        const win = window as any;
+        if ((!boundSceneId || !boundSceneTag) && win.__CINEFLOW_LEDGER__) {
+          if (tileId && win.__CINEFLOW_LEDGER__.has(tileId)) {
+            const entry = win.__CINEFLOW_LEDGER__.get(tileId);
+            if (!boundSceneId) boundSceneId = entry.sceneId;
+            if (!boundSceneTag) boundSceneTag = entry.sceneTag;
+          }
+        }
+
         return {
           tileId,
           boundSceneId,
@@ -2642,14 +2727,39 @@ export class FlowAutomatorPool {
           // Detect and stamp newly spawned tile container on canvas
           let tileId: string | undefined = undefined;
           try {
-            const stampResult = await page.evaluate(async (info: { sceneId: string; sceneTag: string }) => {
+            const stampResult = await page.evaluate(async (info: { sceneId: string; sceneTag: string; prompt: string }) => {
+              // Ensure in-browser persistent ledger exists
+              const win = window as any;
+              if (!win.__CINEFLOW_LEDGER__) {
+                win.__CINEFLOW_LEDGER__ = new Map();
+              }
+
               const findNewTile = () => {
                 const tiles = Array.from(document.querySelectorAll('flow-grid-tile-container, flow-tile-container, [class*="tile-container"]'));
                 const unk = tiles.filter((t) => !t.hasAttribute('data-vg-known'));
-                if (unk.length > 0) {
-                  return unk[unk.length - 1];
+                if (unk.length === 0) return null;
+
+                // Priority 1: Check if any unk tile contains the sceneTag in its text, aria-label, title, or dataset
+                const tagLower = info.sceneTag.toLowerCase();
+                const tagMatch = unk.find((t) => {
+                  const text = ((t as HTMLElement).innerText || '') + ' ' + (t.getAttribute('aria-label') || '') + ' ' + (t.getAttribute('title') || '');
+                  return text.toLowerCase().includes(tagLower);
+                });
+                if (tagMatch) return tagMatch;
+
+                // Priority 2: Check for prompt keyword overlap
+                const promptWords = info.prompt.toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter((w) => w.length > 4);
+                if (promptWords.length >= 2) {
+                  const bestWordMatch = unk.find((t) => {
+                    const text = ((t as HTMLElement).innerText || '').toLowerCase();
+                    const matches = promptWords.filter((pw) => text.includes(pw)).length;
+                    return matches >= 2;
+                  });
+                  if (bestWordMatch) return bestWordMatch;
                 }
-                return null;
+
+                // Priority 3: Fall back to most recently mounted tile
+                return unk[unk.length - 1];
               };
 
               let targetTile = findNewTile();
@@ -2669,8 +2779,33 @@ export class FlowAutomatorPool {
                 targetTile.setAttribute('data-vg-scene-tag', info.sceneTag);
                 targetTile.setAttribute('data-tile-id', generatedTileId);
 
+                // Register in persistent in-browser memory ledger
+                win.__CINEFLOW_LEDGER__.set(generatedTileId, {
+                  sceneId: info.sceneId,
+                  sceneTag: info.sceneTag,
+                  prompt: info.prompt,
+                  timestamp: Date.now(),
+                });
+
+                const internalId = targetTile.getAttribute('id') || targetTile.getAttribute('data-node-id');
+                if (internalId) {
+                  win.__CINEFLOW_LEDGER__.set(internalId, {
+                    sceneId: info.sceneId,
+                    sceneTag: info.sceneTag,
+                    prompt: info.prompt,
+                    timestamp: Date.now(),
+                  });
+                }
+
+                if (targetTile.parentElement) {
+                  targetTile.parentElement.setAttribute('data-vg-scene-id', info.sceneId);
+                  targetTile.parentElement.setAttribute('data-vg-scene-tag', info.sceneTag);
+                  targetTile.parentElement.setAttribute('data-vg-tile-id', generatedTileId);
+                  targetTile.parentElement.setAttribute('data-tile-id', generatedTileId);
+                }
+
                 const inners = Array.from(targetTile.querySelectorAll('flow-tile-container, flow-image-tile, flow-video-tile, [class*="tile"], div'));
-                for (const inner of inners.slice(0, 6)) {
+                for (const inner of inners.slice(0, 10)) {
                   inner.setAttribute('data-vg-scene-id', info.sceneId);
                   inner.setAttribute('data-vg-scene-tag', info.sceneTag);
                   inner.setAttribute('data-vg-tile-id', generatedTileId);
@@ -2681,7 +2816,7 @@ export class FlowAutomatorPool {
               }
 
               return { tileId: undefined, found: false };
-            }, { sceneId: job.sceneId, sceneTag });
+            }, { sceneId: job.sceneId, sceneTag, prompt: job.prompt });
 
             if (stampResult && stampResult.tileId) {
               tileId = stampResult.tileId;
@@ -2876,14 +3011,19 @@ export class FlowAutomatorPool {
           text.includes('prohibited content') ||
           text.includes("can't generate image") ||
           text.includes('cannot generate image');
+        const hasFailedPhrase =
+          text.includes('image failed to generate') ||
+          text.includes('failed to generate') ||
+          text.includes('sorry, this image failed') ||
+          text.includes('video failed to generate') ||
+          text.includes('sorry, this video failed') ||
+          (text.includes('failed') && (text.includes('charged') || text.includes('try a different prompt') || text.includes('different prompt')));
         const hasUsageLimitPhrase =
           text.includes('usage limit') ||
           text.includes('rate limit') ||
           text.includes('unusual activity') ||
-          // NOTE: 'you have not been charged' is intentionally excluded — it appears in
-          // the software's own error messages and can cause false positives
           (text.includes('try again later') && text.includes('reached'));
-        return (hasPolicyPhrase || hasUsageLimitPhrase) && el.childElementCount < 25;
+        return (hasPolicyPhrase || hasFailedPhrase || hasUsageLimitPhrase) && el.childElementCount < 25;
       });
 
       for (const el of errorElements) {
@@ -2910,22 +3050,27 @@ export class FlowAutomatorPool {
         const textLower = (el.innerText || '').toLowerCase() + ' ' + cardText.toLowerCase();
         const isUnusualActivity = textLower.includes('unusual activity');
         const isUsageLimit = isUnusualActivity || textLower.includes('usage limit') || textLower.includes('rate limit') || (textLower.includes('try again later') && textLower.includes('reached'));
+        const isPolicy = textLower.includes('violate') || textLower.includes('safety') || textLower.includes('prohibited');
 
         const rect = el.getBoundingClientRect();
         const coordKey = `tile_fail_${Math.round(rect.x / 20)}_${Math.round(rect.y / 20)}`;
         if (tileId && consumedSet.has(tileId)) continue;
         if (!tileId && consumedSet.has(coordKey)) continue;
 
+        const resolvedReason = isUnusualActivity
+          ? 'Google Flow cooldown: "We noticed some unusual activity". Google requires a brief verification or cooldown period on this account. Please check the browser window or wait a few minutes.'
+          : isUsageLimit
+          ? 'Google Flow usage limit reached: You have reached your generation limit on this Google account. Please wait before trying again.'
+          : isPolicy
+          ? 'Google Flow content policy violation: This prompt was flagged by Google Flow safety filters ("This generation might violate our policies").'
+          : 'Google Flow generation failed: "Sorry, this image failed to generate. You have not been charged for this generation." (Flow backend overload or failure).';
+
         results.push({
           tileId: tileId || coordKey,
           boundSceneId,
           boundSceneTag,
           cardText: cardText.toLowerCase(),
-          reason: isUnusualActivity
-            ? 'Google Flow cooldown: "We noticed some unusual activity". Google requires a brief verification or cooldown period on this account. Please check the browser window or wait a few minutes.'
-            : isUsageLimit
-            ? 'Google Flow usage limit reached: You have reached your generation limit on this Google account. Please wait before trying again.'
-            : 'Google Flow content policy violation: This prompt was flagged by Google Flow safety filters.',
+          reason: resolvedReason,
           isUsageLimit,
           coordX: rect.x,
           coordY: rect.y,
@@ -3006,26 +3151,57 @@ export class FlowAutomatorPool {
               if (f.tileId && card.tileId && f.tileId === card.tileId) return true;
               if (f.boundSceneId && f.boundSceneId !== card.job.sceneId) return false;
 
-              // For text-based matches, require VERY high confidence:
-              // - The failed card text must contain the scene tag (not just generic prompt words)
-              // - Score threshold raised to 600 (requires at least timecode or scene tag hit)
+              // Text-based score match
               const score = scoreCandidateCard(f.cardText, card.sceneTag, card.job.prompt, sceneTc);
-              if (score >= 600 && f.tileId) return true; // only trust high-score hits with a real tileId
+              if (score >= 80) return true;
+
+              // If only 1 card is in-flight on this browser, any newly detected failed card belongs to it!
+              if (inFlightCards.length === 1) return true;
+
               return false;
             });
 
             if (matchedFailed) {
-              console.warn(`[FlowAutomator] ❌ STRICT MATCH: Detected Google Flow Policy Violation for scene ${card.job.sceneId} [${card.sceneTag}]. Marking failed & ejecting from in-flight queue.`);
+              const failReason = matchedFailed.reason || 'Google Flow rejected this generation / failed to generate.';
+              console.warn(`[FlowAutomator] ❌ MATCH: Detected Google Flow Failure for scene ${card.job.sceneId} [${card.sceneTag}]: ${failReason}. Marking failed & ejecting from in-flight queue.`);
               this.onJobProgress?.(
                 card.job.sceneId,
                 'error',
                 undefined,
-                'Policy Violation: Google Flow rejected this prompt (violates safety policies).',
+                failReason,
                 card.job.mediaType === 'video' ? 'video' : 'image',
                 card.job.projectId
               );
               if (matchedFailed.tileId) this.consumedFailedTiles.add(matchedFailed.tileId);
               harvestedSceneIds.push(card.job.sceneId);
+            }
+          }
+
+          // Step 0B: Unassigned Failed Tile Correlator (Parallel Mode First-Run Failure Resolver)
+          // If unconsumed failed cards exist on canvas that couldn't be matched by text/ID (due to React re-mount):
+          const unconsumedFailed = failedCards.filter((f) => f.tileId && !this.consumedFailedTiles.has(f.tileId));
+          if (unconsumedFailed.length > 0) {
+            for (const card of inFlightCards) {
+              if (harvestedSceneIds.includes(card.job.sceneId)) continue;
+              if (unconsumedFailed.length === 0) break;
+
+              const elapsed = Date.now() - card.submittedAt;
+              // If card has been in-flight for >= 3.5s (Google Flow has displayed the failure card)
+              if (elapsed >= 3500) {
+                const targetFailed = unconsumedFailed.shift()!;
+                const failReason = targetFailed.reason || 'Google Flow rejected this generation / failed to generate.';
+                console.warn(`[FlowAutomator] ❌ FIRST-RUN DETECT: Unassigned failure card on canvas matched to scene ${card.job.sceneId} [${card.sceneTag}]: ${failReason}. Ejecting immediately.`);
+                this.onJobProgress?.(
+                  card.job.sceneId,
+                  'error',
+                  undefined,
+                  failReason,
+                  card.job.mediaType === 'video' ? 'video' : 'image',
+                  card.job.projectId
+                );
+                if (targetFailed.tileId) this.consumedFailedTiles.add(targetFailed.tileId);
+                harvestedSceneIds.push(card.job.sceneId);
+              }
             }
           }
         }
@@ -3067,144 +3243,111 @@ export class FlowAutomatorPool {
 
     if (!unconsumed || unconsumed.length === 0) return [];
 
-    const availablePool = [...unconsumed];
+    interface VideoCandidatePair {
+      card: InFlightCard;
+      cand: any;
+      score: number;
+      tier: 'DOM_STAMP' | 'TILE_ID' | 'TAG_EXACT' | 'TIMECODE' | 'SEMANTIC' | 'FALLBACK';
+    }
+
+    const candidatePairs: VideoCandidatePair[] = [];
 
     for (const card of inFlightCards) {
-      if (availablePool.length === 0) break;
-
-      // CRITICAL: A newly submitted job MUST NEVER match media that already existed before submission!
       const initialSet = new Set(card.initialUrls || []);
-      let newPool = availablePool.filter((cand) => cand.src && cand.src.length > 5 && !initialSet.has(cand.src));
-
-      // Hard exclusion: Never allow matching candidates stamped for a DIFFERENT scene
-      newPool = newPool.filter((cand) => {
-        if (cand.boundSceneId && cand.boundSceneId !== card.job.sceneId) return false;
-        if (cand.boundSceneTag && card.sceneTag && cand.boundSceneTag !== card.sceneTag) return false;
-        if (cand.tileId && card.tileId && cand.tileId !== card.tileId) return false;
-        return true;
-      });
-
-      // If no new candidates are found outside initialUrls, allow high-confidence exact matches
-      // (exact boundSceneId or exact tileId) to match even if captured in initialUrls snapshot
-      if (newPool.length === 0) {
-        const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
-        const confidentMatch = availablePool.find((cand) => {
-          if (cand.boundSceneId && cand.boundSceneId === card.job.sceneId) return true;
-          if (card.tileId && cand.tileId === card.tileId) return true;
-          const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
-          return score >= 180;
-        });
-        if (confidentMatch && (!confidentMatch.boundSceneId || confidentMatch.boundSceneId === card.job.sceneId)) {
-          newPool = [confidentMatch];
-        }
-      }
-      if (newPool.length === 0) continue;
-
-      let bestIdx = -1;
-      let highestScore = -1;
       const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
 
-      // Tier 0: Direct Match by stamped boundSceneId (100% Deterministic DOM Binding)
-      bestIdx = newPool.findIndex((cand) => cand.boundSceneId && cand.boundSceneId === card.job.sceneId);
+      for (const cand of unconsumed) {
+        if (!cand.src || cand.src.length < 5) continue;
 
-      // Tier 1: Match by explicit tileId if captured
-      if (bestIdx === -1 && card.tileId) {
-        bestIdx = newPool.findIndex((cand) => cand.tileId && cand.tileId === card.tileId);
-      }
+        // Hard exclusion: Never allow matching candidates stamped for a DIFFERENT scene
+        if (cand.boundSceneId && cand.boundSceneId !== card.job.sceneId) continue;
+        if (cand.boundSceneTag && card.sceneTag && cand.boundSceneTag !== card.sceneTag) continue;
+        if (cand.tileId && card.tileId && cand.tileId !== card.tileId) continue;
 
-      // Tier 2: Match by cardText semantic / sceneTag score with CROSS-TALK COMPETITIVE BIDDING GUARD
-      if (bestIdx === -1) {
-        for (let i = 0; i < newPool.length; i++) {
-          const cand = newPool[i];
-          const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
-          if (score >= 100 && score > highestScore) {
-            // Competitive bidding: Ensure no other in-flight card has a HIGHER score for this candidate
-            let hasBetterCompetitor = false;
-            for (const otherCard of inFlightCards) {
-              if (otherCard.job.sceneId === card.job.sceneId) continue;
-              const otherTc = extractNormalizedTimecode(otherCard.job.prompt || otherCard.job.sceneId || '');
-              const otherScore = scoreCandidateCard(cand.cardText, otherCard.sceneTag, otherCard.job.prompt, otherTc);
-              if (otherScore > score) {
-                hasBetterCompetitor = true;
-                break;
-              }
-            }
-
-            if (!hasBetterCompetitor) {
-              highestScore = score;
-              bestIdx = i;
-            }
-          }
+        // Foreign [REF:...] tag check
+        const candText = (cand.cardText || '').toLowerCase();
+        const foreignRefMatch = candText.match(/ref:(?:p\d+_)?scn_([a-z0-9_]+)/i);
+        if (foreignRefMatch && !card.sceneTag.toLowerCase().includes(foreignRefMatch[1].toLowerCase())) {
+          continue;
         }
-      }
 
-      // Tier 3: Strict Fallback (Solo mode ONLY or safety timeout after >= 45s)
-      // In parallel mode with multiple cards in-flight, NEVER blindly map by coordinate
-      // unless only 1 card remains in flight or timeout has elapsed!
-      const canUseTier3 = (this.maxConcurrentPerBrowser === 1 || inFlightCards.length === 1);
-      const elapsed = Date.now() - card.submittedAt;
-      const requiredElapsed = canUseTier3 ? 30000 : 45000;
+        // A newly submitted or regenerated job MUST NEVER match media that already existed on canvas before submission!
+        if (initialSet.has(cand.src)) {
+          continue;
+        }
 
-      if (bestIdx === -1 && (canUseTier3 || elapsed >= requiredElapsed)) {
-        if (elapsed >= requiredElapsed) {
-          const sortedNew = [...newPool].sort((a, b) => {
-            if (a.createdTime && b.createdTime) {
-              return new Date(a.createdTime).getTime() - new Date(b.createdTime).getTime();
-            }
-            if (Math.abs((a.coordY || 0) - (b.coordY || 0)) > 20) {
-              return (a.coordY || 0) - (b.coordY || 0);
-            }
-            return (a.coordX || 0) - (b.coordX || 0);
-          });
+        let score = 0;
+        let tier: VideoCandidatePair['tier'] = 'SEMANTIC';
 
-          let semanticCandIdx = -1;
-          for (let i = 0; i < sortedNew.length; i++) {
-            const cand = sortedNew[i];
-            const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
-            if (score >= 40) {
-              semanticCandIdx = newPool.indexOf(cand);
-              break;
-            }
-          }
-
-          if (semanticCandIdx !== -1) {
-            bestIdx = semanticCandIdx;
+        // Tier 0: Direct Match by stamped boundSceneId
+        if (cand.boundSceneId && cand.boundSceneId === card.job.sceneId) {
+          score = 20000;
+          tier = 'DOM_STAMP';
+        }
+        // Tier 1: Explicit tileId match
+        else if (card.tileId && cand.tileId && cand.tileId === card.tileId) {
+          score = 10000;
+          tier = 'TILE_ID';
+        }
+        // Tier 2: CardText semantic / tag score
+        else {
+          const rawScore = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
+          if (rawScore >= 100) {
+            score = rawScore;
+            tier = rawScore >= 1000 ? 'TAG_EXACT' : rawScore >= 600 ? 'TIMECODE' : 'SEMANTIC';
           } else {
-            // SAFETY GUARD: Before blindly assigning the oldest card, verify it does NOT
-            // contain a [REF:SCN_...] tag or boundSceneId belonging to a DIFFERENT known in-flight card.
-            const otherKnownTags = inFlightCards
-              .filter(c => c.job.sceneId !== card.job.sceneId)
-              .map(c => c.sceneTag.toLowerCase());
-            const candidateText = (sortedNew[0]?.cardText || '').toLowerCase();
-            const hasForeignRefTag = otherKnownTags.some(t => candidateText.includes(t) || candidateText.includes(`ref:${t}`));
-            const foreignBound = sortedNew[0]?.boundSceneId && sortedNew[0]?.boundSceneId !== card.job.sceneId;
-
-            if (!hasForeignRefTag && !foreignBound) {
-              bestIdx = newPool.indexOf(sortedNew[0]);
-            } else {
-              console.warn(`[FlowAutomator] Tier3 fallback BLOCKED: oldest video card belongs to a different in-flight scene (cascade-shift prevention). Scene ${card.job.sceneId} will remain unmatched this poll cycle.`);
+            // Tier 3: Strict Fallback
+            const canUseTier3 = (this.maxConcurrentPerBrowser === 1 || inFlightCards.length === 1);
+            const elapsed = Date.now() - card.submittedAt;
+            const requiredElapsed = canUseTier3 ? 30000 : 45000;
+            if (elapsed >= requiredElapsed && (canUseTier3 || rawScore >= 40)) {
+              score = 10 + rawScore;
+              tier = 'FALLBACK';
             }
           }
         }
+
+        if (score > 0) {
+          candidatePairs.push({ card, cand, score, tier });
+        }
       }
+    }
 
-      if (bestIdx === -1) continue;
+    if (candidatePairs.length === 0) return [];
 
-      const matchedCand = newPool[bestIdx];
-      const poolIdx = availablePool.indexOf(matchedCand);
-      if (poolIdx !== -1) availablePool.splice(poolIdx, 1);
-      if (!matchedCand || !matchedCand.src || matchedCand.src.length < 5) continue;
+    // Global Bipartite Confidence Sort: Highest score pair wins first
+    candidatePairs.sort((a, b) => b.score - a.score);
+
+    const matchedSceneIds = new Set<string>();
+    const matchedCandidateUrls = new Set<string>();
+
+    for (const pair of candidatePairs) {
+      if (matchedSceneIds.has(pair.card.job.sceneId)) continue;
+      if (matchedCandidateUrls.has(pair.cand.src)) continue;
+
+      matchedSceneIds.add(pair.card.job.sceneId);
+      matchedCandidateUrls.add(pair.cand.src);
 
       try {
-        const saved = await this.saveVideoCandidateToDisk(page, matchedCand.src, card.job.outputPath);
+        const saved = await this.saveVideoCandidateToDisk(page, pair.cand.src, pair.card.job.outputPath);
         if (saved) {
-          console.log(`[FlowAutomator] ✓ MATCHED & SAVED VIDEO for scene ${card.job.sceneId} [${card.sceneTag}] -> ${card.job.outputPath}`);
-          this.consumedUrls.add(matchedCand.src);
-          this.onJobProgress?.(card.job.sceneId, 'ready', card.job.outputPath, undefined, 'video', card.job.projectId);
-          harvestedSceneIds.push(card.job.sceneId);
+          console.log(`[FlowAutomator] ✓ MATCHED & SAVED VIDEO for scene ${pair.card.job.sceneId} [${pair.card.sceneTag}] (Tier: ${pair.tier}, Score: ${pair.score}) -> ${pair.card.job.outputPath}`);
+          this.consumedUrls.add(pair.cand.src);
+          await this.recordHarvestAudit({
+            projectId: pair.card.job.projectId,
+            sceneId: pair.card.job.sceneId,
+            sceneTag: pair.card.sceneTag,
+            tileId: pair.cand.tileId,
+            matchTier: pair.tier,
+            matchScore: pair.score,
+            diskPath: pair.card.job.outputPath,
+            mediaType: 'video',
+          });
+          this.onJobProgress?.(pair.card.job.sceneId, 'ready', pair.card.job.outputPath, undefined, 'video', pair.card.job.projectId);
+          harvestedSceneIds.push(pair.card.job.sceneId);
         }
       } catch (err: any) {
-        console.warn(`[FlowAutomator] Video harvest error for scene ${card.job.sceneId}:`, err.message);
+        console.warn(`[FlowAutomator] Video harvest error for scene ${pair.card.job.sceneId}:`, err.message);
       }
     }
 
@@ -3363,6 +3506,17 @@ export class FlowAutomatorPool {
         }
 
         const rect = img.getBoundingClientRect();
+
+        // Fallback to in-memory ledger if React virtualization stripped DOM attributes
+        const win = window as any;
+        if ((!boundSceneId || !boundSceneTag) && win.__CINEFLOW_LEDGER__) {
+          if (tileId && win.__CINEFLOW_LEDGER__.has(tileId)) {
+            const entry = win.__CINEFLOW_LEDGER__.get(tileId);
+            if (!boundSceneId) boundSceneId = entry.sceneId;
+            if (!boundSceneTag) boundSceneTag = entry.sceneTag;
+          }
+        }
+
         return {
           tileId,
           boundSceneId,
@@ -3383,135 +3537,93 @@ export class FlowAutomatorPool {
       return [];
     }
 
-    // 2. Match each in-flight card 1-to-1 with the best candidate
-    const availablePool = [...candidates];
+    interface ImageCandidatePair {
+      card: InFlightCard;
+      cand: any;
+      score: number;
+      tier: 'DOM_STAMP' | 'TILE_ID' | 'TAG_EXACT' | 'TIMECODE' | 'SEMANTIC' | 'FALLBACK';
+    }
+
+    const candidatePairs: ImageCandidatePair[] = [];
 
     for (const card of inFlightCards) {
-      if (availablePool.length === 0) break;
-
-      // CRITICAL: A newly submitted job MUST NEVER match media that already existed before submission!
       const initialSet = new Set(card.initialUrls || []);
-      let newPool = availablePool.filter((cand) => cand.src && cand.src.length > 5 && !initialSet.has(cand.src));
-
-      // Hard exclusion: Never allow matching candidates stamped for a DIFFERENT scene
-      newPool = newPool.filter((cand) => {
-        if (cand.boundSceneId && cand.boundSceneId !== card.job.sceneId) return false;
-        if (cand.boundSceneTag && card.sceneTag && cand.boundSceneTag !== card.sceneTag) return false;
-        if (cand.tileId && card.tileId && cand.tileId !== card.tileId) return false;
-        return true;
-      });
-
-      // If no new candidates are found outside initialUrls, allow high-confidence exact matches
-      // (exact boundSceneId or exact tileId) to match even if captured in initialUrls snapshot
-      if (newPool.length === 0) {
-        const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
-        const confidentMatch = availablePool.find((cand) => {
-          if (cand.boundSceneId && cand.boundSceneId === card.job.sceneId) return true;
-          if (card.tileId && cand.tileId === card.tileId) return true;
-          const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
-          return score >= 180;
-        });
-        if (confidentMatch && (!confidentMatch.boundSceneId || confidentMatch.boundSceneId === card.job.sceneId)) {
-          newPool = [confidentMatch];
-        }
-      }
-      if (newPool.length === 0) continue;
-
-      let bestIdx = -1;
-      let highestScore = -1;
       const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
 
-      // Tier 0: Direct Match by stamped boundSceneId (100% Deterministic DOM Binding)
-      bestIdx = newPool.findIndex((cand) => cand.boundSceneId && cand.boundSceneId === card.job.sceneId);
+      for (const cand of candidates) {
+        if (!cand.src || cand.src.length < 5) continue;
+        if (this.consumedUrls.has(cand.src)) continue;
 
-      // Tier 1: Match by explicit tileId if captured
-      if (bestIdx === -1 && card.tileId) {
-        bestIdx = newPool.findIndex((cand) => cand.tileId && cand.tileId === card.tileId);
-      }
+        // Hard exclusion: Never allow matching candidates stamped for a DIFFERENT scene
+        if (cand.boundSceneId && cand.boundSceneId !== card.job.sceneId) continue;
+        if (cand.boundSceneTag && card.sceneTag && cand.boundSceneTag !== card.sceneTag) continue;
+        if (cand.tileId && card.tileId && cand.tileId !== card.tileId) continue;
 
-      // Tier 2: Match by cardText semantic / sceneTag score with CROSS-TALK COMPETITIVE BIDDING GUARD
-      if (bestIdx === -1) {
-        for (let i = 0; i < newPool.length; i++) {
-          const cand = newPool[i];
-          const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
-          if (score >= 100 && score > highestScore) {
-            // Competitive bidding: Ensure no other in-flight card has a HIGHER score for this candidate
-            let hasBetterCompetitor = false;
-            for (const otherCard of inFlightCards) {
-              if (otherCard.job.sceneId === card.job.sceneId) continue;
-              const otherTc = extractNormalizedTimecode(otherCard.job.prompt || otherCard.job.sceneId || '');
-              const otherScore = scoreCandidateCard(cand.cardText, otherCard.sceneTag, otherCard.job.prompt, otherTc);
-              if (otherScore > score) {
-                hasBetterCompetitor = true;
-                break;
-              }
-            }
-
-            if (!hasBetterCompetitor) {
-              highestScore = score;
-              bestIdx = i;
-            }
-          }
+        // Foreign [REF:...] tag check: If candidate text explicitly contains a REF or SCN tag of another scene
+        const candText = (cand.cardText || '').toLowerCase();
+        const foreignRefMatch = candText.match(/ref:(?:p\d+_)?scn_([a-z0-9_]+)/i);
+        if (foreignRefMatch && !card.sceneTag.toLowerCase().includes(foreignRefMatch[1].toLowerCase())) {
+          continue;
         }
-      }
 
-      // Tier 3: Strict Fallback (Solo mode ONLY or safety timeout after >= 40s)
-      // In parallel mode with multiple cards in-flight, NEVER blindly map by coordinate
-      // unless only 1 card remains in flight or timeout has elapsed!
-      const canUseTier3 = (this.maxConcurrentPerBrowser === 1 || inFlightCards.length === 1);
-      const elapsed = Date.now() - card.submittedAt;
-      const requiredElapsed = canUseTier3 ? 10000 : 40000;
+        // A newly submitted or regenerated job MUST NEVER match media that already existed on canvas before submission!
+        if (initialSet.has(cand.src)) {
+          continue;
+        }
 
-      if (bestIdx === -1 && (canUseTier3 || elapsed >= requiredElapsed)) {
-        if (elapsed >= requiredElapsed) {
-          const sortedNew = [...newPool].sort((a, b) => {
-            if (a.createdTime && b.createdTime) {
-              return new Date(a.createdTime).getTime() - new Date(b.createdTime).getTime();
-            }
-            if (Math.abs((a.coordY || 0) - (b.coordY || 0)) > 20) {
-              return (a.coordY || 0) - (b.coordY || 0);
-            }
-            return (a.coordX || 0) - (b.coordX || 0);
-          });
+        let score = 0;
+        let tier: ImageCandidatePair['tier'] = 'SEMANTIC';
 
-          // Check if any candidate has semantic overlap
-          let semanticCandIdx = -1;
-          for (let i = 0; i < sortedNew.length; i++) {
-            const cand = sortedNew[i];
-            const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
-            if (score >= 40) {
-              semanticCandIdx = newPool.indexOf(cand);
-              break;
-            }
-          }
-
-          if (semanticCandIdx !== -1) {
-            bestIdx = semanticCandIdx;
+        // Tier 0: Direct Match by stamped boundSceneId (100% Deterministic DOM Binding)
+        if (cand.boundSceneId && cand.boundSceneId === card.job.sceneId) {
+          score = 20000;
+          tier = 'DOM_STAMP';
+        }
+        // Tier 1: Match by explicit tileId if captured
+        else if (card.tileId && cand.tileId && cand.tileId === card.tileId) {
+          score = 10000;
+          tier = 'TILE_ID';
+        }
+        // Tier 2: Match by cardText semantic / sceneTag score
+        else {
+          const rawScore = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
+          if (rawScore >= 100) {
+            score = rawScore;
+            tier = rawScore >= 1000 ? 'TAG_EXACT' : rawScore >= 600 ? 'TIMECODE' : 'SEMANTIC';
           } else {
-            // SAFETY GUARD: Before blindly assigning the oldest card, verify it does NOT
-            // contain a [REF:SCN_...] tag or boundSceneId belonging to a DIFFERENT known in-flight card.
-            const otherKnownTags = inFlightCards
-              .filter(c => c.job.sceneId !== card.job.sceneId)
-              .map(c => c.sceneTag.toLowerCase());
-            const candidateText = (sortedNew[0]?.cardText || '').toLowerCase();
-            const hasForeignRefTag = otherKnownTags.some(t => candidateText.includes(t) || candidateText.includes(`ref:${t}`));
-            const foreignBound = sortedNew[0]?.boundSceneId && sortedNew[0]?.boundSceneId !== card.job.sceneId;
-
-            if (!hasForeignRefTag && !foreignBound) {
-              bestIdx = newPool.indexOf(sortedNew[0]);
-            } else {
-              console.warn(`[FlowAutomator] Tier3 fallback BLOCKED: oldest card belongs to a different in-flight scene (cascade-shift prevention). Scene ${card.job.sceneId} will remain unmatched this poll cycle.`);
+            // Tier 3: Strict Fallback (Solo mode ONLY or safety timeout after >= 40s)
+            const canUseTier3 = (this.maxConcurrentPerBrowser === 1 || inFlightCards.length === 1);
+            const elapsed = Date.now() - card.submittedAt;
+            const requiredElapsed = canUseTier3 ? 10000 : 40000;
+            if (elapsed >= requiredElapsed && (canUseTier3 || rawScore >= 40)) {
+              score = 10 + rawScore;
+              tier = 'FALLBACK';
             }
           }
         }
+
+        if (score > 0) {
+          candidatePairs.push({ card, cand, score, tier });
+        }
       }
+    }
 
-      if (bestIdx === -1) continue;
+    if (candidatePairs.length === 0) return [];
 
-      const matchedCand = newPool[bestIdx];
-      const poolIdx = availablePool.indexOf(matchedCand);
-      if (poolIdx !== -1) availablePool.splice(poolIdx, 1);
-      if (!matchedCand || !matchedCand.src || matchedCand.src.length < 5) continue;
+    // Global Bipartite Confidence Sort: Highest score pair wins first
+    // Guarantees exact DOM stamps (20000) and Tag matches (1000+) are locked in
+    // before any lower-confidence or fallback match can touch the candidate pool
+    candidatePairs.sort((a, b) => b.score - a.score);
+
+    const matchedSceneIds = new Set<string>();
+    const matchedCandidateUrls = new Set<string>();
+
+    for (const pair of candidatePairs) {
+      if (matchedSceneIds.has(pair.card.job.sceneId)) continue;
+      if (matchedCandidateUrls.has(pair.cand.src)) continue;
+
+      matchedSceneIds.add(pair.card.job.sceneId);
+      matchedCandidateUrls.add(pair.cand.src);
 
       try {
         const harvestResult: any = await page.evaluate(async (srcToFetch: string) => {
@@ -3534,21 +3646,46 @@ export class FlowAutomatorPool {
           } catch {
             return { status: 'needs_canvas_shot', src: srcToFetch };
           }
-        }, matchedCand.src);
+        }, pair.cand.src);
 
         if (harvestResult?.status === 'ready' && harvestResult.base64) {
-          await fs.ensureDir(path.dirname(card.job.outputPath));
-          await fs.writeFile(card.job.outputPath, Buffer.from(harvestResult.base64, 'base64'));
-          console.log(`[FlowAutomator] ✓ MATCHED & SAVED scene ${card.job.sceneId} [${card.sceneTag}] -> ${card.job.outputPath}`);
-          
-          this.consumedUrls.add(matchedCand.src);
-          if (matchedCand.siblingUrls && Array.isArray(matchedCand.siblingUrls)) {
-            for (const sUrl of matchedCand.siblingUrls) {
+          const buf = Buffer.from(harvestResult.base64, 'base64');
+          if (buf.length < 500) {
+            console.warn(`[FlowAutomator] Refusing image for scene ${pair.card.job.sceneId}: payload too small (${buf.length} bytes).`);
+            continue;
+          }
+          const contentHash = crypto.createHash('sha256').update(buf).digest('hex');
+          if (this.harvestedContentHashes.has(contentHash)) {
+            console.warn(`[FlowAutomator] Duplicate image content detected (SHA-256: ${contentHash.slice(0, 10)}...). Refusing duplicate assignment for scene ${pair.card.job.sceneId}.`);
+            continue;
+          }
+          this.harvestedContentHashes.add(contentHash);
+
+          await fs.ensureDir(path.dirname(pair.card.job.outputPath));
+          await fs.writeFile(pair.card.job.outputPath, buf);
+          console.log(`[FlowAutomator] ✓ MATCHED & SAVED scene ${pair.card.job.sceneId} [${pair.card.sceneTag}] (Tier: ${pair.tier}, Score: ${pair.score}) -> ${pair.card.job.outputPath}`);
+
+          this.consumedUrls.add(pair.cand.src);
+          if (pair.cand.siblingUrls && Array.isArray(pair.cand.siblingUrls)) {
+            for (const sUrl of pair.cand.siblingUrls) {
               this.consumedUrls.add(sUrl);
             }
           }
-          this.onJobProgress?.(card.job.sceneId, 'ready', card.job.outputPath, undefined, 'image', card.job.projectId);
-          harvestedSceneIds.push(card.job.sceneId);
+
+          await this.recordHarvestAudit({
+            projectId: pair.card.job.projectId,
+            sceneId: pair.card.job.sceneId,
+            sceneTag: pair.card.sceneTag,
+            tileId: pair.cand.tileId,
+            sha256: contentHash,
+            matchTier: pair.tier,
+            matchScore: pair.score,
+            diskPath: pair.card.job.outputPath,
+            mediaType: 'image',
+          });
+
+          this.onJobProgress?.(pair.card.job.sceneId, 'ready', pair.card.job.outputPath, undefined, 'image', pair.card.job.projectId);
+          harvestedSceneIds.push(pair.card.job.sceneId);
         } else if (harvestResult?.status === 'needs_canvas_shot' && harvestResult.src) {
           const imgHandle = await page.evaluateHandle((srcToMatch: string) => {
             const imgs = Array.from(document.querySelectorAll('img'));
@@ -3557,21 +3694,51 @@ export class FlowAutomatorPool {
 
           const el = imgHandle.asElement();
           if (el) {
-            await fs.ensureDir(path.dirname(card.job.outputPath));
-            await el.screenshot({ path: card.job.outputPath, type: 'png' });
-            console.log(`[FlowAutomator] ✓ CAPTURED snapshot for scene ${card.job.sceneId} [${card.sceneTag}] -> ${card.job.outputPath}`);
-            this.consumedUrls.add(matchedCand.src);
-            if (matchedCand.siblingUrls && Array.isArray(matchedCand.siblingUrls)) {
-              for (const sUrl of matchedCand.siblingUrls) {
+            await fs.ensureDir(path.dirname(pair.card.job.outputPath));
+            await el.screenshot({ path: pair.card.job.outputPath, type: 'png' });
+            const stat = await fs.stat(pair.card.job.outputPath).catch(() => null);
+            if (!stat || stat.size < 500) {
+              await fs.remove(pair.card.job.outputPath).catch(() => {});
+              continue;
+            }
+            const shotBuf = await fs.readFile(pair.card.job.outputPath).catch(() => null);
+            let shotHash: string | undefined = undefined;
+            if (shotBuf) {
+              shotHash = crypto.createHash('sha256').update(shotBuf).digest('hex');
+              if (this.harvestedContentHashes.has(shotHash)) {
+                console.warn(`[FlowAutomator] Duplicate screenshot image detected (SHA-256: ${shotHash.slice(0, 10)}...). Refusing duplicate.`);
+                await fs.remove(pair.card.job.outputPath).catch(() => {});
+                continue;
+              }
+              this.harvestedContentHashes.add(shotHash);
+            }
+
+            console.log(`[FlowAutomator] ✓ CAPTURED snapshot for scene ${pair.card.job.sceneId} [${pair.card.sceneTag}] (Tier: ${pair.tier}, Score: ${pair.score}) -> ${pair.card.job.outputPath}`);
+            this.consumedUrls.add(pair.cand.src);
+            if (pair.cand.siblingUrls && Array.isArray(pair.cand.siblingUrls)) {
+              for (const sUrl of pair.cand.siblingUrls) {
                 this.consumedUrls.add(sUrl);
               }
             }
-            this.onJobProgress?.(card.job.sceneId, 'ready', card.job.outputPath, undefined, 'image', card.job.projectId);
-            harvestedSceneIds.push(card.job.sceneId);
+
+            await this.recordHarvestAudit({
+              projectId: pair.card.job.projectId,
+              sceneId: pair.card.job.sceneId,
+              sceneTag: pair.card.sceneTag,
+              tileId: pair.cand.tileId,
+              sha256: shotHash,
+              matchTier: pair.tier,
+              matchScore: pair.score,
+              diskPath: pair.card.job.outputPath,
+              mediaType: 'image',
+            });
+
+            this.onJobProgress?.(pair.card.job.sceneId, 'ready', pair.card.job.outputPath, undefined, 'image', pair.card.job.projectId);
+            harvestedSceneIds.push(pair.card.job.sceneId);
           }
         }
       } catch (err: any) {
-        console.warn(`[FlowAutomator] Card harvest error for scene ${card.job.sceneId}:`, err.message);
+        console.warn(`[FlowAutomator] Card harvest error for scene ${pair.card.job.sceneId}:`, err.message);
       }
     }
 

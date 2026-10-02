@@ -842,7 +842,11 @@ export class TTSService {
   /**
    * Main TTS synthesis entrypoint.
    */
-  public async generateSpeech(req: TTSGenerationRequest, onProgress?: (progress: any) => void): Promise<TTSGenerationResult> {
+  public async generateSpeech(
+    req: TTSGenerationRequest,
+    onProgress?: (progress: any) => void,
+    onChunk?: (chunk: any) => void
+  ): Promise<TTSGenerationResult> {
     try {
       if (onProgress) {
         onProgress({ percent: 5, elapsedSec: 0, message: 'Preparing speech text & prosody calibration...' });
@@ -931,7 +935,25 @@ export class TTSService {
       // 1. Kokoro-82M (Open-Source Hyper-Realistic, ElevenLabs Grade)
       if (req.engine === 'kokoro') {
         try {
-          generated = await this.kokoroService.synthesizeToFile(req, outputPath);
+          generated = await this.kokoroService.synthesizeToFile(
+            req,
+            outputPath,
+            onChunk
+              ? (c) => {
+                  onChunk({
+                    sessionId: req.streamSessionId || '',
+                    chunkIndex: c.chunkIndex,
+                    totalChunks: c.totalChunks,
+                    audioData: c.audioBuffer.toString('base64'),
+                    mimeType: 'audio/wav',
+                    text: c.text,
+                    durationSec: c.durationSec,
+                    isLast: c.isLast,
+                  });
+                }
+              : undefined,
+            onProgress
+          );
         } catch (kokoroErr: any) {
           console.error(`[TTSService] Kokoro synthesis error: ${kokoroErr.message}`);
           throw new Error(`Kokoro neural synthesis failed: ${kokoroErr.message}`);
@@ -958,7 +980,7 @@ export class TTSService {
       // 4. ElevenLabs (Cinematic / Broadcast Documentary)
       else if (req.engine === 'elevenlabs') {
         if (onProgress) onProgress({ percent: 15, elapsedSec: 0, etaSec: 5, message: 'Synthesizing with ElevenLabs HD Studio...' });
-        generated = await this.synthesizeWithElevenLabs(req, outputPath);
+        generated = await this.synthesizeWithElevenLabs(req, outputPath, onChunk);
       }
       // 2. OpenAI HD Studio Speech
       else if (req.engine === 'openai') {
@@ -1251,7 +1273,11 @@ export class TTSService {
   /**
    * ElevenLabs TTS synthesizer for cinematic documentary narration with emotional tags & dynamic delivery.
    */
-  private async synthesizeWithElevenLabs(req: TTSGenerationRequest, outputPath: string): Promise<boolean> {
+  private async synthesizeWithElevenLabs(
+    req: TTSGenerationRequest,
+    outputPath: string,
+    onChunk?: (chunk: any) => void
+  ): Promise<boolean> {
     const apiKey = req.apiKey || this.getApiKey('elevenlabs');
     if (!apiKey) {
       throw new Error(
@@ -1316,21 +1342,106 @@ export class TTSService {
       style = 0.15;
     }
 
+    const payload = {
+      text: req.text,
+      model_id: 'eleven_multilingual_v2',
+      voice_settings: {
+        stability,
+        similarity_boost,
+        style,
+        use_speaker_boost: true,
+      },
+    };
+
+    // ⚡ Try instant real-time audio chunk streaming if onChunk callback provided
+    if (onChunk) {
+      try {
+        const streamUrl = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`;
+        console.log(`[TTSService] ⚡ Streaming ElevenLabs TTS for voice "${voiceId}" with instant playback...`);
+        const streamResponse = await axios.post(
+          streamUrl,
+          payload,
+          {
+            headers: {
+              'xi-api-key': apiKey,
+              'Content-Type': 'application/json',
+              'Accept': 'audio/mpeg',
+            },
+            responseType: 'stream',
+            timeout: 45000,
+          }
+        );
+
+        const writer = fs.createWriteStream(outputPath);
+        streamResponse.data.pipe(writer);
+
+        let chunkIdx = 0;
+        let accumulator = Buffer.alloc(0);
+        const CHUNK_SIZE = 16384; // ~16KB packet
+
+        streamResponse.data.on('data', (d: Buffer) => {
+          accumulator = Buffer.concat([accumulator, d]);
+          if (accumulator.length >= CHUNK_SIZE) {
+            onChunk({
+              sessionId: req.streamSessionId || '',
+              chunkIndex: chunkIdx++,
+              totalChunks: -1,
+              audioData: accumulator.toString('base64'),
+              mimeType: 'audio/mpeg',
+              text: '',
+              durationSec: 0,
+              isLast: false,
+            });
+            accumulator = Buffer.alloc(0);
+          }
+        });
+
+        await new Promise((resolve, reject) => {
+          writer.on('finish', () => {
+            if (accumulator.length > 0) {
+              onChunk({
+                sessionId: req.streamSessionId || '',
+                chunkIndex: chunkIdx++,
+                totalChunks: chunkIdx,
+                audioData: accumulator.toString('base64'),
+                mimeType: 'audio/mpeg',
+                text: '',
+                durationSec: 0,
+                isLast: true,
+              });
+            } else {
+              onChunk({
+                sessionId: req.streamSessionId || '',
+                chunkIndex: chunkIdx,
+                totalChunks: chunkIdx,
+                audioData: '',
+                mimeType: 'audio/mpeg',
+                text: '',
+                durationSec: 0,
+                isLast: true,
+              });
+            }
+            resolve(true);
+          });
+          writer.on('error', reject);
+          streamResponse.data.on('error', reject);
+        });
+
+        if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+          console.log(`[TTSService] ✓ ElevenLabs streaming speech saved -> ${outputPath}`);
+          return true;
+        }
+      } catch (streamErr: any) {
+        console.warn(`[TTSService] ElevenLabs streaming failed (${streamErr.message}), falling back to standard synthesis...`);
+      }
+    }
+
     const url = `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`;
     console.log(`[TTSService] Calling ElevenLabs TTS for voice "${voiceId}" with emotion="${emotion || 'natural'}" (stability=${stability}, style=${style})...`);
 
     const response = await axios.post(
       url,
-      {
-        text: req.text,
-        model_id: 'eleven_multilingual_v2',
-        voice_settings: {
-          stability,
-          similarity_boost,
-          style,
-          use_speaker_boost: true,
-        },
-      },
+      payload,
       {
         headers: {
           'xi-api-key': apiKey,
@@ -1628,15 +1739,41 @@ export class TTSService {
   private async synthesizeWithLocalPython(req: TTSGenerationRequest, outputPath: string, onProgress?: (data: any) => void): Promise<boolean> {
     return new Promise((resolve, reject) => {
       const appRoot = (app && typeof app.getAppPath === 'function') ? app.getAppPath() : process.cwd();
+      
+      // External OS processes (like python.exe) CANNOT read inside Electron's app.asar virtual archive.
+      // Prioritize unpacked, extraResources, or real filesystem paths first.
       const scriptCandidates = [
-        path.join(process.cwd(), 'scripts', 'local_tts_worker.py'),
-        path.join(appRoot, 'scripts', 'local_tts_worker.py'),
         process.resourcesPath ? path.join(process.resourcesPath, 'scripts', 'local_tts_worker.py') : '',
+        appRoot.includes('app.asar') ? path.join(appRoot.replace('app.asar', 'app.asar.unpacked'), 'scripts', 'local_tts_worker.py') : '',
+        path.join(process.cwd(), 'scripts', 'local_tts_worker.py'),
         path.join(process.cwd(), 'resources', 'scripts', 'local_tts_worker.py'),
       ].filter(Boolean);
-      const scriptPath = scriptCandidates.find((c) => fs.existsSync(c)) || scriptCandidates[0];
-      if (!fs.existsSync(scriptPath)) {
-        return reject(new Error('Local Python TTS worker script not configured.'));
+
+      let scriptPath = scriptCandidates.find((c) => !c.includes('app.asar') && fs.existsSync(c));
+
+      // Self-healing fallback: If script was somehow only packaged inside app.asar, extract to real disk
+      if (!scriptPath) {
+        const asarScript = path.join(appRoot, 'scripts', 'local_tts_worker.py');
+        if (fs.existsSync(asarScript)) {
+          try {
+            const targetDir = path.join(process.cwd(), 'projects_data', 'scripts');
+            fs.ensureDirSync(targetDir);
+            const targetPath = path.join(targetDir, 'local_tts_worker.py');
+            fs.copyFileSync(asarScript, targetPath);
+            const natScript = path.join(path.dirname(asarScript), 'speech_naturalizer.py');
+            if (fs.existsSync(natScript)) {
+              fs.copyFileSync(natScript, path.join(targetDir, 'speech_naturalizer.py'));
+            }
+            scriptPath = targetPath;
+            console.log(`[TTSService] Self-healed: extracted local_tts_worker.py to ${scriptPath}`);
+          } catch (e: any) {
+            console.warn('[TTSService] Self-healing extraction failed:', e.message);
+          }
+        }
+      }
+
+      if (!scriptPath || !fs.existsSync(scriptPath)) {
+        return reject(new Error('Local Python TTS worker script not configured or not accessible on disk.'));
       }
 
       const rawStr = req.text || '';
@@ -1646,15 +1783,34 @@ export class TTSService {
       if (refAudio && !path.isAbsolute(refAudio)) {
         const audioCandidates = [
           path.resolve(process.cwd(), refAudio),
-          path.resolve(appRoot, refAudio),
           process.resourcesPath ? path.resolve(process.resourcesPath, refAudio) : '',
+          process.resourcesPath ? path.resolve(process.resourcesPath, 'projects_data', 'voices', 'samples', path.basename(refAudio)) : '',
           path.resolve(process.cwd(), 'projects_data', 'voices', 'samples', path.basename(refAudio)),
-          path.resolve(appRoot, 'projects_data', 'voices', 'samples', path.basename(refAudio)),
-          path.resolve(process.cwd(), 'projects_data', 'audio', 'voice_test', path.basename(refAudio)),
+          path.resolve(process.cwd(), 'resources', 'projects_data', 'voices', 'samples', path.basename(refAudio)),
+          appRoot.includes('app.asar') ? path.resolve(appRoot.replace('app.asar', 'app.asar.unpacked'), refAudio) : '',
+          appRoot.includes('app.asar') ? path.resolve(appRoot.replace('app.asar', 'app.asar.unpacked'), 'projects_data', 'voices', 'samples', path.basename(refAudio)) : '',
+          path.resolve(appRoot, refAudio),
         ].filter(Boolean);
-        const foundAudio = audioCandidates.find((c) => fs.existsSync(c));
+
+        const foundAudio = audioCandidates.find((c) => !c.includes('app.asar') && fs.existsSync(c)) ||
+                           audioCandidates.find((c) => fs.existsSync(c));
         if (foundAudio) {
           refAudio = foundAudio;
+        }
+      }
+
+      // If reference audio is inside app.asar, extract to real disk so Python can read it
+      if (refAudio && refAudio.includes('app.asar')) {
+        try {
+          const targetDir = path.join(process.cwd(), 'projects_data', 'voices', 'samples');
+          fs.ensureDirSync(targetDir);
+          const extractedRef = path.join(targetDir, path.basename(refAudio));
+          if (!fs.existsSync(extractedRef)) {
+            fs.copyFileSync(refAudio, extractedRef);
+          }
+          refAudio = extractedRef;
+        } catch (e: any) {
+          console.warn('[TTSService] Could not extract reference audio from app.asar:', e.message);
         }
       }
 
@@ -1743,6 +1899,15 @@ export class TTSService {
       return 'py';
     }
     return 'python3';
+  }
+
+  /**
+   * Cancels a running TTS stream session.
+   */
+  public cancelStream(sessionId: string): void {
+    if (this.kokoroService) {
+      this.kokoroService.cancelSession(sessionId);
+    }
   }
 }
 

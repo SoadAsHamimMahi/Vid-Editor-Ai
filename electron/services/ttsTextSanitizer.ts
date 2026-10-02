@@ -383,8 +383,10 @@ export function insertBreathMarkers(text: string): string {
   { pattern: /(?<![\p{L}\p{N}])El\s+Mudo(?![\p{L}\p{N}])/giu, replacement: 'El Moodo' },
 
   // 14. Ballon d'Or, Copa América, Chile
-  { pattern: /(?<![\p{L}\p{N}])Ba\s+Lawn\s+Door(?![\p{L}\p{N}])/giu, replacement: 'Ballon Dor' },
-  { pattern: /(?<![\p{L}\p{N}])Ballon\s+d['’]Or(?![\p{L}\p{N}])/giu, replacement: 'Ballon Dor' },
+  { pattern: /(?<![\p{L}\p{N}])Ba\s+Lawn\s+Door(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor' },
+  { pattern: /(?<![\p{L}\p{N}])Ballon\s+d['’]Or(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor' },
+  { pattern: /(?<![\p{L}\p{N}])Ballon\s+Dor(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor' },
+  { pattern: /(?<![\p{L}\p{N}])Bah-lon\s+Dor(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor' },
   { pattern: /(?<![\p{L}\p{N}])Copa\s+AMA\s+RICA(?![\p{L}\p{N}])/giu, replacement: 'Copa Amehreeka' },
   { pattern: /(?<![\p{L}\p{N}])Copa\s+Am[eé]rica(?![\p{L}\p{N}])/giu, replacement: 'Copa Amehreeka' },
   { pattern: /(?<![\p{L}\p{N}])Chylon\s+Penalties(?![\p{L}\p{N}])/giu, replacement: 'Cheelay on penalties' },
@@ -485,7 +487,93 @@ export function insertBreathMarkers(text: string): string {
   { pattern: /(?<![\p{L}\p{N}])F[aá]tima(?![\p{L}\p{N}])/giu, replacement: 'Fatima' },
   { pattern: /(?<![\p{L}\p{N}])Ferran\s+Torres(?![\p{L}\p{N}])/giu, replacement: 'Ferran Torres' },
   { pattern: /(?<![\p{L}\p{N}])Xavi(?![\p{L}\p{N}])/giu, replacement: 'Shahvee' },
-  { pattern: /(?<![\p{L}\p{N}])Iniesta(?![\p{L}\p{N}])/giu, replacement: 'Eeneestah' }
+  { pattern: /(?<![\p{L}\p{N}])Iniesta(?![\p{L}\p{N}])/giu, replacement: 'Eeneestah' },
+
+  // 21. Cristiano Ronaldo & Portuguese / European Names & Marcus Phonetics
+  { pattern: /(?<![\p{L}\p{N}])Funchal(?![\p{L}\p{N}])/giu, replacement: 'Foonshahl' },
+  { pattern: /(?<![\p{L}\p{N}])Jos[eé]\s+Dinis(?![\p{L}\p{N}])/giu, replacement: 'Zhozeh Deeneesh' },
+  { pattern: /(?<![\p{L}\p{N}])Jos[eé]\s+Dinas(?![\p{L}\p{N}])/giu, replacement: 'Zhozeh Deeneesh' },
+  { pattern: /(?<![\p{L}\p{N}])Zho-zeh\s+Dee-neesh(?![\p{L}\p{N}])/giu, replacement: 'Zhozeh Deeneesh' },
+  { pattern: /(?<![\p{L}\p{N}])Dinis(?![\p{L}\p{N}])/giu, replacement: 'Deeneesh' },
+  { pattern: /(?<![\p{L}\p{N}])Santo\s+Ant[oó]nio(?![\p{L}\p{N}])/giu, replacement: 'Sahntoo Antawneeoo' },
+  { pattern: /(?<![\p{L}\p{N}])Santo\s+Ant\s+Naio(?![\p{L}\p{N}])/giu, replacement: 'Sahntoo Antawneeoo' },
+  { pattern: /(?<![\p{L}\p{N}])Santo\s+Antinio(?![\p{L}\p{N}])/giu, replacement: 'Sahntoo Antawneeoo' },
+  { pattern: /(?<![\p{L}\p{N}])Sahn-too\s+An-taw-nee-oo(?![\p{L}\p{N}])/giu, replacement: 'Sahntoo Antawneeoo' },
+  { pattern: /(?<![\p{L}\p{N}])Ant[oó]nio(?![\p{L}\p{N}])/giu, replacement: 'Antawneeoo' },
+  { pattern: /(?<![\p{L}\p{N}])Maria\s+Dolores(?![\p{L}\p{N}])/giu, replacement: 'Maria Dolohresh' },
+  { pattern: /(?<![\p{L}\p{N}])Mah-ree-ah\s+Doh-loh-resh(?![\p{L}\p{N}])/giu, replacement: 'Maria Dolohresh' },
+  { pattern: /(?<![\p{L}\p{N}])Dolores(?![\p{L}\p{N}])/giu, replacement: 'Dolohresh' },
+  { pattern: /(?<![\p{L}\p{N}])Doh-loh-resh(?![\p{L}\p{N}])/giu, replacement: 'Dolohresh' },
+  { pattern: /(?<![\p{L}\p{N}])Madeira(?![\p{L}\p{N}])/giu, replacement: 'Mahdayra' },
+  { pattern: /(?<![\p{L}\p{N}])Mah-DAY-rah(?![\p{L}\p{N}])/giu, replacement: 'Mahdayra' },
+  { pattern: /(?<![\p{L}\p{N}])Andorinha(?![\p{L}\p{N}])/giu, replacement: 'Andoreenya' },
+  { pattern: /(?<![\p{L}\p{N}])Andorin[- ]Ha(?![\p{L}\p{N}])/giu, replacement: 'Andoreenya' },
+  { pattern: /(?<![\p{L}\p{N}])An-doh-reen-yah(?![\p{L}\p{N}])/giu, replacement: 'Andoreenya' },
+  { pattern: /(?<![\p{L}\p{N}])Abelhinha(?![\p{L}\p{N}])/giu, replacement: 'Abelyeenya' },
+  { pattern: /(?<![\p{L}\p{N}])Abelingha(?![\p{L}\p{N}])/giu, replacement: 'Abelyeenya' },
+  { pattern: /(?<![\p{L}\p{N}])Ah-bel-yeen-yah(?![\p{L}\p{N}])/giu, replacement: 'Abelyeenya' },
+  { pattern: /(?<![\p{L}\p{N}])Chor[aã]o(?![\p{L}\p{N}])/giu, replacement: 'Shorowng' },
+  { pattern: /(?<![\p{L}\p{N}])Chorau(?![\p{L}\p{N}])/giu, replacement: 'Shorowng' },
+  { pattern: /(?<![\p{L}\p{N}])Sho-rowng(?![\p{L}\p{N}])/giu, replacement: 'Shorowng' },
+  { pattern: /(?<![\p{L}\p{N}])Nacional(?![\p{L}\p{N}])/giu, replacement: 'Nahseeohnahl' },
+  { pattern: /(?<![\p{L}\p{N}])Nah-see-oh-nahl(?![\p{L}\p{N}])/giu, replacement: 'Nahseeohnahl' },
+  { pattern: /(?<![\p{L}\p{N}])CD\s+Nacional(?![\p{L}\p{N}])/giu, replacement: 'C D Nahseeohnahl' },
+  { pattern: /(?<![\p{L}\p{N}])Tachycardia(?![\p{L}\p{N}])/giu, replacement: 'Tackeecardya' },
+  { pattern: /(?<![\p{L}\p{N}])Tack-ee-kar-dee-uh(?![\p{L}\p{N}])/giu, replacement: 'Tackeecardya' },
+  { pattern: /(?<![\p{L}\p{N}])John\s+O['’]?Shea(?![\p{L}\p{N}])/giu, replacement: 'John Ohshay' },
+  { pattern: /(?<![\p{L}\p{N}])John\s+Oh-Shay(?![\p{L}\p{N}])/giu, replacement: 'John Ohshay' },
+  { pattern: /(?<![\p{L}\p{N}])John\s+Oshia(?![\p{L}\p{N}])/giu, replacement: 'John Ohshay' },
+  { pattern: /(?<![\p{L}\p{N}])O['’]Shea(?![\p{L}\p{N}])/giu, replacement: 'Ohshay' },
+  { pattern: /(?<![\p{L}\p{N}])Oshia(?![\p{L}\p{N}])/giu, replacement: 'Ohshay' },
+  { pattern: /(?<![\p{L}\p{N}])Oh-Shay(?![\p{L}\p{N}])/giu, replacement: 'Ohshay' },
+  { pattern: /(?<![\p{L}\p{N}])Ballon\s+d['’]?Or(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor' },
+  { pattern: /(?<![\p{L}\p{N}])Ballon\s+Dor(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor' },
+  { pattern: /(?<![\p{L}\p{N}])Eric\s+Cantona(?![\p{L}\p{N}])/giu, replacement: 'Eric Kahntonah' },
+  { pattern: /(?<![\p{L}\p{N}])Eric\s+Kahn-toh-nah(?![\p{L}\p{N}])/giu, replacement: 'Eric Kahntonah' },
+  { pattern: /(?<![\p{L}\p{N}])Cantona(?![\p{L}\p{N}])/giu, replacement: 'Kahntonah' },
+  { pattern: /(?<![\p{L}\p{N}])Kahn-toh-nah(?![\p{L}\p{N}])/giu, replacement: 'Kahntonah' },
+  { pattern: /(?<![\p{L}\p{N}])Juventus(?![\p{L}\p{N}])/giu, replacement: 'Yooventoos' },
+  { pattern: /(?<![\p{L}\p{N}])Yoo-ven-toos(?![\p{L}\p{N}])/giu, replacement: 'Yooventoos' },
+  { pattern: /(?<![\p{L}\p{N}])Bernab[eé]u(?![\p{L}\p{N}])/giu, replacement: 'Bernabayoo' },
+  { pattern: /(?<![\p{L}\p{N}])Ber-nah-bay-oo(?![\p{L}\p{N}])/giu, replacement: 'Bernabayoo' },
+  { pattern: /(?<![\p{L}\p{N}])La\s+D[eé]cima(?![\p{L}\p{N}])/giu, replacement: 'Lah Dehseemah' },
+  { pattern: /(?<![\p{L}\p{N}])Lah\s+Deh-see-mah(?![\p{L}\p{N}])/giu, replacement: 'Lah Dehseemah' },
+  { pattern: /(?<![\p{L}\p{N}])[EÉ]der(?![\p{L}\p{N}])/giu, replacement: 'Ehdair' },
+  { pattern: /(?<![\p{L}\p{N}])named\s+Ader(?![\p{L}\p{N}])/giu, replacement: 'named Ehdair' },
+  { pattern: /(?<![\p{L}\p{N}])Eh-dair(?![\p{L}\p{N}])/giu, replacement: 'Ehdair' },
+  { pattern: /(?<![\p{L}\p{N}])Georgina(?![\p{L}\p{N}])/giu, replacement: 'Horheenah' },
+  { pattern: /(?<![\p{L}\p{N}])Hor-hee-nah(?![\p{L}\p{N}])/giu, replacement: 'Horheenah' },
+  { pattern: /(?<![\p{L}\p{N}])Anfield(?![\p{L}\p{N}])/giu, replacement: 'Ahnfield' },
+  { pattern: /(?<![\p{L}\p{N}])Ahn-field(?![\p{L}\p{N}])/giu, replacement: 'Ahnfield' },
+  { pattern: /(?<![\p{L}\p{N}])Qatar(?![\p{L}\p{N}])/giu, replacement: 'Kuhtahr' },
+  { pattern: /(?<![\p{L}\p{N}])Kuh-tahr(?![\p{L}\p{N}])/giu, replacement: 'Kuhtahr' },
+  { pattern: /(?<![\p{L}\p{N}])Doha(?![\p{L}\p{N}])/giu, replacement: 'Dohha' },
+  { pattern: /(?<![\p{L}\p{N}])Al\s+Nassr(?![\p{L}\p{N}])/giu, replacement: 'Al Nahsur' },
+  { pattern: /(?<![\p{L}\p{N}])Al\s+Nah-sur(?![\p{L}\p{N}])/giu, replacement: 'Al Nahsur' },
+  { pattern: /(?<![\p{L}\p{N}])Eus[eé]bio(?![\p{L}\p{N}])/giu, replacement: 'Ayoozehbyoo' },
+  { pattern: /(?<![\p{L}\p{N}])Eh-oo-zeh-byoo(?![\p{L}\p{N}])/giu, replacement: 'Ayoozehbyoo' },
+  { pattern: /(?<![\p{L}\p{N}])Buenos\s+Aires(?![\p{L}\p{N}])/giu, replacement: 'Bwenos Eyres' },
+  { pattern: /(?<![\p{L}\p{N}])Bweh-nos\s+Eye-res(?![\p{L}\p{N}])/giu, replacement: 'Bwenos Eyres' },
+  // Compound and Hyphen Stutter Smoothers for Marcus
+  { pattern: /(?<![\p{L}\p{N}])Cry-Baby(?![\p{L}\p{N}])/gu, replacement: 'Crybaby' },
+  { pattern: /(?<![\p{L}\p{N}])cry-baby(?![\p{L}\p{N}])/gu, replacement: 'crybaby' },
+  { pattern: /(?<![\p{L}\p{N}])tin-roofed(?![\p{L}\p{N}])/giu, replacement: 'tin roofed' },
+  { pattern: /(?<![\p{L}\p{N}])step-overs(?![\p{L}\p{N}])/giu, replacement: 'step overs' },
+  { pattern: /(?<![\p{L}\p{N}])step-over(?![\p{L}\p{N}])/giu, replacement: 'step over' },
+  { pattern: /(?<![\p{L}\p{N}])show-off(?![\p{L}\p{N}])/giu, replacement: 'showoff' },
+  { pattern: /(?<![\p{L}\p{N}])reed-like(?![\p{L}\p{N}])/giu, replacement: 'reedlike' },
+  { pattern: /(?<![\p{L}\p{N}])Sit-ups(?![\p{L}\p{N}])/giu, replacement: 'Situps' },
+  { pattern: /(?<![\p{L}\p{N}])green-and-white(?![\p{L}\p{N}])/giu, replacement: 'green and white' },
+  { pattern: /(?<![\p{L}\p{N}])brand-new(?![\p{L}\p{N}])/giu, replacement: 'brand new' },
+  { pattern: /(?<![\p{L}\p{N}])quarter-final(?![\p{L}\p{N}])/giu, replacement: 'quarterfinal' },
+  { pattern: /(?<![\p{L}\p{N}])goalscorer(?![\p{L}\p{N}])/giu, replacement: 'goal scorer' },
+  { pattern: /(?<![\p{L}\p{N}])under-sixteens(?![\p{L}\p{N}])/giu, replacement: 'under sixteens' },
+  { pattern: /(?<![\p{L}\p{N}])under-seventeens(?![\p{L}\p{N}])/giu, replacement: 'under seventeens' },
+  { pattern: /(?<![\p{L}\p{N}])under-eighteens(?![\p{L}\p{N}])/giu, replacement: 'under eighteens' },
+  { pattern: /\b(twelve|fifteen|eighteen|nineteen|twenty|thirty-one|ten|\d+)-year-old\b/giu, replacement: '$1 year old' },
+  { pattern: /\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)-(one|two|three|four|five|six|seven|eight|nine)\b/giu, replacement: '$1 $2' },
+  { pattern: /(?<![\p{L}\p{N}])leapt(?![\p{L}\p{N}])/giu, replacement: 'lept' },
+  { pattern: /Four thousand,\s*three hundred and eighty days/giu, replacement: 'Four thousand three hundred and eighty days' }
 ];
 
 export function applyBackendPhonetics(text: string): string {
@@ -506,7 +594,7 @@ export function applyBackendPhonetics(text: string): string {
  */
 export function cleanSpeechText(
   rawText: string,
-  options?: { preservePauses?: boolean; insertBreaths?: boolean; useSsmlBreaks?: boolean; preservePauseTags?: boolean }
+  options?: { preservePauses?: boolean; insertBreaths?: boolean; useSsmlBreaks?: boolean; preservePauseTags?: boolean; applyPhonetics?: boolean }
 ): string {
   if (!rawText) return '';
 
@@ -515,6 +603,7 @@ export function cleanSpeechText(
   }
 
   const preservePauses = options?.preservePauses ?? true;
+  const applyPhonetics = options?.applyPhonetics ?? true;
 
   let text = typeof (rawText as any).toWellFormed === 'function'
     ? (rawText as any).toWellFormed()
@@ -635,7 +724,9 @@ export function cleanSpeechText(
   text = text.replace(/\b[Xx]-ray\b/gi, 'exray');
 
   // Backend Universal Phonetic Normalization (guarantees Spanish, Catalan & proper nouns sound natural across all TTS engines)
-  text = applyBackendPhonetics(text);
+  if (applyPhonetics) {
+    text = applyBackendPhonetics(text);
+  }
 
   // 7. SpeakSay Naturalizer Sanitization:
   // Strip emojis & decorative unicode symbols that trip up neural tokenizers
@@ -680,10 +771,11 @@ export function cleanSpeechText(
 /**
  * Sanitizes text specifically for Subtitle generation & timeline display.
  * Strips all mood/mode tags, acting cues, and pause markers so only clean spoken words remain.
+ * Does NOT apply phonetic respellings so subtitles preserve proper authentic spelling on screen.
  */
 export function cleanSubtitleText(rawText: string): string {
-  // Subtitles should not contain breath markers
-  const cleaned = cleanSpeechText(rawText, { preservePauses: false }).replace(/\s*__BREATH__\s*/g, '');
+  // Subtitles should not contain breath markers or phonetic respellings
+  const cleaned = cleanSpeechText(rawText, { preservePauses: false, applyPhonetics: false }).replace(/\s*__BREATH__\s*/g, '');
   return cleaned
     .replace(/__PARA_BREAK__/g, ' ')
     .replace(/\s*\.{3,}\s*/g, ' ')

@@ -27,10 +27,13 @@ import {
   Redo2,
   AlertCircle,
   Plus,
-  Trash2
+  Trash2,
+  Coins
 } from 'lucide-react';
 import { RibbonTab } from '../../types';
 import { useGenerationETA } from '../../hooks/useGenerationETA';
+import { AccountCreditModal } from '../Controls/AccountCreditModal';
+import { UpdateBadgeButton } from '../Controls/UpdateBadgeButton';
 
 interface HeaderProps {
   onOpenAudioImporter?: () => void;
@@ -71,6 +74,16 @@ export const Header: React.FC<HeaderProps> = () => {
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [titleInput, setTitleInput] = useState(project.metadata.title || 'Untitled Project');
   const [isAiDropdownOpen, setIsAiDropdownOpen] = useState(false);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
+  const [creditBalance, setCreditBalance] = useState(100);
+
+  useEffect(() => {
+    if (window.electronAPI?.creditsGetBalance) {
+      window.electronAPI.creditsGetBalance().then((res) => {
+        if (res?.balance !== undefined) setCreditBalance(res.balance);
+      }).catch(() => {});
+    }
+  }, []);
   const [isEnginePopoverOpen, setIsEnginePopoverOpen] = useState(false);
   const [isConnectingCdp, setIsConnectingCdp] = useState(false);
   const [customPortInput, setCustomPortInput] = useState('');
@@ -685,6 +698,20 @@ export const Header: React.FC<HeaderProps> = () => {
           )}
         </div>
 
+        {/* In-App Auto-Update Pill */}
+        <UpdateBadgeButton />
+
+        {/* CineFlow Credit & Account Badge */}
+        <button
+          onClick={() => setIsAccountModalOpen(true)}
+          className="px-2.5 py-1.5 bg-slate-900/90 hover:bg-slate-850 border border-amber-500/30 hover:border-amber-400/60 rounded-lg text-xs flex items-center gap-2 transition-all shadow-sm cursor-pointer group"
+          title="CineFlow Studio Credits & Subscription"
+        >
+          <Coins className="w-3.5 h-3.5 text-amber-400 group-hover:scale-110 transition-transform" />
+          <span className="font-bold text-amber-300 font-mono text-[11px]">{creditBalance.toLocaleString()}</span>
+          <span className="text-[10px] text-slate-400 hidden sm:inline">Credits</span>
+        </button>
+
         {/* 3. High-Visibility Production Export Button */}
         <button
           onClick={() => setExportModalOpen(true)}
@@ -693,6 +720,12 @@ export const Header: React.FC<HeaderProps> = () => {
           <Download className="w-3.5 h-3.5 stroke-[2.2]" />
           <span>Export Video</span>
         </button>
+
+        <AccountCreditModal
+          isOpen={isAccountModalOpen}
+          onClose={() => setIsAccountModalOpen(false)}
+          onCreditsUpdated={(bal) => setCreditBalance(bal)}
+        />
       </div>
     </header>
   );

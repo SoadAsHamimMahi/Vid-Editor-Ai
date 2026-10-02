@@ -121,6 +121,17 @@ const electronAPI = {
   generateElevenLabsVoicePreviews: (params) => ipcRenderer.invoke('tts:elevenlabs-design-previews', params),
   createElevenLabsDesignedVoice: (params) => ipcRenderer.invoke('tts:elevenlabs-create-voice', params),
   deleteCustomVoice: (id) => ipcRenderer.invoke('tts:delete-custom-voice', id),
+  onTTSProgress: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('tts:progress', handler);
+    return () => ipcRenderer.removeListener('tts:progress', handler);
+  },
+  onTTSAudioChunk: (callback) => {
+    const handler = (_event, chunk) => callback(chunk);
+    ipcRenderer.on('tts:audio-chunk', handler);
+    return () => ipcRenderer.removeListener('tts:audio-chunk', handler);
+  },
+  cancelTTSStream: (sessionId) => ipcRenderer.invoke('tts:cancel-stream', sessionId),
 
   // Cloud AI Video (Colab Wan 2.1 / LTX-Video)
   colabSetTunnelUrl: (url) => ipcRenderer.invoke('colab:set-tunnel-url', url),
@@ -141,6 +152,32 @@ const electronAPI = {
     const handler = (_event, data) => callback(data);
     ipcRenderer.on('mcp:project-updated', handler);
     return () => ipcRenderer.removeListener('mcp:project-updated', handler);
+  },
+
+  // CineFlow Production Auth, Licensing & Credits
+  authLogin: (credentials) => ipcRenderer.invoke('auth:login', credentials),
+  authLogout: () => ipcRenderer.invoke('auth:logout'),
+  authGetUser: () => ipcRenderer.invoke('auth:get-user'),
+  licenseActivate: (key) => ipcRenderer.invoke('license:activate', key),
+  creditsGetBalance: () => ipcRenderer.invoke('credits:get-balance'),
+  creditsReserve: (operation, amount) => ipcRenderer.invoke('credits:reserve', operation, amount),
+  creditsDeduct: (reservationId, actualCost) => ipcRenderer.invoke('credits:deduct', reservationId, actualCost),
+  creditsRelease: (reservationId, reason) => ipcRenderer.invoke('credits:release', reservationId, reason),
+  adminGrantCredits: (userId, amount, reason) => ipcRenderer.invoke('admin:grant-credits', userId, amount, reason),
+
+  // In-App Auto-Updater
+  checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+  installUpdate: (silent) => ipcRenderer.invoke('updater:install', silent),
+  onUpdateAvailable: (callback) => {
+    const handler = (_event, info) => callback(info);
+    ipcRenderer.on('updater:available', handler);
+    return () => ipcRenderer.removeListener('updater:available', handler);
+  },
+  onUpdateProgress: (callback) => {
+    const handler = (_event, progress) => callback(progress);
+    ipcRenderer.on('updater:progress', handler);
+    return () => ipcRenderer.removeListener('updater:progress', handler);
   },
 };
 

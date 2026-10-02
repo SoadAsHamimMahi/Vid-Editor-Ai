@@ -63,91 +63,117 @@ function scoreCandidateCard(cardText, sceneTag, prompt, tc) {
 }
 
 class MockHarvestEngine {
-  constructor() { this.consumedUrls = new Set(); this.consumedFailedTiles = new Set(); }
+  constructor() {
+    this.consumedUrls = new Set();
+    this.consumedFailedTiles = new Set();
+    this.harvestedContentHashes = new Set();
+    this.memoryLedger = new Map();
+  }
+
+  resolveCandidateAttributes(cand) {
+    if ((!cand.boundSceneId || !cand.boundSceneTag) && cand.tileId && this.memoryLedger.has(cand.tileId)) {
+      const entry = this.memoryLedger.get(cand.tileId);
+      return {
+        ...cand,
+        boundSceneId: cand.boundSceneId || entry.sceneId,
+        boundSceneTag: cand.boundSceneTag || entry.sceneTag,
+      };
+    }
+    return cand;
+  }
+
   matchCards(inFlightCards, candidates, mode = 'solo') {
-    const unconsumed = candidates.filter(c => !this.consumedUrls.has(c.src) && c.src && c.src.length > 5);
-    const availablePool = [...unconsumed];
-    const matched = new Map();
+    const unconsumed = candidates
+      .map(c => this.resolveCandidateAttributes(c))
+      .filter(c => !this.consumedUrls.has(c.src) && c.src && c.src.length > 5);
+
+    const candidatePairs = [];
+
     for (const card of inFlightCards) {
-      if (availablePool.length === 0) break;
       const initialSet = new Set(card.initialUrls || []);
-      let newPool = availablePool.filter(c => c.src && !initialSet.has(c.src));
-
-      // Hard exclusion: Never allow matching candidates stamped for a DIFFERENT scene
-      newPool = newPool.filter((cand) => {
-        if (cand.boundSceneId && cand.boundSceneId !== card.job.sceneId) return false;
-        if (cand.boundSceneTag && card.sceneTag && cand.boundSceneTag !== card.sceneTag) return false;
-        if (cand.tileId && card.tileId && cand.tileId !== card.tileId) return false;
-        return true;
-      });
-
-      if (newPool.length === 0) continue;
-
-      let bestIdx = -1; let highestScore = -1;
       const sceneTc = extractNormalizedTimecode(card.job.prompt || card.job.sceneId || '');
 
-      // Tier 0: Direct Match by stamped boundSceneId
-      bestIdx = newPool.findIndex((cand) => cand.boundSceneId && cand.boundSceneId === card.job.sceneId);
+      for (const cand of unconsumed) {
+        if (cand.boundSceneId && cand.boundSceneId !== card.job.sceneId) continue;
+        if (cand.boundSceneTag && card.sceneTag && cand.boundSceneTag !== card.sceneTag) continue;
+        if (cand.tileId && card.tileId && cand.tileId !== card.tileId) continue;
 
-      // Tier 1: Explicit tileId match
-      if (bestIdx === -1 && card.tileId) {
-        bestIdx = newPool.findIndex(c => c.tileId && c.tileId === card.tileId);
-      }
+        const candText = (cand.cardText || '').toLowerCase();
+        const otherKnownTags = inFlightCards
+          .filter(c => c.job.sceneId !== card.job.sceneId)
+          .map(c => c.sceneTag.toLowerCase());
+        const hasForeignRefTag = otherKnownTags.some(t => candText.includes(t) || candText.includes(`ref:${t}`));
+        if (hasForeignRefTag) continue;
 
-      // Tier 2: Semantic / tag match with Cross-Talk Competitive Bidding Guard
-      if (bestIdx === -1) {
-        for (let i = 0; i < newPool.length; i++) {
-          const cand = newPool[i];
-          const score = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
-          if (score > highestScore && score >= 100) {
-            let hasBetterCompetitor = false;
-            for (const otherCard of inFlightCards) {
-              if (otherCard.job.sceneId === card.job.sceneId) continue;
-              const otherTc = extractNormalizedTimecode(otherCard.job.prompt || otherCard.job.sceneId || '');
-              const otherScore = scoreCandidateCard(cand.cardText, otherCard.sceneTag, otherCard.job.prompt, otherTc);
-              if (otherScore > score) {
-                hasBetterCompetitor = true;
-                break;
+        const isPreExisting = initialSet.has(cand.src);
+        if (isPreExisting) {
+          const isExactBound = cand.boundSceneId && cand.boundSceneId === card.job.sceneId;
+          const isExactTile = card.tileId && cand.tileId === card.tileId;
+          if (!isExactBound && !isExactTile) continue;
+        }
+
+        let score = 0;
+        let tier = 'SEMANTIC';
+
+        if (cand.boundSceneId && cand.boundSceneId === card.job.sceneId) {
+          score = 20000;
+          tier = 'DOM_STAMP';
+        } else if (card.tileId && cand.tileId && cand.tileId === card.tileId) {
+          score = 10000;
+          tier = 'TILE_ID';
+        } else {
+          const rawScore = scoreCandidateCard(cand.cardText, card.sceneTag, card.job.prompt, sceneTc);
+          if (rawScore >= 100) {
+            score = rawScore;
+            tier = rawScore >= 1000 ? 'TAG_EXACT' : rawScore >= 600 ? 'TIMECODE' : 'SEMANTIC';
+          } else {
+            const canUseTier3 = (mode === 'solo' || inFlightCards.length === 1);
+            const elapsed = Date.now() - card.submittedAt;
+            const requiredElapsed = canUseTier3 ? 10000 : 40000;
+            if (elapsed >= requiredElapsed) {
+              if (canUseTier3 || rawScore >= 40) {
+                score = 10 + rawScore;
+                tier = 'FALLBACK';
               }
             }
-            if (!hasBetterCompetitor) {
-              highestScore = score;
-              bestIdx = i;
-            }
           }
         }
-      }
 
-      // Tier 3: Strict Fallback (Solo mode ONLY or safety timeout >= 40s)
-      const canUseTier3 = (mode === 'solo' || inFlightCards.length === 1);
-      const elapsed = Date.now() - card.submittedAt;
-      const requiredElapsed = canUseTier3 ? 10000 : 40000;
-
-      if (bestIdx === -1 && (canUseTier3 || elapsed >= requiredElapsed)) {
-        if (elapsed >= requiredElapsed) {
-          const otherKnownTags = inFlightCards
-            .filter(c => c.job.sceneId !== card.job.sceneId)
-            .map(c => c.sceneTag.toLowerCase());
-          const firstPoolCard = newPool[0];
-          const firstPoolText = (firstPoolCard?.cardText || '').toLowerCase();
-          const hasForeignRefTag = otherKnownTags.some(t => firstPoolText.includes(t) || firstPoolText.includes(`ref:${t}`));
-          const foreignBound = firstPoolCard?.boundSceneId && firstPoolCard?.boundSceneId !== card.job.sceneId;
-          if (!hasForeignRefTag && !foreignBound && firstPoolCard) {
-            bestIdx = newPool.indexOf(firstPoolCard);
-          }
+        if (score > 0) {
+          candidatePairs.push({ card, cand, score, tier });
         }
       }
-
-      if (bestIdx === -1) continue;
-      const matchedCand = newPool[bestIdx];
-      const poolIdx = availablePool.indexOf(matchedCand);
-      if (poolIdx !== -1) availablePool.splice(poolIdx, 1);
-      this.consumedUrls.add(matchedCand.src);
-      matched.set(card.job.sceneId, matchedCand);
     }
+
+    // Global Bipartite Confidence Sort: Highest score pair wins first
+    candidatePairs.sort((a, b) => b.score - a.score);
+
+    const matched = new Map();
+    const matchedUrls = new Set();
+
+    for (const pair of candidatePairs) {
+      if (matched.has(pair.card.job.sceneId)) continue;
+      if (matchedUrls.has(pair.cand.src)) continue;
+
+      if (pair.cand.sha256) {
+        if (this.harvestedContentHashes.has(pair.cand.sha256)) {
+          continue; // rejected duplicate
+        }
+        this.harvestedContentHashes.add(pair.cand.sha256);
+      }
+      if (pair.cand.byteLength !== undefined && pair.cand.byteLength < 500) {
+        continue; // rejected small/corrupt payload
+      }
+
+      matched.set(pair.card.job.sceneId, pair.cand);
+      matchedUrls.add(pair.cand.src);
+      this.consumedUrls.add(pair.cand.src);
+    }
+
     const unmatched = inFlightCards.filter(c => !matched.has(c.job.sceneId)).map(c => c.job.sceneId);
     return { matched, unmatched };
   }
+
   detectFailedCards(candidates) { return candidates.filter(c => c.failed && !this.consumedFailedTiles.has(c.tileId)); }
   markFailedTile(tileId) { this.consumedFailedTiles.add(tileId); }
 }
@@ -655,6 +681,159 @@ section('TEST 23: Coordinate Fallback Suppressed in Parallel Mode (No Premature 
   const { matched, unmatched } = engine.matchCards(inFlightCards, canvasCards, 'parallel');
   assertEqual(matched.size, 0, 'No cards prematurely matched via Tier 3 coordinate fallback in parallel mode');
   assertEqual(unmatched.length, 2, 'Both scenes safely remain in-flight waiting for real results');
+}
+
+// TEST 24: Global Bipartite Priority Matching
+section('TEST 24: Global Bipartite Priority Match (Exact Tag Wins Over Earlier Semantic)');
+{
+  const engine = new MockHarvestEngine();
+  // Scene A is listed FIRST in array with a prompt that weakly overlaps with Card 2
+  // Scene B is listed SECOND in array and has an EXACT REF TAG match with Card 2
+  const sceneA = makeCard('scene-early-01', 'A dark moody neon cyber street with rain reflections');
+  const sceneB = makeCard('scene-later-02', 'A peaceful sunny mountain lake');
+  
+  // Card 2 was generated for Scene B and has Scene B's tag
+  const card2 = makeCanvasCard(sceneB.sceneTag, sceneB.job.prompt, {
+    src: 'https://flow.google.com/mountain_lake.png',
+  });
+  // Card 1 was generated for Scene A but has not finished rendering yet (not on canvas)
+
+  const inFlight = [sceneA, sceneB];
+  const canvasCards = [card2];
+
+  const { matched, unmatched } = engine.matchCards(inFlight, canvasCards, 'parallel');
+  assertEqual(matched.has('scene-early-01'), false, 'Scene A did NOT steal Card 2 despite being first in flight');
+  assertEqual(matched.get('scene-later-02')?.src, 'https://flow.google.com/mountain_lake.png', 'Scene B locked in Card 2 via higher bipartite priority');
+}
+
+// TEST 25: React Virtualization Recovery via In-Memory Ledger
+section('TEST 25: In-Memory Ledger Restores Stripped DOM Attributes');
+{
+  const engine = new MockHarvestEngine();
+  const scene = makeCard('scene-virt-01', 'Aerial drone view of coastline');
+  const tileId = 'vg_tile_virt_12345';
+  scene.tileId = tileId;
+
+  // Register in memory ledger (as happens during initial spawn stamping)
+  engine.memoryLedger.set(tileId, {
+    sceneId: 'scene-virt-01',
+    sceneTag: scene.sceneTag,
+    prompt: scene.job.prompt,
+    timestamp: Date.now(),
+  });
+
+  // Candidate card has lost boundSceneId and boundSceneTag due to React virtualization unmount
+  const virtualizedCard = makeCanvasCard(scene.sceneTag, scene.job.prompt, {
+    tileId,
+    boundSceneId: '', // Stripped by React
+    boundSceneTag: '', // Stripped by React
+    src: 'https://flow.google.com/coastline.png',
+  });
+
+  const { matched } = engine.matchCards([scene], [virtualizedCard], 'parallel');
+  assertEqual(matched.get('scene-virt-01')?.src, 'https://flow.google.com/coastline.png', 'Restored from in-memory ledger and matched correctly');
+}
+
+// TEST 26: SHA-256 Content Deduplication Guard
+section('TEST 26: SHA-256 Deduplication Guard Prevents Duplicate Media Assignment');
+{
+  const engine = new MockHarvestEngine();
+  const scene1 = makeCard('scene-hash-01', 'Golden hour wheat field');
+  const scene2 = makeCard('scene-hash-02', 'Golden hour corn field');
+
+  const sha256Identical = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+  const card1 = makeCanvasCard(scene1.sceneTag, scene1.job.prompt, {
+    src: 'https://flow.google.com/field1.png',
+  });
+  card1.sha256 = sha256Identical;
+
+  const card2 = makeCanvasCard(scene2.sceneTag, scene2.job.prompt, {
+    src: 'https://flow.google.com/field2.png',
+  });
+  card2.sha256 = sha256Identical; // Duplicate payload!
+
+  // Scene 1 harvests first
+  const res1 = engine.matchCards([scene1], [card1], 'solo');
+  assertEqual(res1.matched.get('scene-hash-01')?.src, 'https://flow.google.com/field1.png', 'Scene 1 harvests successfully');
+
+  // Scene 2 encounters identical content hash
+  const res2 = engine.matchCards([scene2], [card2], 'solo');
+  assertEqual(res2.matched.has('scene-hash-02'), false, 'Scene 2 rejects duplicate hash image');
+  assertEqual(res2.unmatched.includes('scene-hash-02'), true, 'Scene 2 marked unmatched for retry');
+}
+
+// TEST 27: Payload Integrity Gatekeeper
+section('TEST 27: Payload Integrity Gatekeeper (Rejects < 500 byte payloads)');
+{
+  const engine = new MockHarvestEngine();
+  const scene = makeCard('scene-size-01', 'Modern architectural home');
+
+  const corruptCard = makeCanvasCard(scene.sceneTag, scene.job.prompt, {
+    src: 'https://flow.google.com/corrupt.png',
+  });
+  corruptCard.byteLength = 120; // Corrupt/empty payload under 500 bytes
+
+  const { matched, unmatched } = engine.matchCards([scene], [corruptCard], 'solo');
+  assertEqual(matched.size, 0, 'Corrupt card (< 500 bytes) rejected');
+  assertEqual(unmatched.includes('scene-size-01'), true, 'Scene remains unmatched');
+}
+
+// TEST 28: Tag-Aware DOM Stamping Priority
+section('TEST 28: Tag-Aware Stamping Logic');
+{
+  const sceneTag = 'SCN_1234_A1B2';
+  const unkCards = [
+    { text: 'A busy marketplace in Istanbul', id: 'tile-unk-1' },
+    { text: `[ref:${sceneTag.toLowerCase()}] Beautiful macro photography of rose petals`, id: 'tile-unk-2' },
+    { text: 'A snow storm in Alaska', id: 'tile-unk-3' },
+  ];
+
+  // Simulating tag-aware search
+  const tagLower = sceneTag.toLowerCase();
+  const tagMatch = unkCards.find(t => t.text.toLowerCase().includes(tagLower));
+  assertEqual(tagMatch?.id, 'tile-unk-2', 'Tag-aware picker correctly selects exact matching tile');
+}
+
+// TEST 29: Regeneration Safety (Old Card on Canvas Must NOT Mislead New Regeneration)
+section('TEST 29: Regeneration Safety (Old Canvas Card Cannot Mislead New Generation)');
+{
+  const engine = new MockHarvestEngine();
+  const sceneId = 'scene-regen-01';
+  const prompt = 'Epic drone shot of snow-capped mountains';
+  const oldUrl = 'https://flow.google.com/old_mountain_run1.png';
+  const newUrl = 'https://flow.google.com/new_mountain_run2.png';
+
+  // Card was generated previously: oldUrl is on canvas
+  const oldTileId = 'vg_tile_SCN_0001_1700000000000';
+  const oldCard = makeCanvasCard('SCN_0001', prompt, {
+    src: oldUrl,
+    tileId: oldTileId,
+    boundSceneId: sceneId,
+  });
+
+  // User hits Regenerate:
+  // 1. Initial snapshot captures oldUrl as pre-existing
+  // 2. A new tile ID with new timestamp is stamped for the new in-flight job
+  const newTileId = 'vg_tile_SCN_0001_1700000050000';
+  const inFlightRegen = makeCard(sceneId, prompt, {
+    initialUrls: [oldUrl],
+    tileId: newTileId,
+  });
+
+  // Flow canvas now has BOTH the old card and the newly completed card
+  const newCard = makeCanvasCard('SCN_0001', prompt, {
+    src: newUrl,
+    tileId: newTileId,
+    boundSceneId: sceneId,
+  });
+
+  const canvasCards = [oldCard, newCard];
+
+  const { matched, unmatched } = engine.matchCards([inFlightRegen], canvasCards, 'solo');
+  assertEqual(matched.size, 1, 'Exactly 1 card matched for regeneration');
+  assertEqual(matched.get(sceneId)?.src, newUrl, 'Regeneration accurately matched the NEW card, NOT the old one');
+  assertEqual(unmatched.length, 0, 'No unmatched scenes');
 }
 
 // Summary

@@ -250,11 +250,12 @@ export function detectEmotionFromText(text: string, fallbackEmotion?: string): s
  */
 export function cleanSpeechText(
   rawText: string,
-  options?: { preservePauses?: boolean; useSsmlBreaks?: boolean; preservePauseTags?: boolean }
+  options?: { preservePauses?: boolean; useSsmlBreaks?: boolean; preservePauseTags?: boolean; applyPhonetics?: boolean }
 ): string {
   if (!rawText) return '';
 
   const preservePauses = options?.preservePauses ?? true;
+  const applyPhonetics = options?.applyPhonetics ?? true;
 
   let text = typeof (rawText as any).toWellFormed === 'function'
     ? (rawText as any).toWellFormed()
@@ -379,16 +380,20 @@ export function cleanSpeechText(
     .trim();
 
   // Universal Phonetic Normalization (guarantees Spanish, Catalan & proper nouns sound natural across all TTS engines)
-  text = applyFrontendPhonetics(text);
+  if (applyPhonetics) {
+    text = applyFrontendPhonetics(text);
+  }
 
   return text;
 }
 
 /**
  * Sanitizes text specifically for Subtitle generation & timeline display.
+ * Strips all mood/mode tags, acting cues, and pause markers so only clean spoken words remain.
+ * Does NOT apply phonetic respellings so subtitles preserve proper authentic spelling on screen.
  */
 export function cleanSubtitleText(rawText: string): string {
-  const cleaned = cleanSpeechText(rawText, { preservePauses: false });
+  const cleaned = cleanSpeechText(rawText, { preservePauses: false, applyPhonetics: false });
   return cleaned
     .replace(/\s*\.{3,}\s*/g, ' ')
     .replace(/[ \t]+/g, ' ')
@@ -548,8 +553,10 @@ export const KNOWN_PHONETIC_ENTRIES: PhoneticRuleEntry[] = [
   { pattern: /(?<![\p{L}\p{N}])El\s+Mudo(?![\p{L}\p{N}])/giu, replacement: 'El Moodo', label: 'El Mudo', reason: 'Messi childhood nickname /el ˈmu.ðo/' },
 
   // 14. Ballon d'Or, Copa América, Chile
-  { pattern: /(?<![\p{L}\p{N}])Ba\s+Lawn\s+Door(?![\p{L}\p{N}])/giu, replacement: 'Ballon Dor', label: 'Ba Lawn Door', reason: 'Ballon d\'Or corruption fix' },
-  { pattern: /(?<![\p{L}\p{N}])Ballon\s+d['’]Or(?![\p{L}\p{N}])/giu, replacement: 'Ballon Dor', label: 'Ballon d\'Or', reason: 'French award /ba.lɔ̃ dɔʁ/' },
+  { pattern: /(?<![\p{L}\p{N}])Ba\s+Lawn\s+Door(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor', label: 'Ba Lawn Door', reason: 'Ballon d\'Or corruption fix' },
+  { pattern: /(?<![\p{L}\p{N}])Ballon\s+d['’]Or(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor', label: 'Ballon d\'Or', reason: 'French award /ba.lɔ̃ dɔʁ/' },
+  { pattern: /(?<![\p{L}\p{N}])Ballon\s+Dor(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor', label: 'Ballon Dor', reason: 'French award /ba.lɔ̃ dɔʁ/' },
+  { pattern: /(?<![\p{L}\p{N}])Bah-lon\s+Dor(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor', label: 'Bah-lon Dor', reason: 'Seamless unhyphenated delivery' },
   { pattern: /(?<![\p{L}\p{N}])Copa\s+AMA\s+RICA(?![\p{L}\p{N}])/giu, replacement: 'Copa Amehreeka', label: 'Copa AMA RICA', reason: 'Copa América corruption fix' },
   { pattern: /(?<![\p{L}\p{N}])Copa\s+Am[eé]rica(?![\p{L}\p{N}])/giu, replacement: 'Copa Amehreeka', label: 'Copa América', reason: 'South American championship' },
   { pattern: /(?<![\p{L}\p{N}])Chylon\s+Penalties(?![\p{L}\p{N}])/giu, replacement: 'Cheelay on penalties', label: 'Chylon Penalties', reason: 'Chile on penalties corruption fix' },
@@ -650,7 +657,93 @@ export const KNOWN_PHONETIC_ENTRIES: PhoneticRuleEntry[] = [
   { pattern: /(?<![\p{L}\p{N}])F[aá]tima(?![\p{L}\p{N}])/giu, replacement: 'Fatima', label: 'Fátima', reason: 'Grandmother name pronunciation' },
   { pattern: /(?<![\p{L}\p{N}])Ferran\s+Torres(?![\p{L}\p{N}])/giu, replacement: 'Ferran Torres', label: 'Ferran Torres', reason: 'Spanish player name' },
   { pattern: /(?<![\p{L}\p{N}])Xavi(?![\p{L}\p{N}])/giu, replacement: 'Shahvee', label: 'Xavi', reason: 'Catalan name pronunciation' },
-  { pattern: /(?<![\p{L}\p{N}])Iniesta(?![\p{L}\p{N}])/giu, replacement: 'Eeneestah', label: 'Iniesta', reason: 'Spanish name pronunciation' }
+  { pattern: /(?<![\p{L}\p{N}])Iniesta(?![\p{L}\p{N}])/giu, replacement: 'Eeneestah', label: 'Iniesta', reason: 'Spanish name pronunciation' },
+
+  // 21. Cristiano Ronaldo & Portuguese / Spanish / French / Arabic Proper Names
+  { pattern: /(?<![\p{L}\p{N}])Funchal(?![\p{L}\p{N}])/giu, replacement: 'Foonshahl', label: 'Funchal', reason: 'Madeira capital city pronunciation /fũˈʃaɫ/' },
+  { pattern: /(?<![\p{L}\p{N}])Jos[eé]\s+Dinis(?![\p{L}\p{N}])/giu, replacement: 'Zhozeh Deeneesh', label: 'José Dinis', reason: 'Father name Portuguese pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Jos[eé]\s+Dinas(?![\p{L}\p{N}])/giu, replacement: 'Zhozeh Deeneesh', label: 'José Dinas', reason: 'Spoken variant pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Zho-zeh\s+Dee-neesh(?![\p{L}\p{N}])/giu, replacement: 'Zhozeh Deeneesh', label: 'Zho-zeh Dee-neesh', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Dinis(?![\p{L}\p{N}])/giu, replacement: 'Deeneesh', label: 'Dinis', reason: 'Surname Portuguese pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Santo\s+Ant[oó]nio(?![\p{L}\p{N}])/giu, replacement: 'Sahntoo Antawneeoo', label: 'Santo António', reason: 'Funchal neighborhood Portuguese pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Santo\s+Ant\s+Naio(?![\p{L}\p{N}])/giu, replacement: 'Sahntoo Antawneeoo', label: 'Santo Ant Naio', reason: 'Spoken variant pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Santo\s+Antinio(?![\p{L}\p{N}])/giu, replacement: 'Sahntoo Antawneeoo', label: 'Santo Antinio', reason: 'Spoken variant pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Sahn-too\s+An-taw-nee-oo(?![\p{L}\p{N}])/giu, replacement: 'Sahntoo Antawneeoo', label: 'Sahn-too An-taw-nee-oo', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Ant[oó]nio(?![\p{L}\p{N}])/giu, replacement: 'Antawneeoo', label: 'António', reason: 'Name Portuguese pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Maria\s+Dolores(?![\p{L}\p{N}])/giu, replacement: 'Maria Dolohresh', label: 'Maria Dolores', reason: 'Mother full name Portuguese pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Mah-ree-ah\s+Doh-loh-resh(?![\p{L}\p{N}])/giu, replacement: 'Maria Dolohresh', label: 'Mah-ree-ah Doh-loh-resh', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Dolores(?![\p{L}\p{N}])/giu, replacement: 'Dolohresh', label: 'Dolores', reason: 'Mother name Portuguese pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Doh-loh-resh(?![\p{L}\p{N}])/giu, replacement: 'Dolohresh', label: 'Doh-loh-resh', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Madeira(?![\p{L}\p{N}])/giu, replacement: 'Mahdayra', label: 'Madeira', reason: 'Portuguese island pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Mah-DAY-rah(?![\p{L}\p{N}])/giu, replacement: 'Mahdayra', label: 'Mah-DAY-rah', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Andorinha(?![\p{L}\p{N}])/giu, replacement: 'Andoreenya', label: 'Andorinha', reason: 'Childhood club palatal nasal nh' },
+  { pattern: /(?<![\p{L}\p{N}])Andorin[- ]Ha(?![\p{L}\p{N}])/giu, replacement: 'Andoreenya', label: 'Andorin-Ha', reason: 'Spoken variant pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])An-doh-reen-yah(?![\p{L}\p{N}])/giu, replacement: 'Andoreenya', label: 'An-doh-reen-yah', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Abelhinha(?![\p{L}\p{N}])/giu, replacement: 'Abelyeenya', label: 'Abelhinha', reason: 'Little Bee nickname palatal lh and nh' },
+  { pattern: /(?<![\p{L}\p{N}])Abelingha(?![\p{L}\p{N}])/giu, replacement: 'Abelyeenya', label: 'Abelingha', reason: 'Spoken variant pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Ah-bel-yeen-yah(?![\p{L}\p{N}])/giu, replacement: 'Abelyeenya', label: 'Ah-bel-yeen-yah', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Chor[aã]o(?![\p{L}\p{N}])/giu, replacement: 'Shorowng', label: 'Chorão', reason: 'Cry-baby nickname Portuguese nasal diphthong ão' },
+  { pattern: /(?<![\p{L}\p{N}])Chorau(?![\p{L}\p{N}])/giu, replacement: 'Shorowng', label: 'Chorau', reason: 'Spoken variant pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Sho-rowng(?![\p{L}\p{N}])/giu, replacement: 'Shorowng', label: 'Sho-rowng', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Nacional(?![\p{L}\p{N}])/giu, replacement: 'Nahseeohnahl', label: 'Nacional', reason: 'CD Nacional Madeira club name' },
+  { pattern: /(?<![\p{L}\p{N}])Nah-see-oh-nahl(?![\p{L}\p{N}])/giu, replacement: 'Nahseeohnahl', label: 'Nah-see-oh-nahl', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])CD\s+Nacional(?![\p{L}\p{N}])/giu, replacement: 'C D Nahseeohnahl', label: 'CD Nacional', reason: 'Club acronym pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Tachycardia(?![\p{L}\p{N}])/giu, replacement: 'Tackeecardya', label: 'Tachycardia', reason: 'Medical heart condition pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Tack-ee-kar-dee-uh(?![\p{L}\p{N}])/giu, replacement: 'Tackeecardya', label: 'Tack-ee-kar-dee-uh', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])John\s+O['’]?Shea(?![\p{L}\p{N}])/giu, replacement: 'John Ohshay', label: "John O'Shea", reason: 'Irish name pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])John\s+Oh-Shay(?![\p{L}\p{N}])/giu, replacement: 'John Ohshay', label: 'John Oh-Shay', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])John\s+Oshia(?![\p{L}\p{N}])/giu, replacement: 'John Ohshay', label: 'John Oshia', reason: 'Spoken variant pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])O['’]Shea(?![\p{L}\p{N}])/giu, replacement: 'Ohshay', label: "O'Shea", reason: 'Irish name pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Oshia(?![\p{L}\p{N}])/giu, replacement: 'Ohshay', label: 'Oshia', reason: 'Spoken variant pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Oh-Shay(?![\p{L}\p{N}])/giu, replacement: 'Ohshay', label: 'Oh-Shay', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Ballon\s+d['’]?Or(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor', label: "Ballon d'Or", reason: 'French football award pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Ballon\s+Dor(?![\p{L}\p{N}])/giu, replacement: 'Bahlon Dor', label: 'Ballon Dor', reason: 'Spoken variant pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Eric\s+Cantona(?![\p{L}\p{N}])/giu, replacement: 'Eric Kahntonah', label: 'Eric Cantona', reason: 'French football legend name' },
+  { pattern: /(?<![\p{L}\p{N}])Eric\s+Kahn-toh-nah(?![\p{L}\p{N}])/giu, replacement: 'Eric Kahntonah', label: 'Eric Kahn-toh-nah', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Cantona(?![\p{L}\p{N}])/giu, replacement: 'Kahntonah', label: 'Cantona', reason: 'French surname articulation' },
+  { pattern: /(?<![\p{L}\p{N}])Kahn-toh-nah(?![\p{L}\p{N}])/giu, replacement: 'Kahntonah', label: 'Kahn-toh-nah', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Juventus(?![\p{L}\p{N}])/giu, replacement: 'Yooventoos', label: 'Juventus', reason: 'Italian club pronunciation with soft glide J' },
+  { pattern: /(?<![\p{L}\p{N}])Yoo-ven-toos(?![\p{L}\p{N}])/giu, replacement: 'Yooventoos', label: 'Yoo-ven-toos', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Bernab[eé]u(?![\p{L}\p{N}])/giu, replacement: 'Bernabayoo', label: 'Bernabéu', reason: 'Real Madrid stadium Spanish pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Ber-nah-bay-oo(?![\p{L}\p{N}])/giu, replacement: 'Bernabayoo', label: 'Ber-nah-bay-oo', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])La\s+D[eé]cima(?![\p{L}\p{N}])/giu, replacement: 'Lah Dehseemah', label: 'La Décima', reason: '10th European Cup Spanish pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Lah\s+Deh-see-mah(?![\p{L}\p{N}])/giu, replacement: 'Lah Dehseemah', label: 'Lah Deh-see-mah', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])[EÉ]der(?![\p{L}\p{N}])/giu, replacement: 'Ehdair', label: 'Éder', reason: 'Euro 2016 hero Portuguese pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])named\s+Ader(?![\p{L}\p{N}])/giu, replacement: 'named Ehdair', label: 'named Ader', reason: 'Spoken variant pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Eh-dair(?![\p{L}\p{N}])/giu, replacement: 'Ehdair', label: 'Eh-dair', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Georgina(?![\p{L}\p{N}])/giu, replacement: 'Horheenah', label: 'Georgina', reason: 'Partner name Spanish pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Hor-hee-nah(?![\p{L}\p{N}])/giu, replacement: 'Horheenah', label: 'Hor-hee-nah', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Anfield(?![\p{L}\p{N}])/giu, replacement: 'Ahnfield', label: 'Anfield', reason: 'Stadium name soft broad acoustic delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Ahn-field(?![\p{L}\p{N}])/giu, replacement: 'Ahnfield', label: 'Ahn-field', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Qatar(?![\p{L}\p{N}])/giu, replacement: 'Kuhtahr', label: 'Qatar', reason: 'Standard international broadcast pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Kuh-tahr(?![\p{L}\p{N}])/giu, replacement: 'Kuhtahr', label: 'Kuh-tahr', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Doha(?![\p{L}\p{N}])/giu, replacement: 'Dohha', label: 'Doha', reason: 'Seamless unified delivery /doʊhə/' },
+  { pattern: /(?<![\p{L}\p{N}])Al\s+Nassr(?![\p{L}\p{N}])/giu, replacement: 'Al Nahsur', label: 'Al Nassr', reason: 'Saudi football club Arabic pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Al\s+Nah-sur(?![\p{L}\p{N}])/giu, replacement: 'Al Nahsur', label: 'Al Nah-sur', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Eus[eé]bio(?![\p{L}\p{N}])/giu, replacement: 'Ayoozehbyoo', label: 'Eusébio', reason: 'Portuguese legend name' },
+  { pattern: /(?<![\p{L}\p{N}])Eh-oo-zeh-byoo(?![\p{L}\p{N}])/giu, replacement: 'Ayoozehbyoo', label: 'Eh-oo-zeh-byoo', reason: 'Seamless unified delivery' },
+  { pattern: /(?<![\p{L}\p{N}])Buenos\s+Aires(?![\p{L}\p{N}])/giu, replacement: 'Bwenos Eyres', label: 'Buenos Aires', reason: 'Argentine capital Spanish pronunciation' },
+  { pattern: /(?<![\p{L}\p{N}])Bweh-nos\s+Eye-res(?![\p{L}\p{N}])/giu, replacement: 'Bwenos Eyres', label: 'Bweh-nos Eye-res', reason: 'Seamless unified delivery' },
+  // Compound and Hyphen Stutter Smoothers for Marcus
+  { pattern: /(?<![\p{L}\p{N}])Cry-Baby(?![\p{L}\p{N}])/gu, replacement: 'Crybaby', label: 'Cry-Baby', reason: 'Prevents hyphen pause stutter' },
+  { pattern: /(?<![\p{L}\p{N}])cry-baby(?![\p{L}\p{N}])/gu, replacement: 'crybaby', label: 'cry-baby', reason: 'Prevents hyphen pause stutter' },
+  { pattern: /(?<![\p{L}\p{N}])tin-roofed(?![\p{L}\p{N}])/giu, replacement: 'tin roofed', label: 'tin-roofed', reason: 'Prevents hyphen pause stutter' },
+  { pattern: /(?<![\p{L}\p{N}])step-overs(?![\p{L}\p{N}])/giu, replacement: 'step overs', label: 'step-overs', reason: 'Prevents hyphen pause stutter' },
+  { pattern: /(?<![\p{L}\p{N}])step-over(?![\p{L}\p{N}])/giu, replacement: 'step over', label: 'step-over', reason: 'Prevents hyphen pause stutter' },
+  { pattern: /(?<![\p{L}\p{N}])show-off(?![\p{L}\p{N}])/giu, replacement: 'showoff', label: 'show-off', reason: 'Prevents hyphen pause stutter' },
+  { pattern: /(?<![\p{L}\p{N}])reed-like(?![\p{L}\p{N}])/giu, replacement: 'reedlike', label: 'reed-like', reason: 'Prevents hyphen pause stutter' },
+  { pattern: /(?<![\p{L}\p{N}])Sit-ups(?![\p{L}\p{N}])/giu, replacement: 'Situps', label: 'Sit-ups', reason: 'Prevents hyphen pause stutter' },
+  { pattern: /(?<![\p{L}\p{N}])green-and-white(?![\p{L}\p{N}])/giu, replacement: 'green and white', label: 'green-and-white', reason: 'Prevents multi-hyphen stutter' },
+  { pattern: /(?<![\p{L}\p{N}])brand-new(?![\p{L}\p{N}])/giu, replacement: 'brand new', label: 'brand-new', reason: 'Prevents hyphen pause stutter' },
+  { pattern: /(?<![\p{L}\p{N}])quarter-final(?![\p{L}\p{N}])/giu, replacement: 'quarterfinal', label: 'quarter-final', reason: 'Prevents hyphen pause stutter' },
+  { pattern: /(?<![\p{L}\p{N}])goalscorer(?![\p{L}\p{N}])/giu, replacement: 'goal scorer', label: 'goalscorer', reason: 'Prevents rushed compound articulation' },
+  { pattern: /(?<![\p{L}\p{N}])under-sixteens(?![\p{L}\p{N}])/giu, replacement: 'under sixteens', label: 'under-sixteens', reason: 'Prevents hyphen stutter in age brackets' },
+  { pattern: /(?<![\p{L}\p{N}])under-seventeens(?![\p{L}\p{N}])/giu, replacement: 'under seventeens', label: 'under-seventeens', reason: 'Prevents hyphen stutter in age brackets' },
+  { pattern: /(?<![\p{L}\p{N}])under-eighteens(?![\p{L}\p{N}])/giu, replacement: 'under eighteens', label: 'under-eighteens', reason: 'Prevents hyphen stutter in age brackets' },
+  { pattern: /\b(twelve|fifteen|eighteen|nineteen|twenty|thirty-one|ten|\d+)-year-old\b/giu, replacement: '$1 year old', label: 'hyphenated-year-old', reason: 'Prevents multi-hyphen stutter in age phrases' },
+  { pattern: /\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)-(one|two|three|four|five|six|seven|eight|nine)\b/giu, replacement: '$1 $2', label: 'compound-number-hyphen', reason: 'Smooths compound numbers into seamless speech' },
+  { pattern: /(?<![\p{L}\p{N}])leapt(?![\p{L}\p{N}])/giu, replacement: 'lept', label: 'leapt', reason: 'Prevents lipped mispronunciation' },
+  { pattern: /Four thousand,\s*three hundred and eighty days/giu, replacement: 'Four thousand three hundred and eighty days', label: 'comma-pause-removal', reason: 'Spoken in single continuous breath' }
 ];
 
 export interface PhoneticDetectionResult {

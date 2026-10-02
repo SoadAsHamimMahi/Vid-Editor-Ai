@@ -1,0 +1,17 @@
+{
+  "version": "1.2.2",
+  "releaseDate": "2026-10-03",
+  "title": "CineFlow Studio v1.2.2 (Kokoro AI & In-App Auto-Updater)",
+  "releaseNotes": [
+    "Prominent in-app auto-update button on Home Dashboard, Voice Studio, and Editor",
+    "Bundled all 61 Kokoro AI voice vectors (af_heart, am_adam, etc.) directly on disk",
+    "Self-healing voice vector resolver with zero-config local failover",
+    "Fixed external Python worker path resolution in packaged release (resolves Errno 2)",
+    "Unpacked Marcus (F5-TTS) voice clone reference audio directly to filesystem",
+    "Optimized multi-track video timeline and hardware-accelerated rendering"
+  ],
+  "downloadUrl": "http://localhost:3000/downloads/CineFlow-Studio-Setup-1.2.0.exe",
+  "fileName": "CineFlow-Studio-Setup-1.2.0.exe",
+  "sizeBytes": 443029067,
+  "sha256": "cdd44dd89c3c8e0e638f6b75a01a32f06610f3705fee2a977b2b8d8ad08b0d22"
+}

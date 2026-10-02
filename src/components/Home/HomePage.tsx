@@ -36,8 +36,11 @@ import {
   Loader2,
   CheckCircle2,
   AlertCircle,
-  X
+  X,
+  Coins
 } from 'lucide-react';
+import { AccountCreditModal } from '../Controls/AccountCreditModal';
+import { UpdateBadgeButton } from '../Controls/UpdateBadgeButton';
 
 export const HomePage: React.FC = () => {
   const { 
@@ -80,6 +83,23 @@ export const HomePage: React.FC = () => {
   const [queuingProjectIds, setQueuingProjectIds] = useState<Set<string>>(new Set());
   const [isBatchQueuingAll, setIsBatchQueuingAll] = useState(false);
   const [batchQueueNotice, setBatchQueueNotice] = useState<string | null>(null);
+
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
+  const [creditBalance, setCreditBalance] = useState(100);
+  const [authUser, setAuthUser] = useState<any>(null);
+
+  useEffect(() => {
+    if (window.electronAPI?.authGetUser) {
+      window.electronAPI.authGetUser().then((res) => {
+        if (res?.user) setAuthUser(res.user);
+      }).catch(() => {});
+    }
+    if (window.electronAPI?.creditsGetBalance) {
+      window.electronAPI.creditsGetBalance().then((res) => {
+        if (res?.balance !== undefined) setCreditBalance(res.balance);
+      }).catch(() => {});
+    }
+  }, []);
 
   const handleQueueProjectVisuals = async (projectId: string) => {
     try {
@@ -226,21 +246,37 @@ export const HomePage: React.FC = () => {
           </div>
 
           {/* Studio Workspace Status Card */}
-          <div className="p-3 rounded-xl bg-surface-card border border-border-subtle relative overflow-hidden shadow-xs">
+          <div 
+            onClick={() => setIsAccountModalOpen(true)}
+            className="p-3 rounded-xl bg-gradient-to-br from-indigo-950/40 via-surface-card to-surface-card border border-indigo-500/30 hover:border-indigo-400/60 relative overflow-hidden shadow-xs cursor-pointer group transition-all"
+            title="Click to view CineFlow Account, Credits & Subscriptions"
+          >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <div className="w-6 h-6 rounded-full bg-indigo-500/20 border border-indigo-400/40 flex items-center justify-center text-[10px] font-bold text-indigo-300">
-                  CF
+                  {authUser?.role === 'SUPER_ADMIN' ? '👑' : authUser?.role === 'ADMIN' ? '🛡️' : 'CF'}
                 </div>
-                <span className="text-xs font-semibold text-slate-200">CineFlow Workspace</span>
+                <span className="text-xs font-semibold text-slate-200 truncate max-w-[100px]">
+                  {authUser?.name || 'CineFlow Studio'}
+                </span>
               </div>
-              <span className="text-[9px] font-mono bg-emerald-500/15 text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30 font-bold">
-                PRO ACTIVE
+              <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border font-bold ${
+                authUser?.role === 'SUPER_ADMIN'
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                  : authUser?.role === 'ADMIN'
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                  : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+              }`}>
+                {authUser?.role || 'PRO ACTIVE'}
               </span>
             </div>
-            <p className="text-[10px] text-slate-400 mt-1.5 leading-tight">
-              Offline AI engine ready • All features unlocked locally
-            </p>
+            <div className="flex items-center justify-between mt-2 pt-1.5 border-t border-slate-800 text-[11px]">
+              <span className="text-amber-300 font-bold flex items-center gap-1 font-mono">
+                <Coins className="w-3 h-3 text-amber-400" />
+                <span>{creditBalance.toLocaleString()} Credits</span>
+              </span>
+              <span className="text-[10px] text-cyan-400 group-hover:underline">Manage →</span>
+            </div>
           </div>
 
           {/* Primary Navigation Tabs */}
@@ -369,6 +405,9 @@ export const HomePage: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-2.5">
+            {/* Auto-Updater Pill Button */}
+            <UpdateBadgeButton />
+
             {/* Autonomous Multi-Agent AI Studio */}
             <button
               onClick={() => setIsAgenticStudioModalOpen(true)}
@@ -380,6 +419,17 @@ export const HomePage: React.FC = () => {
               <span className="text-[9px] font-extrabold px-1.5 py-0.2 rounded bg-cyan-400/20 text-cyan-200 border border-cyan-400/40">
                 AI CREW
               </span>
+            </button>
+
+            {/* CineFlow Credit & Account Badge */}
+            <button
+              onClick={() => setIsAccountModalOpen(true)}
+              className="flex items-center gap-2 px-3 py-1.5 bg-slate-900/90 hover:bg-slate-850 border border-amber-500/40 hover:border-amber-400 text-amber-300 rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer active:scale-98"
+              title="CineFlow Studio Credits & Subscription"
+            >
+              <Coins className="w-3.5 h-3.5 text-amber-400" />
+              <span className="font-mono">{creditBalance.toLocaleString()}</span>
+              <span className="text-[10px] text-slate-400 font-normal">Credits</span>
             </button>
 
             {/* Quick Refresh Projects */}
@@ -1157,6 +1207,12 @@ export const HomePage: React.FC = () => {
           </div>
         </div>
       )}
+      {/* CineFlow Account & Credits Modal */}
+      <AccountCreditModal
+        isOpen={isAccountModalOpen}
+        onClose={() => setIsAccountModalOpen(false)}
+        onCreditsUpdated={(bal) => setCreditBalance(bal)}
+      />
     </div>
   );
 };

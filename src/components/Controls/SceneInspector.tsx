@@ -28,7 +28,8 @@ import {
   Contrast,
   Droplets,
   Thermometer,
-  PlaySquare
+  PlaySquare,
+  ImageIcon
 } from 'lucide-react';
 
 export const SceneInspector: React.FC = () => {
@@ -310,8 +311,40 @@ export const SceneInspector: React.FC = () => {
         {inspectorTab === 'visual' && selectedScene && (
           <div className="space-y-4">
             <div className="flex items-center justify-between pb-2 border-b border-[#26262e]">
-              <span className="font-semibold text-slate-100 text-xs">Scene #{selectedScene.order + 1} Prompt</span>
+              <span className="font-semibold text-slate-100 text-xs">Scene #{selectedScene.order + 1} Visual</span>
               <span className="text-[10px] text-slate-400 font-mono">{selectedScene.durationInSeconds.toFixed(1)}s</span>
+            </div>
+
+            {/* Visual Media Preview Card */}
+            <div className="relative w-full aspect-video rounded-xl overflow-hidden border border-[#2e2a3e] bg-black/60 shadow-lg group">
+              {selectedScene.localImagePath || selectedScene.imageUrl || selectedScene.localVideoPath || selectedScene.videoUrl ? (
+                selectedScene.mediaType === 'video' || selectedScene.localVideoPath ? (
+                  <video
+                    src={selectedScene.videoUrl || (selectedScene.localVideoPath ? `media://${selectedScene.localVideoPath.replace(/\\/g, '/')}` : '')}
+                    muted
+                    controls
+                    playsInline
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <img
+                    src={selectedScene.imageUrl || (selectedScene.localImagePath ? `media://${selectedScene.localImagePath.replace(/\\/g, '/')}` : '')}
+                    alt={selectedScene.prompt}
+                    className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                  />
+                )
+              ) : (
+                <div className="w-full h-full flex flex-col items-center justify-center text-slate-500 bg-gradient-to-br from-[#12121a] to-[#1a1728] p-4 text-center">
+                  <Film className="w-8 h-8 text-slate-600 mb-1" />
+                  <span className="text-[11px] font-semibold text-slate-400">No Visual Generated Yet</span>
+                  <span className="text-[9px] text-slate-500 mt-0.5">Click generate below or connect Google Flow</span>
+                </div>
+              )}
+              {/* Overlay Badge */}
+              <div className="absolute top-2 left-2 px-2 py-0.5 rounded bg-black/80 backdrop-blur-xs text-[10px] font-mono text-cyan-300 font-bold border border-white/10 flex items-center gap-1.5 shadow-sm pointer-events-none">
+                <span className={`w-1.5 h-1.5 rounded-full ${selectedScene.status === 'ready' ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]' : selectedScene.status === 'generating' ? 'bg-amber-400 animate-ping' : 'bg-slate-400'}`} />
+                <span>Scene #{selectedScene.order + 1} • {selectedScene.status.toUpperCase()}</span>
+              </div>
             </div>
 
             {/* Prompt Text Editor */}
